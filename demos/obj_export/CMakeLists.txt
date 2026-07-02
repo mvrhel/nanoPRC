@@ -13,5 +13,5 @@ target_include_directories(nano_prc_obj_export PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 
 # Only link the math library if we aren't targeting Windows
 if(NOT WIN32)
-    target_link_libraries(nano_prc_stl_export PRIVATE m)
+    target_link_libraries(nano_prc_obj_export PRIVATE m)
 endif()
