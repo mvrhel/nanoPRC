@@ -56,6 +56,7 @@ nanoPRC includes several source-code demonstrations that showcase how to use the
 | demos/viewer | A basic 3D interactive viewer to display PRC models |
 | demos/json_export | A utility to create a JSON dump from a PRC model |
 | demos/stl_export | A utility to create binary STL mesh files from a PRC model |
+| demos/obj_export | A utility to create OBJ files from a PRC model with MTL and textures |
 
 ### Deterministic Unzipped-Section Fuzzing
 
