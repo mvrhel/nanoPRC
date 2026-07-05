@@ -280,8 +280,10 @@ int main(int argc, char *argv[])
 
     char mtl_full_path[512];
     char mtl_local_filename[512];
-    sprintf(mtl_full_path, "%s.mtl", stem_path);
-    sprintf(mtl_local_filename, "%s.mtl", stem_filename);
+    snprintf(mtl_full_path, sizeof(mtl_full_path), "%.*s.mtl",
+             (int)(sizeof(mtl_full_path) - 5), stem_path);
+    snprintf(mtl_local_filename, sizeof(mtl_local_filename), "%.*s.mtl",
+             (int)(sizeof(mtl_local_filename) - 5), stem_filename);
 
     ctx = prc_api_new_context(NULL);
     if (!ctx)
@@ -392,7 +394,7 @@ int main(int argc, char *argv[])
 
             char dynamic_mat_id[128];
             char texture_local_name[256] = {0};
-            sprintf(dynamic_mat_id, "mat_tess_%u_face_%zu", i, f);
+            snprintf(dynamic_mat_id, sizeof(dynamic_mat_id), "mat_tess_%u_face_%zu", i, f);
 
             /* Texture Optimization: Deduplicate embedded raster streams */
             if (face->is_texture && face->texture.data && face->texture.width > 0 && face->texture.height > 0)
@@ -410,7 +412,9 @@ int main(int argc, char *argv[])
                         if (memcmp(tracked_textures[t].data, face->texture.data, current_texture_bytes) == 0)
                         {
                             /* Match found! Share the file link and skip the redundant write sequence */
-                            strcpy(texture_local_name, tracked_textures[t].filename);
+                                strncpy(texture_local_name, tracked_textures[t].filename,
+                                    sizeof(texture_local_name) - 1);
+                                texture_local_name[sizeof(texture_local_name) - 1] = '\0';
                             found_duplicate = 1;
                             break;
                         }
@@ -420,8 +424,13 @@ int main(int argc, char *argv[])
                 if (!found_duplicate)
                 {
                     char texture_full_path[512];
-                    sprintf(texture_full_path, "%s_tex_%u_%zu.png", stem_path, i, f);
-                    sprintf(texture_local_name, "%s_tex_%u_%zu.png", stem_filename, i, f);
+                    /* Reserve worst-case tail: "_tex_" + uint32 + '_' + size_t + ".png" + NUL = 41 bytes. */
+                    snprintf(texture_full_path, sizeof(texture_full_path),
+                             "%.*s_tex_%u_%zu.png",
+                             (int)(sizeof(texture_full_path) - 41), stem_path, i, f);
+                    snprintf(texture_local_name, sizeof(texture_local_name),
+                             "%.*s_tex_%u_%zu.png",
+                             (int)(sizeof(texture_local_name) - 41), stem_filename, i, f);
 
                     int write_ok = stbi_write_png(texture_full_path,
                                                  (int)face->texture.width,

@@ -4,6 +4,8 @@
 #include <vector>
 #include <unordered_map>
 #include <cstddef> /* For offsetof macro */
+#include <inttypes.h>
+#include <ctime>
 #include <glad/glad.h>
 #include "mesh.h"
 #include "roboto_font.h"
@@ -657,6 +659,139 @@ void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *te
 
     if (combined_vertices.size() > 0 && indices.size() > 0)
         uploadGPU(combined_vertices.size(), combined_vertices.data(), indices);
+}
+
+static std::string formatAttributeValue(const prc_api_attribute_entry &entry)
+{
+    char buffer[64];
+
+    auto formatEpochUtc = [](uint64_t epochSeconds, char *out, size_t outSize) -> bool
+    {
+        time_t seconds = static_cast<time_t>(epochSeconds);
+        struct tm tm_utc;
+
+#if defined(_WIN32)
+        if (gmtime_s(&tm_utc, &seconds) != 0)
+            return false;
+#else
+        if (gmtime_r(&seconds, &tm_utc) == NULL)
+            return false;
+#endif
+
+        return strftime(out, outSize, "%Y-%m-%d %H:%M:%S UTC", &tm_utc) > 0;
+    };
+
+    switch (entry.type)
+    {
+    case PRC_API_INTEGER_ATTRIBUTE:
+        snprintf(buffer, sizeof(buffer), "%d", entry.value_integer);
+        return buffer;
+    case PRC_API_DOUBLE_ATTRIBUTE:
+        snprintf(buffer, sizeof(buffer), "%.17g", entry.value_double);
+        return buffer;
+    case PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE:
+    {
+        char time_buffer[64];
+        if (formatEpochUtc((uint64_t)entry.value_secs_integer, time_buffer, sizeof(time_buffer)))
+        {
+            return std::string(time_buffer) + " (" + std::to_string(entry.value_secs_integer) + ")";
+        }
+
+        snprintf(buffer, sizeof(buffer), "%" PRIu32, entry.value_secs_integer);
+        return buffer;
+    }
+    case PRC_API_STRING_ATTRIBUTE:
+        return entry.value_string ? entry.value_string : "";
+    case PRC_API_VALUE_TIME_ATTRIBUTE:
+    {
+        char time_buffer[64];
+        if (formatEpochUtc(entry.value_time, time_buffer, sizeof(time_buffer)))
+        {
+            return std::string(time_buffer) + " (" + std::to_string(entry.value_time) + ")";
+        }
+
+        snprintf(buffer, sizeof(buffer), "%" PRIu64, entry.value_time);
+        return buffer;
+    }
+    default:
+        return "<unsupported>";
+    }
+}
+
+static std::string composeAttributeDisplayTitle(const std::string &baseTitle,
+    const std::string &entryTitle, size_t entryIndex, size_t numEntries)
+{
+    if (numEntries <= 1)
+    {
+        if (!baseTitle.empty())
+            return baseTitle;
+        if (!entryTitle.empty())
+            return entryTitle;
+        return "<attribute>";
+    }
+
+    if (!baseTitle.empty() && !entryTitle.empty())
+        return baseTitle + " / " + entryTitle;
+
+    if (!baseTitle.empty())
+    {
+        char indexBuffer[32];
+        snprintf(indexBuffer, sizeof(indexBuffer), "%s / #%zu", baseTitle.c_str(), entryIndex + 1);
+        return indexBuffer;
+    }
+
+    if (!entryTitle.empty())
+        return entryTitle;
+
+    char fallback[32];
+    snprintf(fallback, sizeof(fallback), "#%zu", entryIndex + 1);
+    return fallback;
+}
+
+void Product::setAttributes(prc_api_attributes *attributes)
+{
+    if (attributes == nullptr)
+    {
+        _numAttributes = 0;
+        _attributesTitle.clear();
+        _attributeBases.clear();
+        _attributes.clear();
+        return;
+    }
+
+    _attributesTitle.clear();
+    _attributeBases.clear();
+    _attributeBases.reserve(attributes->num_base_attributes);
+
+    _attributes.clear();
+
+    for (size_t baseIndex = 0; baseIndex < attributes->num_base_attributes; ++baseIndex)
+    {
+        const prc_api_attribute_base &baseAttribute = attributes->base_attributes[baseIndex];
+
+        Product::AttributeBase displayBase;
+        displayBase.title = baseAttribute.attribute_base_title ?
+            baseAttribute.attribute_base_title : "";
+        displayBase.entries.reserve(baseAttribute.num_attributes);
+
+        for (size_t entryIndex = 0; entryIndex < baseAttribute.num_attributes; ++entryIndex)
+        {
+            const prc_api_attribute_entry &entry = baseAttribute.attributes[entryIndex];
+            const std::string entryTitle = entry.entry_title ? entry.entry_title : "";
+
+            Product::AttributeRow row;
+            row.title = composeAttributeDisplayTitle(displayBase.title, entryTitle,
+                entryIndex, baseAttribute.num_attributes);
+            row.value = formatAttributeValue(entry);
+
+            displayBase.entries.push_back(row);
+            _attributes.push_back(std::move(row));
+        }
+
+        _attributeBases.push_back(std::move(displayBase));
+    }
+
+    _numAttributes = static_cast<uint32_t>(_attributes.size());
 }
 
 Product::Product() :

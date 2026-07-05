@@ -87,6 +87,7 @@ static float _renderScale = 1.0f;
 static Scene _scene;
 static int _mouse_up_x, _mouse_up_y; /* Needed to maintain mouse pos for trackball */
 static Camera _camera;
+static Product *_selectedProduct = nullptr;
 
 static void run(Config &config, SDL_Window *window, const char *file, bool headless = false, const char *output_file = NULL, bool memoryLeakCheck = false);
 static bool debugMenu(float time, float deltaTime);
@@ -955,17 +956,120 @@ static void EnableProductAndParents(Product &prod)
     }
 }
 
+static const char *ProductLabel(const Product &prod)
+{
+    return prod.name() ? prod.name() : "<unnamed product>";
+}
+
+static void DrawSelectedProductAttributesWindow()
+{
+    if (_selectedProduct == nullptr)
+        return;
+
+    if (ImGui::Begin("Product Attributes"))
+    {
+        ImGui::LabelText("Product", "%s", ProductLabel(*_selectedProduct));
+
+        const char *attributesTitle = _selectedProduct->attributesTitle();
+        if (attributesTitle && attributesTitle[0] != '\0')
+            ImGui::LabelText("Group", "%s", attributesTitle);
+
+        if (!_selectedProduct->hasAttributes())
+        {
+            ImGui::TextDisabled("No attributes on selected product.");
+        }
+        else
+        {
+            const std::vector<Product::AttributeBase> &bases = _selectedProduct->attributeBases();
+
+            if (ImGui::BeginTable("SelectedProductAttributes_Single", 2,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("Property");
+                ImGui::TableSetupColumn("Value");
+                ImGui::TableHeadersRow();
+
+                for (size_t baseIndex = 0; baseIndex < bases.size(); ++baseIndex)
+                {
+                    const Product::AttributeBase &base = bases[baseIndex];
+                    if (base.entries.size() != 1)
+                        continue;
+
+                    const Product::AttributeRow &row = base.entries[0];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(row.title.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(row.value.c_str());
+                }
+
+                ImGui::EndTable();
+            }
+
+            for (size_t baseIndex = 0; baseIndex < bases.size(); ++baseIndex)
+            {
+                const Product::AttributeBase &base = bases[baseIndex];
+                if (base.entries.size() <= 1)
+                    continue;
+
+                char headerLabel[128];
+                if (!base.title.empty())
+                    snprintf(headerLabel, sizeof(headerLabel), "%s", base.title.c_str());
+                else
+                    snprintf(headerLabel, sizeof(headerLabel), "Attribute Group #%zu", baseIndex + 1);
+
+                if (!ImGui::CollapsingHeader(headerLabel, ImGuiTreeNodeFlags_DefaultOpen))
+                    continue;
+
+                char tableId[64];
+                snprintf(tableId, sizeof(tableId), "SelectedProductAttributes_%zu", baseIndex);
+
+                if (ImGui::BeginTable(tableId, 2,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                    ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
+                {
+                    ImGui::TableSetupColumn("Property");
+                    ImGui::TableSetupColumn("Value");
+                    ImGui::TableHeadersRow();
+
+                    for (size_t entryIndex = 0; entryIndex < base.entries.size(); ++entryIndex)
+                    {
+                        const Product::AttributeRow &row = base.entries[entryIndex];
+                        ImGui::TableNextRow();
+
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(row.title.c_str());
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(row.value.c_str());
+                    }
+
+                    ImGui::EndTable();
+                }
+            }
+        }
+    }
+    ImGui::End();
+}
+
 static void DrawTree(Product &prod)
 {
     ImGui::PushID(&prod);
     ImGuiTreeNodeFlags flag = 0; // Removed ImGuiTreeNodeFlags_DefaultOpen to collapse by default
 
+    if (&prod == _selectedProduct)
+        flag |= ImGuiTreeNodeFlags_Selected;
+
     if (prod.numChildren() == 0)
     {
         flag |= ImGuiTreeNodeFlags_Leaf;
     }
-    if (ImGui::TreeNodeEx(prod.name(), flag))
+    if (ImGui::TreeNodeEx(ProductLabel(prod), flag))
     {
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+            _selectedProduct = &prod;
+
         ImGui::SameLine(0, -2);
         ImGui::PushID(prod.enabledPtr());
         ImGui::Checkbox("", prod.enabledPtr());
@@ -1004,6 +1108,9 @@ static void DrawTree(Product &prod)
     }
     else
     {
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+            _selectedProduct = &prod;
+
         // Tree node is collapsed, but we still want the context menu on the name
         ImGui::SameLine(0, -2);
         ImGui::PushID(prod.enabledPtr());
@@ -1245,6 +1352,8 @@ static bool debugMenu(float time, float deltaTime)
     mouse_used = mouse_down && isMouseOverWindow;
 
     ImGui::End();
+
+    DrawSelectedProductAttributesWindow();
 
     /* Set scene properties */
 

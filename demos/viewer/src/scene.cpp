@@ -77,7 +77,6 @@ static void setCompanionVisibilityRecursive(Product *product, bool enabled)
     }
 }
 
-
 void Scene::setCameraInitialPosition(Camera *camera)
 {
     Vector3 max = Vector3(_bbox_max[0], _bbox_max[1], _bbox_max[2]);
@@ -379,6 +378,10 @@ void Scene::addRepItems(prc_context *ctx, prc_api_data data, prc_api_part *api_p
         app_child->setName(api_part->rep_items[k].name);
         app_child->setModel(Matrix4(1.0f));
         app_child->setBoundingBox(Vector4(0.0f), Vector4(0.0f));
+        if (api_part->rep_items[k].attributes.num_base_attributes > 0)
+        {
+            app_child->setAttributes(&api_part->rep_items[k].attributes);
+        }
 
         /* Get the tessellation for this model (part) */
         tess = prc_api_get_ri_tessellation(ctx, api_part, k);
@@ -451,6 +454,11 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
     {
         app_product->setModel(Matrix4(1.0f));
     }
+
+    if (api_product->attributes.num_base_attributes > 0)
+    {
+        app_product->setAttributes(&api_product->attributes);
+    }
     *product_count += 1;
 
     /* Special yoga pose if we have a part */
@@ -469,6 +477,11 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
             app_child->setParent(app_product);
             app_child->setName(api_product->part->name);
             app_child->setModel(Matrix4(1.0f));
+
+            if (api_product->part->attributes.num_base_attributes > 0)
+            {
+                app_child->setAttributes(&api_product->part->attributes);
+            }
             *product_count += 1;
 
             /* Add the RI items as children of the part child Product (app_child) */

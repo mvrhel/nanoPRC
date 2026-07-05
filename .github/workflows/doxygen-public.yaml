@@ -28,7 +28,7 @@ jobs:
 
       - name: Upload public warnings log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: doxygen-public-warnings
           path: docs/doxygen/warnings-public.log

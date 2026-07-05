@@ -18,6 +18,7 @@
 #define _PRODUCT_H_
 
 #include <string.h>
+#include <string>
 #include <vector>
 #include "shader.h"
 #include "text.h"
@@ -52,6 +53,18 @@ static const Material kMaterial = {
 class Product final
 {
 public:
+    struct AttributeRow
+    {
+        std::string title;
+        std::string value;
+    };
+
+    struct AttributeBase
+    {
+        std::string title;
+        std::vector<AttributeRow> entries;
+    };
+
     void render(MeshShader *shader) const;
     void update();
     void invalidate();
@@ -78,6 +91,11 @@ public:
 
     void attach(prc_context *ctx, prc_api_data data, const prc_api_tess *tess, Graphics2D &textRenderer);
     void attachTextContent(prc_context *ctx, prc_api_data data, const prc_api_tess *tess, Graphics2D &textRenderer);
+    void setAttributes(prc_api_attributes *attributes);
+    const std::vector<AttributeRow> &attributes() const { return _attributes; }
+    const std::vector<AttributeBase> &attributeBases() const { return _attributeBases; }
+    const char *attributesTitle() const { return _attributesTitle.empty() ? nullptr : _attributesTitle.c_str(); }
+    bool hasAttributes() const { return !_attributes.empty(); }
 
     constexpr void setModel(const Matrix4 &m)
     {
@@ -134,6 +152,11 @@ private:
 
     Vector4 _bbox_min;
     Vector4 _bbox_max;
+
+    uint32_t _numAttributes;
+    std::string _attributesTitle;
+    std::vector<AttributeBase> _attributeBases;
+    std::vector<AttributeRow> _attributes;
 
     bool _hasTransparency;  // Flag indicating if this product has transparent geometry
 

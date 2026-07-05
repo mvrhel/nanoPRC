@@ -70,6 +70,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 /* ----------------------------------------------------------------------
  * Small utilities
@@ -117,6 +118,124 @@ static const char *node_type_name(prc_api_node_type_t type)
     case PRC_API_NODE_UNKNOWN:
     default:                             return "unknown";
     }
+}
+
+/** Human-readable name for an attribute value type. */
+static const char *attribute_type_name(prc_api_attribute_type_t type)
+{
+    switch (type)
+    {
+    case PRC_API_INTEGER_ATTRIBUTE:            return "integer";
+    case PRC_API_DOUBLE_ATTRIBUTE:             return "double";
+    case PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE: return "time32";
+    case PRC_API_STRING_ATTRIBUTE:             return "string";
+    case PRC_API_VALUE_TIME_ATTRIBUTE:         return "time64";
+    default:                                   return "unknown";
+    }
+}
+
+/** Format epoch seconds as UTC text. Returns 1 on success, 0 on failure. */
+static int format_epoch_utc(uint64_t seconds_since_epoch, char *out, size_t out_size)
+{
+    time_t epoch_seconds = (time_t)seconds_since_epoch;
+    struct tm utc_tm;
+
+#if defined(_WIN32)
+    if (gmtime_s(&utc_tm, &epoch_seconds) != 0)
+        return 0;
+#else
+    if (gmtime_r(&epoch_seconds, &utc_tm) == NULL)
+        return 0;
+#endif
+
+    return strftime(out, out_size, "%Y-%m-%d %H:%M:%S UTC", &utc_tm) > 0;
+}
+
+/** Write one attribute entry (entry title, type, and typed value). */
+static void write_attribute_entry(json_writer *w, const prc_api_attribute_entry *entry)
+{
+    json_writer_begin_object(w);
+
+    if (entry->entry_title != NULL)
+        json_writer_kv_string(w, "entry_title", entry->entry_title);
+
+    json_writer_kv_string(w, "type", attribute_type_name(entry->type));
+
+    switch (entry->type)
+    {
+    case PRC_API_INTEGER_ATTRIBUTE:
+        json_writer_kv_int32(w, "value", entry->value_integer);
+        break;
+    case PRC_API_DOUBLE_ATTRIBUTE:
+        json_writer_kv_double(w, "value", entry->value_double);
+        break;
+    case PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE:
+    {
+        char utc_text[64];
+        json_writer_kv_uint32(w, "value", entry->value_secs_integer);
+        if (format_epoch_utc((uint64_t)entry->value_secs_integer, utc_text, sizeof(utc_text)))
+            json_writer_kv_string(w, "value_utc", utc_text);
+        break;
+    }
+    case PRC_API_STRING_ATTRIBUTE:
+        if (entry->value_string != NULL)
+            json_writer_kv_string(w, "value", entry->value_string);
+        else
+        {
+            json_writer_key(w, "value");
+            json_writer_null(w);
+        }
+        break;
+    case PRC_API_VALUE_TIME_ATTRIBUTE:
+    {
+        char utc_text[64];
+        json_writer_kv_uint64(w, "value", entry->value_time);
+        if (format_epoch_utc(entry->value_time, utc_text, sizeof(utc_text)))
+            json_writer_kv_string(w, "value_utc", utc_text);
+        break;
+    }
+    default:
+        json_writer_key(w, "value");
+        json_writer_null(w);
+        break;
+    }
+
+    json_writer_end_object(w);
+}
+
+/** Write one base attribute (base title and its entries array). */
+static void write_attribute_base(json_writer *w, const prc_api_attribute_base *base)
+{
+    size_t i;
+
+    json_writer_begin_object(w);
+
+    if (base->attribute_base_title != NULL)
+        json_writer_kv_string(w, "attribute_base_title", base->attribute_base_title);
+
+    json_writer_kv_size(w, "num_attributes", base->num_attributes);
+    json_writer_begin_array_key(w, "attributes");
+    for (i = 0; i < base->num_attributes; i++)
+        write_attribute_entry(w, &base->attributes[i]);
+    json_writer_end_array(w);
+
+    json_writer_end_object(w);
+}
+
+/** Write full nested attributes container for a product or part node. */
+static void write_attributes(json_writer *w, const prc_api_attributes *attributes)
+{
+    uint32_t i;
+
+    json_writer_begin_object_key(w, "attributes");
+    json_writer_kv_uint32(w, "num_base_attributes", attributes->num_base_attributes);
+
+    json_writer_begin_array_key(w, "base_attributes");
+    for (i = 0; i < attributes->num_base_attributes; i++)
+        write_attribute_base(w, &attributes->base_attributes[i]);
+    json_writer_end_array(w);
+
+    json_writer_end_object(w);
 }
 
 /* ----------------------------------------------------------------------
@@ -657,6 +776,11 @@ static void write_part_info(json_writer *w, const prc_api_part *part)
     json_writer_kv_size(w, "num_rep_items", part->num_rep_items);
     json_writer_kv_bool(w, "has_inherited_style", part->has_inherited_style);
 
+    if (part->attributes.num_base_attributes > 0)
+    {
+        write_attributes(w, &part->attributes);
+    }
+
     json_writer_end_object(w);
 }
 
@@ -697,6 +821,11 @@ static void write_node_open(json_writer *w, const prc_api_product *node)
     if (node->num_markups > 0)
     {
         json_writer_kv_uint32(w, "num_markups", node->num_markups);
+    }
+
+    if (node->attributes.num_base_attributes > 0)
+    {
+        write_attributes(w, &node->attributes);
     }
 }
 
