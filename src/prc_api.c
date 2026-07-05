@@ -136,6 +136,27 @@ prc_api_open_contents(prc_context *ctx, const char *infile)
     return prc_open_contents(ctx, infile);
 }
 
+static void
+prc_api_helper_release_attributes(prc_context *ctx, prc_api_attribute *attributes, uint32_t num_attributes)
+{
+    uint32_t k;
+
+    if (attributes == NULL || num_attributes == 0)
+        return;
+
+    for (k = 0; k < num_attributes; k++)
+    {
+        if (attributes[k].title != NULL)
+            prc_free(ctx, attributes[k].title);
+        if (attributes[k].type == PRC_API_STRING_ATTRIBUTE)
+        {
+            if (attributes[k].value_string != NULL)
+                prc_free(ctx, attributes[k].value_string);
+        }
+    }
+    prc_free(ctx, attributes);
+}
+
 /* Here we release the API visible data that was created. Not the parsed objects. */
 PRC_EXPORT void
 prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_in,
@@ -179,6 +200,16 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
             {
                 if (reserve->products[k].name != NULL)
                     prc_free(ctx, reserve->products[k].name);
+                if (reserve->products[k].attribute_title != NULL)
+                    prc_free(ctx, reserve->products[k].attribute_title);
+                if (reserve->products[k].num_attributes > 0 &&
+                    reserve->products[k].attributes != NULL)
+                {
+                    prc_api_helper_release_attributes(ctx,
+                        reserve->products[k].attributes,
+                        reserve->products[k].num_attributes);
+                    reserve->products[k].attributes = NULL;
+                }
             }
             if (reserve->products != NULL)
                 prc_free(ctx, reserve->products);
@@ -2344,6 +2375,122 @@ prc_api_prep_model_tree(prc_context *ctx, prc_api_data data, uint32_t *num_parts
     return 0;
 }
 
+/* Get the attributes and copy them into the api product type which will be
+   in the model tree. */
+static int
+prc_api_helper_get_attributes(prc_context *ctx, prc_api_data data,
+    prc_api_product *api_product, prc_asm_product_occurrence *prc_product)
+{
+    uint32_t k;
+
+    if (prc_product->base.base.attribute_data.attribute_count > 0)
+    {
+        /* Deal with the title */
+        if (prc_product->base.base.attribute_data.attributes->attribute_title.string_title.string != NULL)
+        {
+            api_product->attribute_title = (char *)prc_calloc(ctx,
+                strlen((const char *)prc_product->base.base.attribute_data.attributes->attribute_title.string_title.string) + 1, sizeof(char));
+            if (api_product->attribute_title == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                return PRC_ERROR_MEMORY;
+            }
+            memcpy(api_product->attribute_title, prc_product->base.base.attribute_data.attributes->attribute_title.string_title.string,
+                strlen((const char *)prc_product->base.base.attribute_data.attributes->attribute_title.string_title.string));
+        }
+        else
+        {
+            /* It may be one of the integer type titles */
+            uint32_t title_int = prc_product->base.base.attribute_data.attributes->attribute_title.integer_title;
+            if (title_int >= prc_misc_attribute_TITLE && title_int < prc_misc_attribute_MAX)
+            {
+                api_product->attribute_title = (char *)prc_calloc(ctx,
+                    strlen(prc_misc_attribute_NAMES[title_int]) + 1, sizeof(char));
+                if (api_product->attribute_title == NULL)
+                {
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                    return PRC_ERROR_MEMORY;
+                }
+                memcpy(api_product->attribute_title, prc_misc_attribute_NAMES[title_int],
+                    strlen(prc_misc_attribute_NAMES[title_int]) + 1);
+            }
+            else
+                api_product->attribute_title = NULL;
+        }
+
+        api_product->num_attributes =
+            prc_product->base.base.attribute_data.attribute_count;
+        api_product->attributes = (prc_api_attribute *)prc_calloc(ctx,
+            api_product->num_attributes, sizeof(prc_api_attribute));
+        if (api_product->attributes == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+            return PRC_ERROR_MEMORY;
+        }
+
+        for (k = 0; k < api_product->num_attributes; k++)
+        {
+            prc_api_attribute *api_attr = &api_product->attributes[k];
+            prc_attribute_key_value *prc_attr = prc_product->base.base.attribute_data.attributes[k].attributes;
+
+            if (prc_attr->title.string_title.string != NULL)
+            {
+                api_attr->title = (char *)prc_calloc(ctx,
+                    strlen((const char *)prc_attr->title.string_title.string) + 1, sizeof(char));
+                if (api_attr->title == NULL)
+                {
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                    return PRC_ERROR_MEMORY;
+                }
+                memcpy(api_attr->title, prc_attr->title.string_title.string,
+                    strlen((const char *)prc_attr->title.string_title.string));
+            }
+            else
+            {
+                api_attr->title = NULL;
+            }
+
+            switch (prc_attr->type)
+            {
+                case PRC_ATTRIBUTE_TYPE_INT:
+                    api_attr->value_integer = prc_attr->value_integer;
+                    break;
+                case PRC_ATTRIBUTE_TYPE_DOUBLE:
+                    api_attr->value_double = prc_attr->value_double;
+                    break;
+                case PRC_ATTRIBUTE_TYPE_TIME32:
+                    api_attr->value_secs_integer = prc_attr->value_secs_integer;
+                    break;
+                case PRC_ATTRIBUTE_TYPE_CHAR_UTF8:
+                    api_attr->value_string = (char *)prc_calloc(ctx,
+                        strlen((const char *)prc_attr->val_string.string) + 1, sizeof(char));
+                    if (api_attr->value_string == NULL)
+                    {
+                        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                        return PRC_ERROR_MEMORY;
+                    }
+                    memcpy(api_attr->value_string, prc_attr->val_string.string,
+                        strlen((const char *)prc_attr->val_string.string));
+                    break;
+
+                case PRC_ATTRIBUTE_TYPE_TIME64:
+                    api_attr->value_time = ((uint64_t) prc_attr->value_time_msp) << 32 | prc_attr->value_time_lsp;
+                    break;
+
+                default:
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Unknown attribute type in prc_api_helper _get_attributes\n");
+                    return PRC_ERROR_INTERNAL;
+            }
+        }
+    }
+    else
+    {
+        api_product->num_attributes = 0;
+        api_product->attributes = NULL;
+    }
+    return 0;
+}
+
 static int
 prc_api_helper_init_model_node(prc_context *ctx, prc_api_product *product)
 {
@@ -2667,6 +2814,13 @@ prc_api_helper_copy_product_details(prc_context *ctx, prc_api_data data,
     product_tree->markup = NULL;
     product_tree->file_index = file_index;
     product_tree->reserved = NULL;
+
+    code = prc_api_helper_get_attributes(ctx, data, product_tree, product);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Failed in prc_api_helper_copy_product_details\n");
+        return code;
+    }
 
     /* Process the entity refs at this time, blowing away the current information
        that a part or RI may have in terms of style and location */

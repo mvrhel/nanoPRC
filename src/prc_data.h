@@ -33,13 +33,17 @@
 #define READ_TAG 1
 #define DONT_READ_TAG 0
 
-#define prc_misc_attribute_NAMES\
-  "", "", "Title", "Subject", "Author", "Keywords",\
-  "Comments", "Template", "Last Saved By", "Revision Number",\
-  "Total Editing Time", "Last Printed", "Create Time/Date",\
-   "Last saved Time/Date", "Number of Pages", "Number of Words",\
-   "Number of Characters", "Thumbnail", "Name of Creating Application",\
+#define prc_misc_attribute_MAX 20
+#define prc_misc_attribute_TITLE 2
+
+static const char *const prc_misc_attribute_NAMES[prc_misc_attribute_MAX] = {
+  "", "", "Title", "Subject", "Author", "Keywords",
+  "Comments", "Template", "Last Saved By", "Revision Number",
+  "Total Editing Time", "Last Printed", "Create Time/Date",
+   "Last saved Time/Date", "Number of Pages", "Number of Words",
+   "Number of Characters", "Thumbnail", "Name of Creating Application",
    "Security"
+};
 
 /* Table 329 Schema tokens */
 typedef enum {
@@ -1175,9 +1179,11 @@ struct prc_attribute_key_value_s
         double value_double;
         prc_unsigned_int value_secs_integer;
         prc_string val_string;
-        prc_unsigned_int value_time_msp;
-        prc_unsigned_int value_time_lsp;
     };
+
+    /* These two occur in the same type */
+    prc_unsigned_int value_time_msp;
+    prc_unsigned_int value_time_lsp;
 };
 
 /* Table 16 */

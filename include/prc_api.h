@@ -61,6 +61,15 @@ typedef enum
 
 typedef enum
 {
+    PRC_API_INTEGER_ATTRIBUTE = 1,
+    PRC_API_DOUBLE_ATTRIBUTE,
+    PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE,
+    PRC_API_STRING_ATTRIBUTE,
+    PRC_API_VALUE_TIME_ATTRIBUTE
+} prc_api_attribute_type_t;
+
+typedef enum
+{
     PRC_API_NODE_UNKNOWN = 0,
     PRC_API_NODE_PRODUCT,
     PRC_API_NODE_PART,
@@ -255,6 +264,22 @@ typedef struct prc_api_markup_s
     uint32_t file_index;
 } prc_api_markup;
 
+typedef struct prc_api_attribute_s prc_api_attribute;
+struct prc_api_attribute_s
+{
+    char *title;
+    prc_api_attribute_type_t type;
+
+    union
+    {
+        int value_integer;
+        double value_double;
+        uint32_t value_secs_integer;
+        char *value_string;
+        uint64_t value_time;
+    };
+};
+
 typedef struct prc_api_product_s prc_api_product;
 struct prc_api_product_s
 {
@@ -269,6 +294,9 @@ struct prc_api_product_s
     uint32_t num_markups;
     prc_api_markup *markup;
     int32_t file_index;
+    unsigned char *attribute_title;
+    uint32_t num_attributes;
+    prc_api_attribute *attributes;
     void *reserved;
 };
 
