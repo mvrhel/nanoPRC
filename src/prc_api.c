@@ -2449,74 +2449,82 @@ prc_api_helper_get_attributes(prc_context *ctx, prc_api_attributes *api_attribut
             }
 
             /* Now all the sub attributes of this one. This is almost always 1 */
-            api_base_attr->num_attributes = attribute_data->number_attributes;
-            api_base_attr->attributes = (prc_api_attribute_entry *)prc_calloc(ctx,
-                attribute_data->number_attributes, sizeof(prc_api_attribute_entry));
-            if (api_base_attr->attributes == NULL)
+            if (attribute_data->number_attributes > 0)
             {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
-                return PRC_ERROR_MEMORY;
+                api_base_attr->num_attributes = attribute_data->number_attributes;
+                api_base_attr->attributes = (prc_api_attribute_entry *)prc_calloc(ctx,
+                    attribute_data->number_attributes, sizeof(prc_api_attribute_entry));
+                if (api_base_attr->attributes == NULL)
+                {
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                    return PRC_ERROR_MEMORY;
+                }
+
+                /* Now step through all the sub attributes */
+                for (k = 0; k < attribute_data->number_attributes; k++)
+                {
+                    prc_api_attribute_entry *api_attr = &api_base_attr->attributes[k];
+                    prc_attribute_key_value *prc_attr = &attribute_data->attributes[k];
+
+                    if (prc_attr->title.string_title.string != NULL)
+                    {
+                        api_attr->entry_title = (char *)prc_calloc(ctx,
+                            strlen((const char *)prc_attr->title.string_title.string) + 1, sizeof(char));
+                        if (api_attr->entry_title == NULL)
+                        {
+                            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                            return PRC_ERROR_MEMORY;
+                        }
+                        memcpy(api_attr->entry_title, prc_attr->title.string_title.string,
+                            strlen((const char *)prc_attr->title.string_title.string));
+                    }
+                    else
+                    {
+                        api_attr->entry_title = NULL;
+                    }
+
+                    switch (prc_attr->type)
+                    {
+                    case PRC_ATTRIBUTE_TYPE_INT:
+                        api_attr->type = PRC_API_INTEGER_ATTRIBUTE;
+                        api_attr->value_integer = prc_attr->value_integer;
+                        break;
+                    case PRC_ATTRIBUTE_TYPE_DOUBLE:
+                        api_attr->type = PRC_API_DOUBLE_ATTRIBUTE;
+                        api_attr->value_double = prc_attr->value_double;
+                        break;
+                    case PRC_ATTRIBUTE_TYPE_TIME32:
+                        api_attr->type = PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE;
+                        api_attr->value_secs_integer = prc_attr->value_secs_integer;
+                        break;
+                    case PRC_ATTRIBUTE_TYPE_CHAR_UTF8:
+                        api_attr->type = PRC_API_STRING_ATTRIBUTE;
+                        api_attr->value_string = (char *)prc_calloc(ctx,
+                            strlen((const char *)prc_attr->val_string.string) + 1, sizeof(char));
+                        if (api_attr->value_string == NULL)
+                        {
+                            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
+                            return PRC_ERROR_MEMORY;
+                        }
+                        memcpy(api_attr->value_string, prc_attr->val_string.string,
+                            strlen((const char *)prc_attr->val_string.string));
+                        break;
+
+                    case PRC_ATTRIBUTE_TYPE_TIME64:
+                        api_attr->type = PRC_API_VALUE_TIME_ATTRIBUTE;
+                        api_attr->value_time = ((uint64_t)prc_attr->value_time_msp) << 32 | prc_attr->value_time_lsp;
+                        break;
+
+                    default:
+                        prc_error(ctx, PRC_ERROR_INTERNAL, "Unknown attribute type in prc_api_helper _get_attributes\n");
+                        return PRC_ERROR_INTERNAL;
+                    }
+                }
             }
-
-            /* Now step through all the sub attributes */
-            for (k = 0; k < attribute_data->number_attributes; k++)
+            else
             {
-                prc_api_attribute_entry *api_attr = &api_base_attr->attributes[k];
-                prc_attribute_key_value *prc_attr = &attribute_data->attributes[k];
-
-                if (prc_attr->title.string_title.string != NULL)
-                {
-                    api_attr->entry_title = (char *)prc_calloc(ctx,
-                        strlen((const char *)prc_attr->title.string_title.string) + 1, sizeof(char));
-                    if (api_attr->entry_title == NULL)
-                    {
-                        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
-                        return PRC_ERROR_MEMORY;
-                    }
-                    memcpy(api_attr->entry_title, prc_attr->title.string_title.string,
-                        strlen((const char *)prc_attr->title.string_title.string));
-                }
-                else
-                {
-                    api_attr->entry_title = NULL;
-                }
-
-                switch (prc_attr->type)
-                {
-                case PRC_ATTRIBUTE_TYPE_INT:
-                    api_attr->type = PRC_API_INTEGER_ATTRIBUTE;
-                    api_attr->value_integer = prc_attr->value_integer;
-                    break;
-                case PRC_ATTRIBUTE_TYPE_DOUBLE:
-                    api_attr->type = PRC_API_DOUBLE_ATTRIBUTE;
-                    api_attr->value_double = prc_attr->value_double;
-                    break;
-                case PRC_ATTRIBUTE_TYPE_TIME32:
-                    api_attr->type = PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE;
-                    api_attr->value_secs_integer = prc_attr->value_secs_integer;
-                    break;
-                case PRC_ATTRIBUTE_TYPE_CHAR_UTF8:
-                    api_attr->type = PRC_API_STRING_ATTRIBUTE;
-                    api_attr->value_string = (char *)prc_calloc(ctx,
-                        strlen((const char *)prc_attr->val_string.string) + 1, sizeof(char));
-                    if (api_attr->value_string == NULL)
-                    {
-                        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_helper _get_attributes\n");
-                        return PRC_ERROR_MEMORY;
-                    }
-                    memcpy(api_attr->value_string, prc_attr->val_string.string,
-                        strlen((const char *)prc_attr->val_string.string));
-                    break;
-
-                case PRC_ATTRIBUTE_TYPE_TIME64:
-                    api_attr->type = PRC_API_VALUE_TIME_ATTRIBUTE;
-                    api_attr->value_time = ((uint64_t)prc_attr->value_time_msp) << 32 | prc_attr->value_time_lsp;
-                    break;
-
-                default:
-                    prc_error(ctx, PRC_ERROR_INTERNAL, "Unknown attribute type in prc_api_helper _get_attributes\n");
-                    return PRC_ERROR_INTERNAL;
-                }
+                api_base_attr->num_attributes = 0;
+                api_base_attr->attributes = NULL;
             }
         }
     }
