@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cinttypes>
 #include <cstring>
+#include <limits>
+#include <cmath>
 
 #include <SDL3/SDL.h>
 
@@ -92,6 +94,285 @@ static Product *_selectedProduct = nullptr;
 static void run(Config &config, SDL_Window *window, const char *file, bool headless = false, const char *output_file = NULL, bool memoryLeakCheck = false);
 static bool debugMenu(float time, float deltaTime);
 
+struct PickResult
+{
+    bool valid;
+    Product *product;
+    uint32_t meshIndex;
+    uint32_t triangleIndexInMesh;
+    uint32_t index0;
+    uint32_t index1;
+    uint32_t index2;
+    Vector3 worldPos0;
+    Vector3 worldPos1;
+    Vector3 worldPos2;
+    Vector3 worldN0;
+    Vector3 worldN1;
+    Vector3 worldN2;
+    Vector3 hitPos;
+    Vector3 faceNormal;
+    float dotFaceAvgNormal;
+};
+
+static PickResult g_lastPick = { false };
+
+static bool rayTriangleIntersect(const Vector3 &origin, const Vector3 &dir,
+    const Vector3 &v0, const Vector3 &v1, const Vector3 &v2, float *tOut)
+{
+    const float kEps = 1e-7f;
+    Vector3 edge1 = v1 - v0;
+    Vector3 edge2 = v2 - v0;
+    Vector3 p = cross(dir, edge2);
+    float det = dot(edge1, p);
+
+    if (fabsf(det) < kEps)
+        return false;
+
+    float invDet = 1.0f / det;
+    Vector3 tvec = origin - v0;
+    float u = dot(tvec, p) * invDet;
+    if (u < 0.0f || u > 1.0f)
+        return false;
+
+    Vector3 q = cross(tvec, edge1);
+    float v = dot(dir, q) * invDet;
+    if (v < 0.0f || (u + v) > 1.0f)
+        return false;
+
+    float t = dot(edge2, q) * invDet;
+    if (t <= kEps)
+        return false;
+
+    *tOut = t;
+    return true;
+}
+
+static Vector3 transformPoint(const Matrix4 &m, const Vector3 &p)
+{
+    Vector4 v = m * Vector4(p.x, p.y, p.z, 1.0f);
+    return Vector3(v.x, v.y, v.z);
+}
+
+static Vector3 transformDirection(const Matrix4 &m, const Vector3 &n)
+{
+    Vector4 v = m * Vector4(n.x, n.y, n.z, 0.0f);
+    Vector3 out(v.x, v.y, v.z);
+    float len2 = dot(out, out);
+    if (len2 > 1e-12f)
+        out = normalize(out);
+    return out;
+}
+
+static bool computePickRay(int mouseX, int mouseY, int viewportW, int viewportH,
+    Vector3 *rayOrigin, Vector3 *rayDir)
+{
+    if (viewportW <= 0 || viewportH <= 0)
+        return false;
+
+    float ndcX = (2.0f * (float)mouseX) / (float)viewportW - 1.0f;
+    float ndcY = 1.0f - (2.0f * (float)mouseY) / (float)viewportH;
+
+    Matrix4 invVP = inverse(_camera.projection() * _camera.view());
+    Vector4 nearClip(ndcX, ndcY, -1.0f, 1.0f);
+    Vector4 farClip(ndcX, ndcY, 1.0f, 1.0f);
+    Vector4 nearWorld4 = invVP * nearClip;
+    Vector4 farWorld4 = invVP * farClip;
+
+    if (fabsf(nearWorld4.w) < 1e-8f || fabsf(farWorld4.w) < 1e-8f)
+        return false;
+
+    Vector3 nearWorld(nearWorld4.x / nearWorld4.w,
+        nearWorld4.y / nearWorld4.w,
+        nearWorld4.z / nearWorld4.w);
+    Vector3 farWorld(farWorld4.x / farWorld4.w,
+        farWorld4.y / farWorld4.w,
+        farWorld4.z / farWorld4.w);
+
+    Vector3 dir = farWorld - nearWorld;
+    float len2 = dot(dir, dir);
+    if (len2 <= 1e-12f)
+        return false;
+
+    *rayOrigin = _camera.position();
+    *rayDir = normalize(dir);
+    return true;
+}
+
+static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
+    int viewportH, PickResult *out)
+{
+    Vector3 rayOrigin, rayDir;
+    uint32_t p;
+    float bestT = std::numeric_limits<float>::infinity();
+    PickResult best = { false };
+
+    if (!computePickRay(mouseX, mouseY, viewportW, viewportH, &rayOrigin, &rayDir))
+        return false;
+
+    Product *products = _scene.models();
+    uint32_t numProducts = _scene.mumProducts();
+
+    for (p = 0; p < numProducts; p++)
+    {
+        Product *prod = &products[p];
+        const std::vector<prc_api_vertex> &verts = prod->cpuVertices();
+        const std::vector<unsigned int> &indices = prod->cpuIndices();
+        const MeshSpec *meshes = prod->meshes();
+        uint32_t meshCount = prod->numMeshes();
+        Matrix4 model = prod->localToWorld();
+
+        if (!prod->enabled() || verts.empty() || indices.empty() || meshes == nullptr)
+            continue;
+
+        for (uint32_t m = 0; m < meshCount; m++)
+        {
+            const MeshSpec &mesh = meshes[m];
+            uint32_t start = mesh.offset;
+            uint32_t count = mesh.numIndices;
+
+            if (start >= indices.size())
+                continue;
+
+            if ((start + count) > indices.size())
+                count = (uint32_t)indices.size() - start;
+
+            auto testTriangle = [&](uint32_t ia, uint32_t ib, uint32_t ic,
+                                    uint32_t triIndexInMesh) {
+                if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size())
+                    return;
+
+                Vector3 p0 = transformPoint(model, Vector3(
+                    verts[ia].position[0], verts[ia].position[1], verts[ia].position[2]));
+                Vector3 p1 = transformPoint(model, Vector3(
+                    verts[ib].position[0], verts[ib].position[1], verts[ib].position[2]));
+                Vector3 p2 = transformPoint(model, Vector3(
+                    verts[ic].position[0], verts[ic].position[1], verts[ic].position[2]));
+
+                float t;
+                if (!rayTriangleIntersect(rayOrigin, rayDir, p0, p1, p2, &t))
+                    return;
+
+                if (t >= bestT)
+                    return;
+
+                Vector3 wn0 = transformDirection(model, Vector3(
+                    verts[ia].normal[0], verts[ia].normal[1], verts[ia].normal[2]));
+                Vector3 wn1 = transformDirection(model, Vector3(
+                    verts[ib].normal[0], verts[ib].normal[1], verts[ib].normal[2]));
+                Vector3 wn2 = transformDirection(model, Vector3(
+                    verts[ic].normal[0], verts[ic].normal[1], verts[ic].normal[2]));
+
+                Vector3 faceN = normalize(cross(p1 - p0, p2 - p0));
+                Vector3 avgN = normalize(wn0 + wn1 + wn2);
+
+                bestT = t;
+                best.valid = true;
+                best.product = prod;
+                best.meshIndex = m;
+                best.triangleIndexInMesh = triIndexInMesh;
+                best.index0 = ia;
+                best.index1 = ib;
+                best.index2 = ic;
+                best.worldPos0 = p0;
+                best.worldPos1 = p1;
+                best.worldPos2 = p2;
+                best.worldN0 = wn0;
+                best.worldN1 = wn1;
+                best.worldN2 = wn2;
+                best.hitPos = rayOrigin + rayDir * t;
+                best.faceNormal = faceN;
+                best.dotFaceAvgNormal = dot(faceN, avgN);
+            };
+
+            if (mesh.primitive == GL_TRIANGLES)
+            {
+                uint32_t tri = 0;
+                for (uint32_t i = 0; i + 2 < count; i += 3, tri++)
+                    testTriangle(indices[start + i], indices[start + i + 1],
+                        indices[start + i + 2], tri);
+            }
+            else if (mesh.primitive == GL_TRIANGLE_STRIP)
+            {
+                uint32_t tri = 0;
+                for (uint32_t i = 0; i + 2 < count; i++, tri++)
+                {
+                    uint32_t a = indices[start + i];
+                    uint32_t b = indices[start + i + 1];
+                    uint32_t c = indices[start + i + 2];
+                    if (i & 1u)
+                    {
+                        uint32_t tmp = a;
+                        a = b;
+                        b = tmp;
+                    }
+                    testTriangle(a, b, c, tri);
+                }
+            }
+            else if (mesh.primitive == GL_TRIANGLE_FAN)
+            {
+                uint32_t tri = 0;
+                for (uint32_t i = 1; i + 1 < count; i++, tri++)
+                    testTriangle(indices[start], indices[start + i],
+                        indices[start + i + 1], tri);
+            }
+        }
+    }
+
+    *out = best;
+    return best.valid;
+}
+
+static void printPickResult(const PickResult &pick)
+{
+    if (!pick.valid)
+        return;
+
+    printf("\n[TrianglePick] product='%s' mesh=%u tri=%u indices=(%u,%u,%u)\n",
+        pick.product != nullptr && pick.product->name() != nullptr ? pick.product->name() : "(unnamed)",
+        pick.meshIndex, pick.triangleIndexInMesh,
+        pick.index0, pick.index1, pick.index2);
+
+    printf("  hit=(%.9f, %.9f, %.9f)\n",
+        pick.hitPos.x, pick.hitPos.y, pick.hitPos.z);
+    printf("  v0=(%.9f, %.9f, %.9f) n0=(%.9f, %.9f, %.9f)\n",
+        pick.worldPos0.x, pick.worldPos0.y, pick.worldPos0.z,
+        pick.worldN0.x, pick.worldN0.y, pick.worldN0.z);
+    printf("  v1=(%.9f, %.9f, %.9f) n1=(%.9f, %.9f, %.9f)\n",
+        pick.worldPos1.x, pick.worldPos1.y, pick.worldPos1.z,
+        pick.worldN1.x, pick.worldN1.y, pick.worldN1.z);
+    printf("  v2=(%.9f, %.9f, %.9f) n2=(%.9f, %.9f, %.9f)\n",
+        pick.worldPos2.x, pick.worldPos2.y, pick.worldPos2.z,
+        pick.worldN2.x, pick.worldN2.y, pick.worldN2.z);
+    printf("  faceN=(%.9f, %.9f, %.9f) dot(face,avgVertexN)=%.9f\n",
+        pick.faceNormal.x, pick.faceNormal.y, pick.faceNormal.z,
+        pick.dotFaceAvgNormal);
+}
+
+static void drawTrianglePickOverlay()
+{
+    if (!g_lastPick.valid)
+        return;
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::SetNextWindowBgAlpha(0.40f);
+    if (ImGui::Begin("Triangle Pick", nullptr, flags))
+    {
+        ImGui::Text("Ctrl+LeftClick in viewport to pick triangle");
+        ImGui::Separator();
+        ImGui::Text("Product: %s",
+            g_lastPick.product != nullptr && g_lastPick.product->name() != nullptr ?
+            g_lastPick.product->name() : "(unnamed)");
+        ImGui::Text("Mesh: %u  Tri: %u", g_lastPick.meshIndex,
+            g_lastPick.triangleIndexInMesh);
+        ImGui::Text("Indices: %u %u %u", g_lastPick.index0,
+            g_lastPick.index1, g_lastPick.index2);
+        ImGui::Text("dot(face, avgN): %.6f", g_lastPick.dotFaceAvgNormal);
+    }
+    ImGui::End();
+}
+
 static const char *normalDebugModeLabel(int mode)
 {
     switch (mode)
@@ -107,6 +388,12 @@ static const char *normalDebugModeLabel(int mode)
         return "Degenerate Mask";
     case 4:
         return "Shader Branch";
+    case 5:
+        return "Front/Back Facing";
+    case 6:
+        return "Raw Normal RGB";
+    case 7:
+        return "Geom vs Imported";
     }
 }
 
@@ -130,7 +417,8 @@ static void drawNormalDebugOverlay()
     if (ImGui::Begin("Normal Debug Overlay", nullptr, flags))
     {
         ImGui::Text("Normals: %s (%d)", normalDebugModeLabel(mode), mode);
-        ImGui::Text("Hotkeys: 0 Off | 1 RGB | 2 Len | 3 Mask | 4 Branch");
+        ImGui::Text("Hotkeys: 0 Off | 1 RGB | 2 Len | 3 Mask | 4 Branch | 5 Face | 6 Raw | 7 Geom");
+        ImGui::Text("Pick: Ctrl + LeftClick to dump triangle data");
     }
     ImGui::End();
 }
@@ -627,6 +915,9 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
     bool keys[SDL_SCANCODE_COUNT] = { 0 };
     bool mouseDown = false;
     bool mouseMoved = false;
+    bool pickRequest = false;
+    int pickX = 0;
+    int pickY = 0;
     int mouseX_buttondown, mouseY_buttondown;
     Matrix4 curr_mat;
     Matrix4 transToCenter = Matrix4(1.0f);
@@ -714,6 +1005,15 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                 case SDL_SCANCODE_4:
                     _scene.normalDebugMode() = 4;
                     break;
+                case SDL_SCANCODE_5:
+                    _scene.normalDebugMode() = 5;
+                    break;
+                case SDL_SCANCODE_6:
+                    _scene.normalDebugMode() = 6;
+                    break;
+                case SDL_SCANCODE_7:
+                    _scene.normalDebugMode() = 7;
+                    break;
                 }
                 break;
             case SDL_EVENT_KEY_UP:
@@ -752,7 +1052,19 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
                 if (evt.button.button == SDL_BUTTON_LEFT)
+                {
+                    int dx = (int)evt.button.x - mouseX_buttondown;
+                    int dy = (int)evt.button.y - mouseY_buttondown;
+                    int dragPixels = std::abs(dx) + std::abs(dy);
+                    SDL_Keymod mod = SDL_GetModState();
+                    if ((mod & SDL_KMOD_CTRL) && !mouse_over_debug && dragPixels <= 3)
+                    {
+                        pickRequest = true;
+                        pickX = (int)evt.button.x;
+                        pickY = (int)evt.button.y;
+                    }
                     mouseDown = false;
+                }
                 break;
             }
         }
@@ -841,6 +1153,26 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
         _camera.setPitch(mutil::clamp(pitch, -89.0f, 89.0f));
         _camera.setYaw(yaw);
 
+        if (pickRequest)
+        {
+            Product *products = _scene.models();
+            uint32_t nprod = _scene.mumProducts();
+            for (uint32_t pi = 0; pi < nprod; pi++)
+                products[pi].update();
+
+            if (pickTriangleAtScreenPoint(pickX, pickY, _scene.width(), _scene.height(),
+                &g_lastPick))
+            {
+                printPickResult(g_lastPick);
+            }
+            else
+            {
+                g_lastPick.valid = false;
+                printf("\n[TrianglePick] no triangle hit at (%d,%d)\n", pickX, pickY);
+            }
+            pickRequest = false;
+        }
+
         /* Rotation code */
 #if 0
         Quaternion q = mutil::rotateaxis(Vector3(0.0f, 1.0f, 0.0f), time / 4.0f);
@@ -867,6 +1199,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
 
         mouse_over_debug = debugMenu(time, deltaTime);
         drawNormalDebugOverlay();
+        drawTrianglePickOverlay();
 
         _camera.upDateView(_scene.models()[0]);
 
@@ -1174,8 +1507,9 @@ static bool debugMenu(float time, float deltaTime)
             bool showExtraWireOverlays = _scene.showExtraWireOverlays();
             if (ImGui::Checkbox("Extra Wire Overlays", &showExtraWireOverlays))
                 _scene.setShowExtraWireOverlays(showExtraWireOverlays);
-            ImGui::SliderInt("Normal Debug Mode", &_scene.normalDebugMode(), 0, 4);
-            ImGui::Text("Hotkeys: 0=Off, 1=Normal RGB, 2=Normal Length, 3=Degenerate Mask, 4=Branch");
+            ImGui::SliderInt("Normal Debug Mode", &_scene.normalDebugMode(), 0, 7);
+            ImGui::Text("Hotkeys: 0=Off, 1=Normal RGB, 2=Normal Length, 3=Degenerate Mask, 4=Branch, 5=Front/Back, 6=Raw Normal, 7=Geom vs Imported");
+            ImGui::Text("Triangle Pick: Ctrl+LeftClick (prints vertices/normals)");
 
             ImGui::EndTabItem();
         }

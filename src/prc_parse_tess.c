@@ -1195,7 +1195,6 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         if (code != 0)
             return code;
 
-
         /* Don't do this if the normal angles are encoded OR if we have
            vertex colors */
         if (data->must_recalculate_normals && data->decoded_point_color_array == NULL)
@@ -1211,7 +1210,6 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         code = prc_compute_edges_compressed_tess(ctx, data);
         if (code != 0)
             return code;
-
 
         /* If we have texture coordinates for the vertices, then copy them over now */
         if (!data->no_texture && data->texture_data->texture_parameters != NULL)

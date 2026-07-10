@@ -35,6 +35,13 @@
 #define DEBUG_TARGET_TESS_INDEX 6
 #define DEBUG_TARGET_FACE_INDEX 0
 
+/* Targeted compressed tess index mapping debug.
+    Prints only when the remapped API index matches one of the watched values. */
+#define DEBUG_COMPRESSED_API_INDEX_MAP 0
+#define DEBUG_COMPRESSED_API_INDEX_A 2392u
+#define DEBUG_COMPRESSED_API_INDEX_B 854u
+#define DEBUG_COMPRESSED_API_INDEX_C 2393u
+
 uint32_t
 prc_api_helper_get_biased_file_index_from_unique_id(prc_context *ctx, prc_api_data data,
     prc_unique_id unique_id);
@@ -4238,11 +4245,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             }
         }
 
-        /* TODO HERE.  WORK ON GETTING STYLES FOR THE TRIANGLES */
         /* So now that we have all the normal and position variants contained in
-            position_normal_pair and all the vertex_out data set, lets step through
-            the indices from the prc data and create new indices that go to the
-            vertex_out values */
+           position_normal_pair and all the vertex_out data set, lets step through
+           the indices from the prc data and create new indices that go to the
+           vertex_out values */
         for (k = 0; k < num_prc_indices; k++)
         {
             /* Get the position index in the PRC data */
@@ -4261,6 +4267,19 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             /* Now we have the correct position and normal index.  We can get the
                 vertex index */
             face_out_reserved->vertex_indices[k] = current->api_vertex_index;
+
+#if DEBUG_COMPRESSED_API_INDEX_MAP
+            {
+                uint32_t api_index = face_out_reserved->vertex_indices[k];
+                if (api_index == DEBUG_COMPRESSED_API_INDEX_A ||
+                    api_index == DEBUG_COMPRESSED_API_INDEX_C)
+                {
+                    printf("[CompressedMap] k=%d tri=%u prc_pos=%u prc_norm=%u -> api=%u (num_prc_vertices=%d num_api_vertices=%zu)\n",
+                        k, (uint32_t)(k / 3), prc_position_index, prc_normal_index,
+                        api_index, num_prc_vertices, vertex_out->num_vertices);
+                }
+            }
+#endif
         }
 #if 0
         /* DEBUG. Print out all the vertex positions, normals and diffuse color */

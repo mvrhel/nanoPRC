@@ -286,6 +286,15 @@ void main()
     {
         vec3 debugNormal = getShadingNormal();
         float rawNormalLen = length(Normal);
+        vec3 rawNormal = rawNormalLen > kNormalEpsilon ? Normal / rawNormalLen
+                                                       : vec3(0.0, 0.0, 1.0);
+
+        vec3 dpx = dFdx(FragPos);
+        vec3 dpy = dFdy(FragPos);
+        vec3 geomCross = cross(dpx, dpy);
+        float geomLen = length(geomCross);
+        vec3 geomNormal = geomLen > kNormalEpsilon ? geomCross / geomLen
+                                                   : vec3(0.0, 0.0, 1.0);
 
         if (uDebugMode == 1)
         {
@@ -305,6 +314,27 @@ void main()
             /* Red marks likely missing/degenerate normals. */
             FragColor = rawNormalLen > kNormalEpsilon ?
                 vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        if (uDebugMode == 5)
+        {
+            /* Winding/front-face visualization: red=front, blue=back. */
+            FragColor = gl_FrontFacing ? vec4(1.0, 0.0, 0.0, 1.0)
+                                       : vec4(0.0, 0.0, 1.0, 1.0);
+            return;
+        }
+        if (uDebugMode == 6)
+        {
+            /* Raw interpolated normal only (no gl_FrontFacing flip/fallback). */
+            FragColor = vec4(rawNormal * 0.5 + 0.5, 1.0);
+            return;
+        }
+        if (uDebugMode == 7)
+        {
+            /* Imported-vs-geometric normal agreement: red=opposed, green=aligned. */
+            float d = dot(rawNormal, geomNormal);
+            float agree = clamp(d * 0.5 + 0.5, 0.0, 1.0);
+            FragColor = vec4(1.0 - agree, agree, 0.0, 1.0);
             return;
         }
     }

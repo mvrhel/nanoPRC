@@ -269,6 +269,9 @@ Product *Product::getChildFromHeap(uint32_t child_index, Product *product_heap, 
 void Product::uploadGPU(uint32_t num_vertices, prc_api_vertex *vertices_in,
     std::vector<unsigned int> &indices_in)
 {
+    _cpuVertices.assign(vertices_in, vertices_in + num_vertices);
+    _cpuIndices = indices_in;
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     //glBlendEquation(GL_FUNC_ADD);

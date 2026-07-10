@@ -236,23 +236,21 @@ prc_api_helper_set_vertex_style_from_face_ref(prc_context *ctx,
     {
         if (!vertices_have_style)
         {
-            /* This is a color, just the color */
-            memcpy(vertex_out->vertices[vertex_out_pos].color, &style->diffuse_color, 3 * sizeof(float));
-            vertex_out->vertices[vertex_out_pos].tri_has_material = 0;
-        }
-        else
-        {
+            /* This is a color, just the color.  However, this method is only
+               used in the compressed tessellation case.  We force the vertices
+               to have the more complex style in this case as it is easier with
+               the way faces are done.  At this point, the color is in the tint
+               so set everything accordingly */
+            vertex_out->vertices[vertex_out_pos].tri_has_material = 1;
+
             /* We need to stash the color into the vertex as a material */
-            memcpy(vertex_out->vertices[vertex_out_pos].diffuse, style->diffuse_color, 3 * sizeof(float));
-            vertex_out->vertices[vertex_out_pos].specular[0] = 0.0f;
-            vertex_out->vertices[vertex_out_pos].specular[1] = 0.0f;
-            vertex_out->vertices[vertex_out_pos].specular[2] = 0.0f;
+            memcpy(vertex_out->vertices[vertex_out_pos].diffuse, style->tint, 3 * sizeof(float));
+            vertex_out->vertices[vertex_out_pos].specular[0] = 1.0f;
+            vertex_out->vertices[vertex_out_pos].specular[1] = 1.0f;
+            vertex_out->vertices[vertex_out_pos].specular[2] = 1.0f;
             vertex_out->vertices[vertex_out_pos].tint[0] = 1;
             vertex_out->vertices[vertex_out_pos].tint[1] = 1;
             vertex_out->vertices[vertex_out_pos].tint[2] = 1;
-            vertex_out->vertices[vertex_out_pos].diffuse[0] = style->diffuse_color[0];
-            vertex_out->vertices[vertex_out_pos].diffuse[1] = style->diffuse_color[1];
-            vertex_out->vertices[vertex_out_pos].diffuse[2] = style->diffuse_color[2];
             vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
             vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
             vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
@@ -266,8 +264,33 @@ prc_api_helper_set_vertex_style_from_face_ref(prc_context *ctx,
             vertex_out->vertices[vertex_out_pos].color[0] = 1;
             vertex_out->vertices[vertex_out_pos].color[1] = 1;
             vertex_out->vertices[vertex_out_pos].color[2] = 1;
+            vertex_out->vertices[vertex_out_pos].color[3] = 1;
         }
+        else
+        {
+            /* We need to stash the color into the vertex as a material */
+            memcpy(vertex_out->vertices[vertex_out_pos].diffuse, style->diffuse_color, 3 * sizeof(float));
+            vertex_out->vertices[vertex_out_pos].specular[0] = 1.0f;
+            vertex_out->vertices[vertex_out_pos].specular[1] = 1.0f;
+            vertex_out->vertices[vertex_out_pos].specular[2] = 1.0f;
+            vertex_out->vertices[vertex_out_pos].tint[0] = 1;
+            vertex_out->vertices[vertex_out_pos].tint[1] = 1;
+            vertex_out->vertices[vertex_out_pos].tint[2] = 1;
+            vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
+            vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
+            vertex_out->vertices[vertex_out_pos].emissive[0] = 0;
 
+            //memset(vertex_out->vertices[vertex_out_pos].emissive, 0, 3 * sizeof(float));
+            vertex_out->vertices[vertex_out_pos].shininess = 0.2f;
+            vertex_out->vertices[vertex_out_pos].alpha = 1.0f;
+            vertex_out->vertices[vertex_out_pos].style_index = face_out_reserved->style[face_index].face_style_index;
+            vertex_out->vertices[vertex_out_pos].style_file_index = face_out_reserved->style[face_index].face_style_file_index;
+
+            vertex_out->vertices[vertex_out_pos].color[0] = 1;
+            vertex_out->vertices[vertex_out_pos].color[1] = 1;
+            vertex_out->vertices[vertex_out_pos].color[2] = 1;
+            vertex_out->vertices[vertex_out_pos].color[3] = 1;
+        }
     }
 
     return 0;
