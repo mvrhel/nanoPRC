@@ -744,7 +744,7 @@ int main(int argc, char *argv[])
 
         /* Step 6: embed the same encoded bytes in a minimal, single-page
            3D-annotated PDF -- the standard (ISO 32000) mechanism Adobe
-           Reader/Acrobat and examples/*.pdf in this repository use, not a
+           Reader/Acrobat and examples/ *.pdf in this repository use, not a
            nanoPRC-specific format. One named view is enough to demonstrate
            prc_pdf_view_spec; its eye/target/up are derived from the mesh's
            own bounding box (computed by teapot_build_mesh above) so the

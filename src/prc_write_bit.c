@@ -576,13 +576,13 @@ prc_huff_value_compare(const void *a, const void *b)
    values[0..count-1] (a simple O(D^2) pairwise-minimum merge over the D
    distinct values -- fine for the array sizes this write facility deals
    with; a large, highly diverse alphabet would want a heap instead).
-   *out_nodes/*out_node_count receive the flat list of every build node
+   *out_nodes / *out_node_count receive the flat list of every build node
    allocated (for teardown); *out_root receives the tree root. A distinct
    alphabet of size 1 is padded with one zero-frequency phantom leaf so the
    reader's tree walk (which always consumes at least one bit per decoded
    value, even for a single-symbol alphabet -- prc_bit.c 843-877) has
    somewhere to go. Returns 0 on success, -1 on allocation failure (in which
-   case *out_nodes/*out_node_count still describe whatever was allocated so
+   case *out_nodes / *out_node_count still describe whatever was allocated so
    the caller can free it). */
 static int
 prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
