@@ -22,10 +22,39 @@
 #include "debug.h"
 #include <string.h>
 #include <float.h>
+#include <stdlib.h>
 #include "prc_vector_util.h"
 #include "prc_huff.h"
 #include <stdio.h>
 //#include "prc_json_debug.h"  /* Used for debug */
+
+/* Diagnostic-only debug hooks (env-var gated, mirrors the PRC_FUZZ_* convention
+   in prc_parse_main.c), used to empirically test whether the conditional
+   orientation flip in prc_compute_triangle_basis and the index-canonicalizing
+   swap in prc_set_left_right_edge_indices are load-bearing on real files.
+   Not part of the public API; internal diagnostic tools reach these globals
+   via their own extern declarations. Zero behavioral change when the
+   corresponding env var is unset. */
+static int prc_debug_hooks_read = 0;
+static int prc_debug_disable_orient_flip = 0;
+static int prc_debug_disable_index_swap = 0;
+long prc_debug_orient_flip_triggered_count = 0;
+long prc_debug_orient_flip_total_count = 0;
+long prc_debug_index_swap_triggered_count = 0;
+long prc_debug_index_swap_total_count = 0;
+
+static void
+prc_debug_hooks_init(void)
+{
+    const char *v;
+    if (prc_debug_hooks_read)
+        return;
+    prc_debug_hooks_read = 1;
+    v = getenv("PRC_DEBUG_DISABLE_ORIENT_FLIP");
+    prc_debug_disable_orient_flip = (v != NULL && v[0] != '\0' && v[0] != '0');
+    v = getenv("PRC_DEBUG_DISABLE_INDEX_SWAP");
+    prc_debug_disable_index_swap = (v != NULL && v[0] != '\0' && v[0] != '0');
+}
 
 #define PRC_NORMAL_INDICES_CAPACITY 3
 typedef struct prc_normal_indices_list_s prc_normal_indices_list;
@@ -600,22 +629,29 @@ prc_set_left_right_edge_indices(prc_context *ctx, const prc_tess_3d_compressed *
         (data->edge_status_array[triangle_count] & 1));
 
     /* swap x, y if needed */
-    if (treated_tri->right_edge.edge_treatement_x > treated_tri->right_edge.edge_treatement_y)
+    prc_debug_hooks_init();
+    prc_debug_index_swap_total_count++;
+    if (!prc_debug_disable_index_swap &&
+        treated_tri->right_edge.edge_treatement_x > treated_tri->right_edge.edge_treatement_y)
     {
         DEBUG_LOG("right base x treatment > y treatment, swapping x-y on right base\n");
         temp = treated_tri->right_edge.edge_treatement_x;
         treated_tri->right_edge.edge_treatement_x = treated_tri->right_edge.edge_treatement_y;
         treated_tri->right_edge.edge_treatement_y = temp;
         right_treatment_swap = 1;
+        prc_debug_index_swap_triggered_count++;
     }
 
-    if (treated_tri->left_edge.edge_treatement_x > treated_tri->left_edge.edge_treatement_y)
+    prc_debug_index_swap_total_count++;
+    if (!prc_debug_disable_index_swap &&
+        treated_tri->left_edge.edge_treatement_x > treated_tri->left_edge.edge_treatement_y)
     {
         DEBUG_LOG("left base x treatment > y treatment, swapping x-y on left base\n");
         temp = treated_tri->left_edge.edge_treatement_x;
         treated_tri->left_edge.edge_treatement_x = treated_tri->left_edge.edge_treatement_y;
         treated_tri->left_edge.edge_treatement_y = temp;
         left_treatment_swap = 1;
+        prc_debug_index_swap_triggered_count++;
     }
 
     /* From spec |0x1 if triangle has a right neighbor |0x2 if it has a left neighbor */
@@ -1062,10 +1098,13 @@ prc_compute_triangle_basis(prc_context *ctx, const prc_vec3 *vertices_out,
     }
 
     prc_vec_sub(origin_new, V3, &w);
-    if (prc_vec_dot_product(y, w) > 0.0)
+    prc_debug_hooks_init();
+    prc_debug_orient_flip_total_count++;
+    if (!prc_debug_disable_orient_flip && prc_vec_dot_product(y, w) > 0.0)
     {
         prc_vec_negate(&z);
         prc_vec_negate(&y);
+        prc_debug_orient_flip_triggered_count++;
     }
 
     /* Store all the details in treated_details */

@@ -55,3 +55,11 @@ target_include_directories(verify_tess_positions PRIVATE tests)
 add_executable(splice_tess_field tests/internal/splice_tess_field.c)
 target_link_libraries(splice_tess_field prc_static)
 target_include_directories(splice_tess_field PRIVATE tests)
+
+add_executable(verify_manifold_real tests/internal/verify_manifold_real.c)
+target_link_libraries(verify_manifold_real prc_static)
+target_include_directories(verify_manifold_real PRIVATE tests)
+
+add_executable(verify_manifold_pdf tests/internal/verify_manifold_pdf.c)
+target_link_libraries(verify_manifold_pdf prc_static)
+target_include_directories(verify_manifold_pdf PRIVATE tests)

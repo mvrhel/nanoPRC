@@ -2,29 +2,45 @@
    registered with CTest, no exit-code contract to keep stable.
 
    WHAT: The "field-preserving re-encoder". Takes a REAL, complete,
-   independently-produced raw .prc file's tessellation section
-   (specifically its first PRC_TYPE_TESS_3D_Compressed entry, tess_count
-   must be 1), fully DECODES it with nanoPRC's own parser, then RE-
-   ENCODES the exact same decoded values through nanoPRC's own writer
+   independently-produced raw .prc file -- now ANY number of PRC file
+   structures, not just one -- and for every file structure whose
+   tessellation section is a single (tess_count==1) PRC_TYPE_TESS_3D_
+   Compressed entry, fully DECODES it with nanoPRC's own parser, then
+   RE-ENCODES the exact same decoded values through nanoPRC's own writer
    (prc_write_compress_tess_to_stream) -- reusing the real production
    encoder, just fed parsed-from-real data instead of a fresh mesh
-   traversal. Everything else in the file (schema, tree, geometry,
-   extra_geometry, model-file) is left byte-for-byte untouched real
-   content.
+   traversal. File structures whose tessellation section doesn't match
+   that shape (tess_count!=1, first entry not COMPRESSED, too few
+   sections, a parse error) are left byte-for-byte untouched and reported
+   as skipped, rather than aborting the whole file. Everything else in
+   every file structure (schema, tree, geometry, extra_geometry,
+   model-file) is left byte-for-byte untouched real content.
 
-   HOW: usage: reencode_real_tess.exe <real_input.prc> <output.prc>
-   [real_inflated.bin reencoded_inflated.bin]. The optional trailing pair of
-   paths dumps the two INFLATED (pre-deflate) bitstreams -- the real
-   section's and our re-encoded one's -- so they can be diffed bit-for-bit
-   directly; comparing the deflated/compressed bytes instead would be
-   meaningless since zlib doesn't guarantee byte-identical output for
-   logically identical input. No deliberate mutation is applied -- this is a "zero mutation" fidelity
-   test: same is_calculated/has_faces/tolerance/origin/point_array/
-   edge_status_array/triangle_face_array/points_is_reference_array/
-   point_reference_array/must_recalculate_normals/normal data/
-   is_face_planar values in, same values re-encoded out through our own
-   bit-packing code. Prints the parsed field values so a human can sanity-
-   check them against the input before trusting the re-encoded output.
+   HOW: usage: reencode_real_tess.exe <real_input.prc> <output.prc>.
+
+   CONTAINER FORMAT (reverse-engineered from prc_parse_main.c's
+   prc_parse_main_header, not the spec text, since that's the version this
+   tool must byte-match): "PRC" magic(3) + min_vers(4) + auth_vers(4) +
+   file_uid(16) + app_uid(16) + file_structure_count(4), then for each file
+   structure k in turn: fs_uid(16) + reserved(4) + section_count(4) +
+   section_count section_offset(4) entries (ABSOLUTE byte offsets into the
+   whole buffer, one per top-level section: schema/globals, ?, tree,
+   tessellation(index 3), extra_geometry, model -- indices confirmed
+   empirically, not by name, against real files; this tool only cares that
+   index 3 is tessellation and index 4 is the start of whatever follows
+   it). After ALL file structures' tables: one GLOBAL start_offset(4) +
+   end_offset(4) + file_count(4) (external file references; must be 0,
+   unsupported). Multi-file-structure containers lay every file
+   structure's section data out back-to-back in the same shared buffer, in
+   file-structure order, so section boundaries across the WHOLE file form
+   one flat, strictly increasing sequence of byte offsets ending at
+   end_offset == EOF. This tool treats that sequence as a flat chunk list
+   (each chunk either copied verbatim or, for a re-encoded tessellation
+   section, replaced with a possibly different-length blob), recomputes
+   every offset by a running size-delta prefix sum, and patches the
+   offset-table VALUES in place (the header's own byte layout/length never
+   changes -- only fscount, section_count, uid, reserved are fixed-size
+   and unchanged; only the 4-byte offset values inside are rewritten).
 
    WHY IT EXISTS / WHAT IT FOUND: if this write facility's bit-level
    encoding process cannot faithfully reproduce a working file's
@@ -45,21 +61,22 @@
    encoding mechanics themselves (not value selection), and Acrobat
    specifically is more sensitive to it than every other reader tried.
    See the "Acrobat blank-tree investigation" project notes for the full
-   picture and the next planned step (verifying the encoder's gate-
-   emission traversal order against the oracle document's exact
-   pseudocode -- the one remaining unverified piece).
+   picture. (3) Extended to multi-file-structure containers to round-trip
+   a real 973-part/28-file-structure turbine assembly used in the ISO
+   §7.8.9 traversal review, as a stronger encoder-side companion to the
+   decoder-side ablation in verify_manifold_pdf.c.
 
-   LIMITATIONS: Only handles single-file-structure, tess_count==1,
-   unnamed-wrapper inputs (aborts with a clear message otherwise). No
-   mutation capability yet -- despite the tool's original design intent
-   (see project notes), only the zero-mutation baseline was ever
-   implemented/tested; adding a flag to flip one specific field before
-   re-encoding, now that the baseline itself is confirmed to round-trip
-   structurally, is natural follow-up work for whoever picks this back
-   up. The section-level splice mechanics (raw main-header parsing,
-   offset-table patching) are duplicated from the splice_*.c tools rather
-   than shared -- see those files for the same caveats (single-file-
-   structure only, etc). */
+   LIMITATIONS: Skips (rather than re-encodes) any file structure whose
+   tessellation section isn't exactly one PRC_TYPE_TESS_3D_Compressed
+   entry -- uncompressed tessellations, wire/line tessellations, and
+   multi-entry tessellation sections are left untouched, not exercised by
+   this tool. No mutation capability -- zero-mutation baseline only (see
+   project notes for the original single-file-structure design intent).
+   The earlier single-file-structure version of this tool supported
+   dumping the inflated pre-deflate bitstreams for a direct bit-level
+   diff; that option is dropped here since "which of N file structures"
+   doesn't generalize cleanly -- use verify_manifold_real.c/
+   verify_manifold_pdf.c for round-trip correctness checking instead. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,183 +99,116 @@
 static uint32_t read_le_u32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static void write_le_u32(uint8_t *p, uint32_t v) { p[0]=(uint8_t)(v&0xff); p[1]=(uint8_t)((v>>8)&0xff); p[2]=(uint8_t)((v>>16)&0xff); p[3]=(uint8_t)((v>>24)&0xff); }
 
-int main(int argc, char **argv)
+typedef struct
 {
-    prc_context *ctx;
-    FILE *fid;
-    long fsize;
-    uint8_t *buf;
-    size_t read_size;
-    const uint8_t *p;
     uint32_t section_count;
-    uint32_t *section_offsets;
-    uint32_t start_offset, end_offset;
-    uint32_t i;
-    size_t header_prefix_len;
-    size_t section_off_table_byte_pos;
-    uint8_t *tess_inflated = NULL;
-    size_t dest_len_saved = 0;
-    int code;
+    uint32_t *section_offset; /* original absolute byte offsets, length section_count */
+} fs_info;
+
+/* Attempt to re-encode file structure k's tessellation section (its section
+   index 3, [section_offset[3], section_offset[4])) with nanoPRC's own
+   writer, fed the values nanoPRC's own parser decoded from the real bytes.
+   On success, *out_bytes/*out_len receive a malloc'd deflated blob (caller
+   frees) and the function returns 1. On any "not eligible" or parse/write
+   failure, prints a one-line reason and returns 0 (leave this fs's section
+   untouched -- not a fatal error for the whole file). */
+static int
+try_reencode_fs_tess(prc_context *ctx, const uint8_t *buf, uint32_t k, const fs_info *fs,
+    uint8_t **out_bytes, size_t *out_len)
+{
+    uint32_t sec_start, sec_end, comp_len;
+    uint8_t *inflated = NULL;
+    uLongf dest_len;
     prc_bit_state bit_state;
-    uint32_t wrapper_tag, attribute_count;
-    prc_name wrapper_name;
-    uint32_t tess_count;
-    uint32_t entry_tag;
+    uint32_t wrapper_tag, tess_count, entry_tag;
+    prc_content_prc_base wrapper_base;
     prc_tess_3d_compressed *parsed = NULL;
     prc_encode_traversal_result trav;
     double crease_angle_degrees = 0.0;
-    uint8_t *new_tess_comp = NULL;
-    size_t new_tess_comp_len = 0;
+    int32_t *triangle_face_array_signed = NULL;
     prc_bit_write_state wrapper_s;
     uint8_t *wrapper_comp = NULL;
     size_t wrapper_comp_len = 0;
-    uint32_t k;
-    uint32_t *new_section_offsets;
-    uint32_t new_start_offset, new_end_offset;
-    size_t new_total_size;
-    uint8_t *out_buf;
-    FILE *out_fid;
-    int32_t *triangle_face_array_signed = NULL;
+    uint32_t kk;
+    int code;
+    int ok = 0;
 
-    if (argc < 3)
+    if (fs->section_count < 5)
     {
-        printf("usage: %s <real_input.prc> <output.prc> [real_inflated.bin reencoded_inflated.bin]\n", argv[0]);
-        return 2;
+        printf("fs %u: section_count=%u (< 5), no tessellation section, skipping\n", k, fs->section_count);
+        return 0;
+    }
+    sec_start = fs->section_offset[3];
+    sec_end = fs->section_offset[4];
+    if (sec_end <= sec_start)
+    {
+        printf("fs %u: empty tessellation section, skipping\n", k);
+        return 0;
+    }
+    comp_len = sec_end - sec_start;
+
+    dest_len = comp_len * 40u + 4096u;
+    inflated = (uint8_t *)malloc(dest_len);
+    for (;;)
+    {
+        uLongf try_len = dest_len;
+        int zret = uncompress(inflated, &try_len, buf + sec_start, comp_len);
+        if (zret == Z_OK) { dest_len = try_len; break; }
+        if (zret == Z_BUF_ERROR) { dest_len *= 2; free(inflated); inflated = (uint8_t *)malloc(dest_len); continue; }
+        printf("fs %u: zlib uncompress failed (%d), skipping\n", k, zret);
+        free(inflated);
+        return 0;
     }
 
-    fid = fopen(argv[1], "rb");
-    if (fid == NULL) { printf("failed to open %s\n", argv[1]); return 1; }
-    fseek(fid, 0L, SEEK_END);
-    fsize = ftell(fid);
-    fseek(fid, 0L, SEEK_SET);
-    buf = (uint8_t *)malloc((size_t)fsize);
-    read_size = fread(buf, 1, (size_t)fsize, fid);
-    fclose(fid);
-    if (read_size != (size_t)fsize) { printf("short read\n"); return 1; }
-    if (memcmp(buf, "PRC", 3) != 0) { printf("not a raw PRC file\n"); return 1; }
-
-    p = buf + 3 + 4 + 4 + 16 + 16;
-    if (read_le_u32(p) != 1) { printf("only single-file-structure inputs supported\n"); return 1; }
-    p += 4;
-    p += 16; /* fs_uid */
-    p += 4;  /* reserved */
-    section_off_table_byte_pos = (size_t)(p - buf) + 4;
-    section_count = read_le_u32(p); p += 4;
-    header_prefix_len = (size_t)(p - buf);
-
-    section_offsets = (uint32_t *)malloc(sizeof(uint32_t) * section_count);
-    for (i = 0; i < section_count; i++) { section_offsets[i] = read_le_u32(p); p += 4; }
-    start_offset = read_le_u32(p); p += 4;
-    end_offset = read_le_u32(p); p += 4;
-
-    if (section_count < 4) { printf("unexpected section_count=%u\n", section_count); return 1; }
-    printf("Real file: section_offsets=[");
-    for (i = 0; i < section_count; i++) printf("%u ", section_offsets[i]);
-    printf("] start=%u end=%u\n", start_offset, end_offset);
-
-    ctx = prc_api_new_context(NULL);
-    if (ctx == NULL) { printf("context creation failed\n"); return 1; }
-
-    /* Inflate the real tessellation section (section index 3: offsets[3]..offsets[4]) */
-    {
-        uLongf dest_len;
-        uint32_t comp_len = section_offsets[4] - section_offsets[3];
-        /* generous upper bound; grow if needed */
-        dest_len = comp_len * 40u + 4096u;
-        tess_inflated = (uint8_t *)malloc(dest_len);
-        for (;;)
-        {
-            uLongf try_len = dest_len;
-            int zret = uncompress(tess_inflated, &try_len, buf + section_offsets[3], comp_len);
-            if (zret == Z_OK) { dest_len = try_len; break; }
-            if (zret == Z_BUF_ERROR) { dest_len *= 2; free(tess_inflated); tess_inflated = (uint8_t *)malloc(dest_len); continue; }
-            printf("zlib uncompress failed: %d\n", zret);
-            return 1;
-        }
-        printf("Inflated tessellation section: %lu bytes\n", (unsigned long)dest_len);
-        dest_len_saved = (size_t)dest_len;
-
-        prc_init_bit_state(ctx, &bit_state, tess_inflated, (size_t)dest_len);
-    }
-
-    /* Section wrapper: tag + ContentPRCBase (attribute_count/attributes + name) + tess_count.
-       Uses the real parser (handles attribute_count > 0 correctly, unlike a
-       raw attribute_count read followed directly by a name-bit read, which
-       would desync if any attribute entries were actually present). */
+    prc_init_bit_state(ctx, &bit_state, inflated, (size_t)dest_len);
     wrapper_tag = prc_bitread_uint32(ctx, &bit_state);
     if (wrapper_tag != PRC_TYPE_ASM_FileStructureTessellation)
     {
-        printf("unexpected wrapper tag %u\n", wrapper_tag);
-        return 1;
+        printf("fs %u: unexpected wrapper tag %u, skipping\n", k, wrapper_tag);
+        free(inflated);
+        return 0;
     }
+    memset(&wrapper_base, 0, sizeof(wrapper_base));
+    code = prc_parse_content_prc_base(ctx, &bit_state, &wrapper_base);
+    if (code < 0)
     {
-        prc_content_prc_base wrapper_base;
-        memset(&wrapper_base, 0, sizeof(wrapper_base));
-        code = prc_parse_content_prc_base(ctx, &bit_state, &wrapper_base);
-        if (code < 0)
-        {
-            printf("prc_parse_content_prc_base failed: code=%d\n", code);
-            prc_api_print_error_stack(ctx);
-            return 1;
-        }
-        attribute_count = wrapper_base.attribute_data.attribute_count;
-        wrapper_name = wrapper_base.name;
+        printf("fs %u: prc_parse_content_prc_base failed (%d), skipping\n", k, code);
+        free(inflated);
+        return 0;
     }
     tess_count = prc_bitread_uint32(ctx, &bit_state);
-    printf("Wrapper: attribute_count=%u name.same=%u tess_count=%u\n", attribute_count, wrapper_name.same, tess_count);
     if (tess_count != 1)
     {
-        printf("this tool only handles tess_count==1 files (got %u)\n", tess_count);
-        return 1;
+        printf("fs %u: tess_count=%u (not 1), skipping\n", k, tess_count);
+        free(inflated);
+        return 0;
     }
-
     entry_tag = prc_bitread_uint32(ctx, &bit_state);
     if (entry_tag != PRC_TYPE_TESS_3D_Compressed)
     {
-        printf("first tessellation entry is not COMPRESSED (tag=%u) -- not handled by this tool\n", entry_tag);
-        return 1;
+        printf("fs %u: first tessellation entry tag=%u (not COMPRESSED), skipping\n", k, entry_tag);
+        free(inflated);
+        return 0;
     }
 
     code = prc_parse_tess_3d_compressed(ctx, &bit_state, &parsed, 0);
     if (code < 0)
     {
-        printf("prc_parse_tess_3d_compressed failed: code=%d\n", code);
+        printf("fs %u: prc_parse_tess_3d_compressed failed (%d), skipping\n", k, code);
         prc_api_print_error_stack(ctx);
-        return 1;
+        free(inflated);
+        return 0;
     }
 
-    printf("Parsed real tessellation: is_calculated=%u has_faces=%u tolerance=%.17g origin=(%f,%f,%f)\n",
-        parsed->is_calculated, parsed->has_faces, parsed->tolerance,
-        parsed->origin_array.x, parsed->origin_array.y, parsed->origin_array.z);
-    printf("  point_array_size=%u edge_status_array_size=%u triangle_face_array_size=%u face_number=%u\n",
-        parsed->point_array_size, parsed->edge_status_array_size, parsed->triangle_face_array_size, parsed->face_number);
-    printf("  reference_array_size=%u point_reference_array_size=%u must_recalculate_normals=%u\n",
-        parsed->reference_array_size, parsed->point_reference_array_size, parsed->must_recalculate_normals);
-    if (parsed->must_recalculate_normals)
-        printf("  crease_angle(rad)=%.17g\n", parsed->crease_angle);
-    else
-        printf("  normal_angle_number_of_bits=%u normal_binary_data_size=%u normal_angle_array_size=%u\n",
-            parsed->normal_angle_number_of_bits, parsed->normal_binary_data_size, parsed->normal_angle_array_size);
-    printf("  is_point_color=%u point_color_array_size=%u\n",
-        parsed->is_point_color, parsed->point_color_array_size);
-    printf("  is_multiple_line_attribute=%u line_attribute_array_size=%u\n",
-        parsed->is_multiple_line_attribute, parsed->line_attribute_array_size);
-    printf("  no_texture=%u has_behaviors=%u behaviors_array_size=%u\n",
-        parsed->no_texture, parsed->has_behaviors, parsed->behaviors_array_size);
-
-    /* Build the traversal-result struct from parsed values -- no mutation. */
     memset(&trav, 0, sizeof(trav));
     trav.point_array = parsed->point_array;
     trav.point_array_size = parsed->point_array_size;
-    /* Our writer pads edge_status_array to 3*T itself; feed it exactly T
-       (== triangle_face_array_size) real entries, matching how it's
-       normally called from a fresh traversal. */
     trav.edge_status_array = parsed->edge_status_array;
     trav.edge_status_array_size = parsed->triangle_face_array_size;
 
     triangle_face_array_signed = (int32_t *)malloc(sizeof(int32_t) * (parsed->triangle_face_array_size > 0 ? parsed->triangle_face_array_size : 1));
-    for (k = 0; k < parsed->triangle_face_array_size; k++)
-        triangle_face_array_signed[k] = (int32_t)parsed->triangle_face_array[k];
+    for (kk = 0; kk < parsed->triangle_face_array_size; kk++)
+        triangle_face_array_signed[kk] = (int32_t)parsed->triangle_face_array[kk];
     trav.triangle_face_array = triangle_face_array_signed;
     trav.triangle_face_array_size = parsed->triangle_face_array_size;
 
@@ -273,23 +223,13 @@ int main(int argc, char **argv)
     if (parsed->must_recalculate_normals)
         crease_angle_degrees = parsed->crease_angle * 180.0 / M_PI;
 
-    /* Write the section wrapper AND the entry body into ONE continuous
-       bitstream (matching prc_write_tessellation_section_to_stream's own
-       structure exactly) -- NOT into two separately-flushed bit_write_
-       states spliced together afterward. The wrapper's own bits
-       (32+32+1+32 = 97) are not byte-aligned, so flushing the entry body
-       to a byte boundary on its own and then byte-copying it into the
-       wrapper stream shifts every subsequent bit by 1 and corrupts
-       everything after the splice point -- confirmed the hard way (this
-       tool's first version did exactly that and produced a file that
-       failed to parse at all, even through our own reader). */
     memset(&wrapper_s, 0, sizeof(wrapper_s));
-    if (prc_bitwrite_init(ctx, &wrapper_s, 4096) != 0) { printf("wrapper init failed\n"); return 1; }
-    if (prc_bitwrite_uint32(ctx, &wrapper_s, PRC_TYPE_ASM_FileStructureTessellation) != 0) { printf("wrapper tag failed\n"); return 1; }
-    if (prc_bitwrite_uint32(ctx, &wrapper_s, 0) != 0) { printf("wrapper attr failed\n"); return 1; } /* attribute_count=0 */
-    if (prc_bitwrite_bit(ctx, &wrapper_s, 1) != 0) { printf("wrapper name failed\n"); return 1; }    /* name.same=1 */
-    if (prc_bitwrite_uint32(ctx, &wrapper_s, 1) != 0) { printf("wrapper tess_count failed\n"); return 1; } /* tess_count=1 */
-    if (prc_bitwrite_uint32(ctx, &wrapper_s, PRC_TYPE_TESS_3D_Compressed) != 0) { printf("entry tag failed\n"); return 1; }
+    if (prc_bitwrite_init(ctx, &wrapper_s, 4096) != 0) { printf("fs %u: wrapper init failed, skipping\n", k); goto cleanup; }
+    if (prc_bitwrite_uint32(ctx, &wrapper_s, PRC_TYPE_ASM_FileStructureTessellation) != 0) { printf("fs %u: wrapper tag write failed, skipping\n", k); goto cleanup; }
+    if (prc_bitwrite_uint32(ctx, &wrapper_s, 0) != 0) { printf("fs %u: wrapper attr write failed, skipping\n", k); goto cleanup; }
+    if (prc_bitwrite_bit(ctx, &wrapper_s, 1) != 0) { printf("fs %u: wrapper name write failed, skipping\n", k); goto cleanup; }
+    if (prc_bitwrite_uint32(ctx, &wrapper_s, 1) != 0) { printf("fs %u: wrapper tess_count write failed, skipping\n", k); goto cleanup; }
+    if (prc_bitwrite_uint32(ctx, &wrapper_s, PRC_TYPE_TESS_3D_Compressed) != 0) { printf("fs %u: entry tag write failed, skipping\n", k); goto cleanup; }
     code = prc_write_compress_tess_to_stream(ctx, &wrapper_s, &trav, parsed->tolerance,
         parsed->must_recalculate_normals ? parsed->normal_is_reversed : NULL,
         crease_angle_degrees,
@@ -301,80 +241,251 @@ int main(int argc, char **argv)
         parsed->must_recalculate_normals ? NULL : (const uint8_t *)parsed->is_face_planar);
     if (code != 0)
     {
-        printf("prc_write_compress_tess_to_stream failed: code=%d\n", code);
+        printf("fs %u: prc_write_compress_tess_to_stream failed (%d), skipping\n", k, code);
         prc_api_print_error_stack(ctx);
-        return 1;
+        goto cleanup;
     }
-    if (prc_bitwrite_flush(ctx, &wrapper_s) != 0) { printf("wrapper flush failed\n"); return 1; }
-
-    /* Dump both INFLATED (pre-deflate) bitstreams so a bit-level diff can be
-       done directly -- deflate output can legitimately differ byte-for-byte
-       between two zlib invocations of logically identical data (different
-       compression-level defaults, etc), so comparing compressed bytes would
-       be meaningless. The uncompressed wrapper bitstream is the real
-       ground truth for whether our bit-packing matches the real file's. */
-    if (argc >= 5)
-    {
-        FILE *dbg_fid;
-        dbg_fid = fopen(argv[3], "wb");
-        if (dbg_fid != NULL) { fwrite(tess_inflated, 1, dest_len_saved, dbg_fid); fclose(dbg_fid); }
-        dbg_fid = fopen(argv[4], "wb");
-        if (dbg_fid != NULL) { fwrite(wrapper_s.buf, 1, wrapper_s.byte_pos, dbg_fid); fclose(dbg_fid); }
-        printf("Dumped inflated bitstreams: real=%s (%lu bytes) reencoded=%s (%zu bytes)\n",
-            argv[3], (unsigned long)dest_len_saved, argv[4], wrapper_s.byte_pos);
-    }
+    if (prc_bitwrite_flush(ctx, &wrapper_s) != 0) { printf("fs %u: wrapper flush failed, skipping\n", k); goto cleanup; }
 
     if (prc_write_deflate(ctx, wrapper_s.buf, wrapper_s.byte_pos, &wrapper_comp, &wrapper_comp_len) != 0)
     {
-        printf("deflate failed\n");
+        printf("fs %u: deflate failed, skipping\n", k);
+        goto cleanup;
+    }
+
+    printf("fs %u: tess reencoded, %u -> %zu bytes (compressed)\n", k, comp_len, wrapper_comp_len);
+    *out_bytes = wrapper_comp;
+    *out_len = wrapper_comp_len;
+    ok = 1;
+    wrapper_comp = NULL; /* ownership transferred */
+
+cleanup:
+    free(triangle_face_array_signed);
+    prc_bitwrite_release(ctx, &wrapper_s);
+    if (wrapper_comp != NULL) prc_free(ctx, wrapper_comp);
+    free(inflated);
+    /* `parsed` intentionally not freed -- consistent with this tool's
+       existing standard of not chasing every allocation in a one-shot
+       diagnostic CLI; process exit reclaims it. */
+    return ok;
+}
+
+int main(int argc, char **argv)
+{
+    prc_context *ctx;
+    FILE *fid;
+    long fsize;
+    uint8_t *buf;
+    size_t read_size;
+    const uint8_t *p;
+    uint32_t file_structure_count;
+    fs_info *fs;
+    uint32_t k, j;
+    uint32_t start_offset, end_offset, file_count;
+    size_t header_len;
+    size_t total_bounds, bi;
+    uint32_t *bounds;
+    uint32_t *header_bytepos;
+    int32_t *owner_k, *owner_i;
+    uint8_t **new_tess_bytes;
+    size_t *new_tess_len;
+    uint8_t *fs_processed;
+    uint32_t n_processed = 0;
+    int64_t *chunk_delta;
+    uint32_t *new_bounds;
+    int64_t running;
+    size_t m;
+    uint8_t *out_buf;
+    size_t new_total_size;
+    FILE *out_fid;
+
+    if (argc < 3)
+    {
+        printf("usage: %s <real_input.prc> <output.prc>\n", argv[0]);
+        return 2;
+    }
+
+    fid = fopen(argv[1], "rb");
+    if (fid == NULL) { printf("failed to open %s\n", argv[1]); return 1; }
+    fseek(fid, 0L, SEEK_END);
+    fsize = ftell(fid);
+    fseek(fid, 0L, SEEK_SET);
+    buf = (uint8_t *)malloc((size_t)fsize);
+    read_size = fread(buf, 1, (size_t)fsize, fid);
+    fclose(fid);
+    if (read_size != (size_t)fsize) { printf("short read\n"); return 1; }
+    if (memcmp(buf, "PRC", 3) != 0) { printf("not a raw PRC file\n"); return 1; }
+
+    p = buf + 3 + 4 + 4 + 16 + 16; /* magic + min_vers + auth_vers + file_uid + app_uid */
+    file_structure_count = read_le_u32(p); p += 4;
+    if (file_structure_count == 0) { printf("file_structure_count=0\n"); return 1; }
+
+    fs = (fs_info *)calloc(file_structure_count, sizeof(fs_info));
+
+    /* Every section_offset entry (across all file structures) plus the
+       trailing start_offset/end_offset markers, in file order -- this is
+       the flat chunk-boundary list the splice pass below walks. */
+    total_bounds = 2;
+
+    /* First pass just to learn each fs's section_count (needed to size arrays). */
+    {
+        const uint8_t *pp = p;
+        for (k = 0; k < file_structure_count; k++)
+        {
+            uint32_t sc;
+            pp += 16 + 4; /* uid + reserved */
+            sc = read_le_u32(pp); pp += 4;
+            pp += (size_t)sc * 4;
+            fs[k].section_count = sc;
+            total_bounds += sc;
+        }
+    }
+
+    bounds = (uint32_t *)malloc(sizeof(uint32_t) * total_bounds);
+    header_bytepos = (uint32_t *)malloc(sizeof(uint32_t) * total_bounds);
+    owner_k = (int32_t *)malloc(sizeof(int32_t) * total_bounds);
+    owner_i = (int32_t *)malloc(sizeof(int32_t) * total_bounds);
+
+    bi = 0;
+    for (k = 0; k < file_structure_count; k++)
+    {
+        p += 16; /* fs_uid */
+        p += 4;  /* reserved */
+        p += 4;  /* section_count (already known from pre-pass) */
+        fs[k].section_offset = (uint32_t *)malloc(sizeof(uint32_t) * fs[k].section_count);
+        for (j = 0; j < fs[k].section_count; j++)
+        {
+            header_bytepos[bi] = (uint32_t)(p - buf);
+            fs[k].section_offset[j] = read_le_u32(p); p += 4;
+            bounds[bi] = fs[k].section_offset[j];
+            owner_k[bi] = (int32_t)k;
+            owner_i[bi] = (int32_t)j;
+            bi++;
+        }
+    }
+    header_bytepos[bi] = (uint32_t)(p - buf);
+    start_offset = read_le_u32(p); p += 4;
+    bounds[bi] = start_offset; owner_k[bi] = -1; owner_i[bi] = 0; bi++;
+    header_bytepos[bi] = (uint32_t)(p - buf);
+    end_offset = read_le_u32(p); p += 4;
+    bounds[bi] = end_offset; owner_k[bi] = -1; owner_i[bi] = 1; bi++;
+    file_count = read_le_u32(p); p += 4;
+    if (file_count != 0) { printf("external file references (file_count=%u) not supported\n", file_count); return 1; }
+    if (bi != total_bounds) { printf("internal error: bound count mismatch (%zu vs %zu)\n", bi, total_bounds); return 1; }
+    header_len = (size_t)(p - buf);
+
+    for (m = 1; m < total_bounds; m++)
+    {
+        if (bounds[m] < bounds[m-1])
+        {
+            printf("section offsets are not monotonically increasing at index %zu (%u < %u) -- "
+                "container layout differs from what this tool assumes, aborting\n", m, bounds[m], bounds[m-1]);
+            return 1;
+        }
+    }
+
+    ctx = prc_api_new_context(NULL);
+    if (ctx == NULL) { printf("context creation failed\n"); return 1; }
+
+    printf("file_structure_count=%u\n", file_structure_count);
+
+    new_tess_bytes = (uint8_t **)calloc(file_structure_count, sizeof(uint8_t *));
+    new_tess_len = (size_t *)calloc(file_structure_count, sizeof(size_t));
+    fs_processed = (uint8_t *)calloc(file_structure_count, 1);
+
+    for (k = 0; k < file_structure_count; k++)
+    {
+        uint8_t *ob = NULL;
+        size_t ol = 0;
+        if (try_reencode_fs_tess(ctx, buf, k, &fs[k], &ob, &ol))
+        {
+            new_tess_bytes[k] = ob;
+            new_tess_len[k] = ol;
+            fs_processed[k] = 1;
+            n_processed++;
+        }
+    }
+
+    printf("Re-encoded %u of %u file structures' tessellation sections\n", n_processed, file_structure_count);
+    if (n_processed == 0)
+    {
+        printf("Nothing to re-encode, not writing output\n");
         return 1;
     }
-    printf("Re-encoded tessellation section: %zu bytes compressed (real was %u bytes)\n",
-        wrapper_comp_len, section_offsets[4] - section_offsets[3]);
 
-    /* Splice into the original file: sections [0..3) unchanged, section 3
-       (tessellation) replaced, sections [4..end) unchanged content, shifted position. */
-    new_section_offsets = (uint32_t *)malloc(sizeof(uint32_t) * section_count);
-    for (i = 0; i <= 3; i++) new_section_offsets[i] = section_offsets[i];
-    new_section_offsets[4] = section_offsets[3] + (uint32_t)wrapper_comp_len;
+    /* Recompute every offset as a running prefix-sum of per-chunk size
+       deltas. Chunk m spans [bounds[m], bounds[m+1]) for m in
+       [0, total_bounds-1); it is a "replace" chunk iff it's owned by
+       section index 3 of a file structure we successfully re-encoded. */
+    chunk_delta = (int64_t *)calloc(total_bounds > 0 ? total_bounds - 1 : 0, sizeof(int64_t));
+    for (m = 0; m + 1 < total_bounds; m++)
     {
-        int32_t delta = (int32_t)new_section_offsets[4] - (int32_t)section_offsets[4];
-        for (i = 5; i < section_count; i++)
-            new_section_offsets[i] = (uint32_t)((int32_t)section_offsets[i] + delta);
-        new_start_offset = (uint32_t)((int32_t)start_offset + delta);
-        new_end_offset = (uint32_t)((int32_t)end_offset + delta);
+        uint32_t old_len = bounds[m+1] - bounds[m];
+        int is_replace = (owner_k[m] >= 0 && owner_i[m] == 3 && fs_processed[(uint32_t)owner_k[m]]);
+        uint32_t new_len = is_replace ? (uint32_t)new_tess_len[(uint32_t)owner_k[m]] : old_len;
+        chunk_delta[m] = (int64_t)new_len - (int64_t)old_len;
     }
-    new_total_size = (size_t)new_end_offset;
 
+    new_bounds = (uint32_t *)malloc(sizeof(uint32_t) * total_bounds);
+    running = 0;
+    for (m = 0; m < total_bounds; m++)
+    {
+        new_bounds[m] = (uint32_t)((int64_t)bounds[m] + running);
+        if (m + 1 < total_bounds) running += chunk_delta[m];
+    }
+
+    new_total_size = (size_t)new_bounds[total_bounds - 1]; /* new end_offset == new EOF */
     out_buf = (uint8_t *)malloc(new_total_size);
-    memcpy(out_buf, buf, header_prefix_len);
+
+    /* Header: same byte layout/length as the input, only the offset VALUES
+       (at their recorded byte positions) are patched. */
+    memcpy(out_buf, buf, header_len);
+    for (m = 0; m < total_bounds; m++)
+        write_le_u32(out_buf + header_bytepos[m], new_bounds[m]);
+
+    /* Body: walk the same chunk list, copying verbatim or substituting the
+       re-encoded bytes, writing at each chunk's NEW position. */
+    for (m = 0; m + 1 < total_bounds; m++)
     {
-        uint8_t *q = out_buf + section_off_table_byte_pos;
-        size_t real_trailer_pos = section_off_table_byte_pos + (size_t)4 * section_count + 4 + 4;
-        for (i = 0; i < section_count; i++) { write_le_u32(q, new_section_offsets[i]); q += 4; }
-        write_le_u32(q, new_start_offset); q += 4;
-        write_le_u32(q, new_end_offset); q += 4;
-        memcpy(q, buf + real_trailer_pos, 4);
+        uint32_t old_start = bounds[m];
+        uint32_t old_len = bounds[m+1] - bounds[m];
+        uint32_t new_start = new_bounds[m];
+        int is_replace = (owner_k[m] >= 0 && owner_i[m] == 3 && fs_processed[(uint32_t)owner_k[m]]);
+        if (is_replace)
+        {
+            uint32_t fk = (uint32_t)owner_k[m];
+            memcpy(out_buf + new_start, new_tess_bytes[fk], new_tess_len[fk]);
+        }
+        else
+        {
+            memcpy(out_buf + new_start, buf + old_start, old_len);
+        }
     }
-    memcpy(out_buf + new_section_offsets[0], buf + section_offsets[0], section_offsets[3] - section_offsets[0]);
-    memcpy(out_buf + new_section_offsets[3], wrapper_comp, wrapper_comp_len);
-    memcpy(out_buf + new_section_offsets[4], buf + section_offsets[4], end_offset - section_offsets[4]);
 
     out_fid = fopen(argv[2], "wb");
     if (out_fid == NULL) { printf("failed to open output %s\n", argv[2]); return 1; }
     fwrite(out_buf, 1, new_total_size, out_fid);
     fclose(out_fid);
 
-    printf("Wrote %s (%zu bytes)\n", argv[2], new_total_size);
+    printf("Wrote %s (%zu bytes, was %ld)\n", argv[2], new_total_size, fsize);
 
-    free(triangle_face_array_signed);
-    prc_free(ctx, wrapper_comp);
-    prc_bitwrite_release(ctx, &wrapper_s);
-    prc_api_release_context(ctx);
-    free(section_offsets);
-    free(new_section_offsets);
+    for (k = 0; k < file_structure_count; k++)
+    {
+        free(fs[k].section_offset);
+        if (new_tess_bytes[k] != NULL) prc_free(ctx, new_tess_bytes[k]);
+    }
+    free(fs);
+    free(new_tess_bytes);
+    free(new_tess_len);
+    free(fs_processed);
+    free(bounds);
+    free(header_bytepos);
+    free(owner_k);
+    free(owner_i);
+    free(chunk_delta);
+    free(new_bounds);
     free(out_buf);
     free(buf);
-    free(tess_inflated);
+    prc_api_release_context(ctx);
     return 0;
 }
