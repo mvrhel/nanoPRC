@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstddef> /* For offsetof macro */
+#include <cstdint>
 #include <inttypes.h>
 #include <ctime>
 #include <glad/glad.h>
@@ -22,6 +23,24 @@
 
 
 static std::unordered_map<unsigned char *, Texture *> textureMap;
+
+/* Optional limits for CPU-side pick/introspection buffers.
+    Set any value to 0 to disable that specific limit. */
+#ifndef NANOPRC_PICK_CPU_MAX_VERTICES_PER_PRODUCT
+#define NANOPRC_PICK_CPU_MAX_VERTICES_PER_PRODUCT 0
+#endif
+
+#ifndef NANOPRC_PICK_CPU_MAX_INDICES_PER_PRODUCT
+#define NANOPRC_PICK_CPU_MAX_INDICES_PER_PRODUCT 0
+#endif
+
+#ifndef NANOPRC_PICK_CPU_MAX_TOTAL_BYTES
+#define NANOPRC_PICK_CPU_MAX_TOTAL_BYTES 0
+#endif
+
+static uint64_t g_pick_cpu_bytes_stored = 0;
+static uint32_t g_pick_cpu_skipped_products = 0;
+static bool g_pick_cpu_limit_hit = false;
 
 /* Transform debug toggles for Product::update()
    Set NANOPRC_DEBUG_UPDATE_TRANSFORM to 1 to enable logging.
@@ -269,8 +288,50 @@ Product *Product::getChildFromHeap(uint32_t child_index, Product *product_heap, 
 void Product::uploadGPU(uint32_t num_vertices, prc_api_vertex *vertices_in,
     std::vector<unsigned int> &indices_in)
 {
-    _cpuVertices.assign(vertices_in, vertices_in + num_vertices);
-    _cpuIndices = indices_in;
+    const uint64_t vertex_bytes = (uint64_t)num_vertices * (uint64_t)sizeof(prc_api_vertex);
+    const uint64_t index_bytes = (uint64_t)indices_in.size() * (uint64_t)sizeof(unsigned int);
+    const uint64_t upload_bytes = vertex_bytes + index_bytes;
+    bool keep_cpu_pick_data = true;
+
+#if NANOPRC_PICK_CPU_MAX_VERTICES_PER_PRODUCT > 0
+    if ((uint64_t)num_vertices > (uint64_t)NANOPRC_PICK_CPU_MAX_VERTICES_PER_PRODUCT)
+        keep_cpu_pick_data = false;
+#endif
+
+#if NANOPRC_PICK_CPU_MAX_INDICES_PER_PRODUCT > 0
+    if ((uint64_t)indices_in.size() > (uint64_t)NANOPRC_PICK_CPU_MAX_INDICES_PER_PRODUCT)
+        keep_cpu_pick_data = false;
+#endif
+
+#if NANOPRC_PICK_CPU_MAX_TOTAL_BYTES > 0
+    if (g_pick_cpu_bytes_stored + upload_bytes > (uint64_t)NANOPRC_PICK_CPU_MAX_TOTAL_BYTES)
+        keep_cpu_pick_data = false;
+#endif
+
+    if (keep_cpu_pick_data)
+    {
+        _cpuVertices.assign(vertices_in, vertices_in + num_vertices);
+        _cpuIndices = indices_in;
+        g_pick_cpu_bytes_stored += upload_bytes;
+    }
+    else
+    {
+        _cpuVertices.clear();
+        _cpuIndices.clear();
+        g_pick_cpu_skipped_products++;
+
+        if (!g_pick_cpu_limit_hit)
+        {
+            g_pick_cpu_limit_hit = true;
+            printf("[TrianglePick] CPU pick storage disabled by tessellation limits.\n");
+            printf("[TrianglePick] Limits: maxVertsPerProduct=%u maxIndicesPerProduct=%u maxTotalBytes=%" PRIu64 "\n",
+                (uint32_t)NANOPRC_PICK_CPU_MAX_VERTICES_PER_PRODUCT,
+                (uint32_t)NANOPRC_PICK_CPU_MAX_INDICES_PER_PRODUCT,
+                (uint64_t)NANOPRC_PICK_CPU_MAX_TOTAL_BYTES);
+            printf("[TrianglePick] Current upload: verts=%u indices=%zu bytes=%" PRIu64 "\n",
+                num_vertices, indices_in.size(), upload_bytes);
+        }
+    }
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -329,6 +390,21 @@ void Product::uploadGPU(uint32_t num_vertices, prc_api_vertex *vertices_in,
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+bool Product::cpuPickStorageLimited()
+{
+    return g_pick_cpu_limit_hit;
+}
+
+uint64_t Product::cpuPickStoredBytes()
+{
+    return g_pick_cpu_bytes_stored;
+}
+
+uint32_t Product::cpuPickSkippedProductCount()
+{
+    return g_pick_cpu_skipped_products;
 }
 
 /* A special version of attach where we handle the text portion. Mixing up

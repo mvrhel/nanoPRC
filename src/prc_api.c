@@ -3849,6 +3849,38 @@ prc_api_initialize_tessellation(prc_context *ctx, prc_api_data data_in,
     return 0;
 }
 
+/* Get the type of tessellation from the parsed PRC data */
+PRC_EXPORT prc_api_tess_type_t
+prc_api_get_tessellation_type(prc_context *ctx, prc_api_data data, uint32_t tess_index)
+{
+    prc_data *data_in = (prc_data *)data;
+    uint32_t file_index;
+    uint32_t tessellation_index;
+    int code;
+
+    code = prc_api_helper_get_tess_and_file_index(ctx, data_in, tess_index,
+                                                  &file_index, &tessellation_index);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Failed in prc_api_helper_get_tess_and_file_index\n");
+        return PRC_API_TESS_UNKNOWN;
+    }
+
+    switch (data_in->file_struct[file_index].tessellation->tess[tessellation_index].tess_type)
+    {
+        case PRC_TYPE_TESS_3D:
+            return PRC_API_TESS_3D;
+        case PRC_TYPE_TESS_3D_Compressed:
+            return PRC_API_TESS_3D_Compressed;
+        case PRC_TYPE_TESS_3D_Wire:
+            return PRC_API_TESS_3D_Wire;
+        case PRC_TYPE_TESS_MarkUp:
+            return PRC_API_TESS_MarkUp;
+        default:
+            return PRC_API_TESS_UNKNOWN;
+    }
+}
+
 /* The tess index in this case is an index into either part_details
    or markup details */
 PRC_EXPORT uint32_t

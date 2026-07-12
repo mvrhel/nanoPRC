@@ -1304,6 +1304,7 @@ prc_is_normal_reversed_single_normal(prc_context *ctx, treated_triangle *treated
                                  prc_normal_state *normal_state)
 {
     /* Original behavior: use the normal with the lowest index. */
+    /*
     if (treated_tri->normal_indices[0] < treated_tri->normal_indices[1] &&
         treated_tri->normal_indices[0] < treated_tri->normal_indices[2])
     {
@@ -1321,6 +1322,10 @@ prc_is_normal_reversed_single_normal(prc_context *ctx, treated_triangle *treated
         prc_vec_copy(normal_state->normals_vertex[treated_tri->normal_indices[2]],
             &normal_state->averaged_normal, 0);
     }
+    */
+    /* New behavior: Always use the one at V[0] */
+    prc_vec_copy(normal_state->normals_vertex[treated_tri->normal_indices[0]],
+        &normal_state->averaged_normal, 0);
 
     /* Compare the average of the last three normals to the computed normal to
     *  determine if the triangle was reversed */

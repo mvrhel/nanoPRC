@@ -753,6 +753,15 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
         }
 
         uint32_t nFaces = prc_api_get_number_faces(ctx, data, k);
+
+        /* If we are dealing with a compressed tessellation, force nFaces
+           to one as prc_api_get_tessellation_vertices will handle this
+           appropriately */
+        if (prc_api_get_tessellation_type(ctx, data, k) == PRC_API_TESS_3D_Compressed)
+        {
+            nFaces = 1;
+        }
+
         tess.num_faces = nFaces;
         tess.tess_faces = new prc_api_face[nFaces];
 

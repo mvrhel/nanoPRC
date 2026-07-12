@@ -201,6 +201,9 @@ static bool computePickRay(int mouseX, int mouseY, int viewportW, int viewportH,
 static bool pickTriangleAtScreenPoint(int mouseX, int mouseY, int viewportW,
     int viewportH, PickResult *out)
 {
+    if (Product::cpuPickStorageLimited())
+        return false;
+
     Vector3 rayOrigin, rayDir;
     uint32_t p;
     float bestT = std::numeric_limits<float>::infinity();
@@ -351,7 +354,10 @@ static void printPickResult(const PickResult &pick)
 static void drawTrianglePickOverlay()
 {
     if (!g_lastPick.valid)
-        return;
+    {
+        if (!Product::cpuPickStorageLimited())
+            return;
+    }
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoSavedSettings;
@@ -359,6 +365,18 @@ static void drawTrianglePickOverlay()
     ImGui::SetNextWindowBgAlpha(0.40f);
     if (ImGui::Begin("Triangle Pick", nullptr, flags))
     {
+        if (Product::cpuPickStorageLimited())
+        {
+            ImGui::Text("Triangle pick disabled by tessellation size limits");
+            ImGui::Text("Skipped products: %u", Product::cpuPickSkippedProductCount());
+            ImGui::Text("CPU pick bytes kept: %.2f MB",
+                (float)Product::cpuPickStoredBytes() / (1024.0f * 1024.0f));
+            ImGui::Separator();
+            ImGui::Text("Tune NANOPRC_PICK_CPU_* defines in product.cpp");
+            ImGui::End();
+            return;
+        }
+
         ImGui::Text("Ctrl+LeftClick in viewport to pick triangle");
         ImGui::Separator();
         ImGui::Text("Product: %s",
@@ -1059,9 +1077,17 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
                     SDL_Keymod mod = SDL_GetModState();
                     if ((mod & SDL_KMOD_CTRL) && !mouse_over_debug && dragPixels <= 3)
                     {
-                        pickRequest = true;
-                        pickX = (int)evt.button.x;
-                        pickY = (int)evt.button.y;
+                        if (Product::cpuPickStorageLimited())
+                        {
+                            printf("\n[TrianglePick] disabled by tessellation size limits (skipped products=%u, kept CPU bytes=%" PRIu64 ")\n",
+                                Product::cpuPickSkippedProductCount(), Product::cpuPickStoredBytes());
+                        }
+                        else
+                        {
+                            pickRequest = true;
+                            pickX = (int)evt.button.x;
+                            pickY = (int)evt.button.y;
+                        }
                     }
                     mouseDown = false;
                 }

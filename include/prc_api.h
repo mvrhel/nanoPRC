@@ -416,6 +416,16 @@ PRC_EXPORT uint32_t prc_api_get_number_of_view(prc_context *ctx, prc_api_data da
 PRC_EXPORT int prc_api_get_view(prc_context *ctx, prc_api_data data, uint32_t view_index, char **name, double **matrix, double *camera_z);
 
 /**
+ * @brief Get the type of tessellation from the parsed PRC data
+ *
+ * @param ctx           Active API context.
+ * @param data          Data handle from prc_api_open_contents.
+ * @param tess_index    Index of tessellation.
+ * @return              Type of tessellation (PRC_API_TESS_3D, PRC_API_TESS_3D_Compressed, etc.)
+ */
+PRC_EXPORT prc_api_tess_type_t prc_api_get_tessellation_type(prc_context *ctx, prc_api_data data, uint32_t tess_index);
+
+/**
  * @brief Set a transform structure to identity.
  *
  * @param ctx Active API context.
