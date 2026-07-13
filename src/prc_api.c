@@ -1941,6 +1941,7 @@ prc_api_helper_count_items(prc_context *ctx, prc_api_data data, uint32_t num_fil
         uint32_t biased_file_index;
         uint32_t file_index = work_curr_file_index;
         prc_asm_product_occurrence *prototype_product;
+        uint8_t wants_cross_file_ref = 0;
 
         prc_api_helper_init_unique_id(ctx, &file_id);
 
@@ -1957,22 +1958,37 @@ prc_api_helper_count_items(prc_context *ctx, prc_api_data data, uint32_t num_fil
         if (product_refs->biased_index_prototype != 0 && product_refs->prototype_in_same_file_structure.flag == 0)
         {
             file_id = product_refs->prototype_in_same_file_structure.unique_id;
+            wants_cross_file_ref = 1;
         }
 
         if (product_refs->biased_index_external_data != 0 && product_refs->external_data_in_same_file_structure.flag == 0)
         {
             file_id = product_refs->external_data_in_same_file_structure.unique_id;
+            wants_cross_file_ref = 1;
         }
 
-        biased_file_index = prc_api_helper_get_biased_file_index_from_unique_id(ctx, data, file_id);
+        biased_file_index = wants_cross_file_ref
+            ? prc_api_helper_get_biased_file_index_from_unique_id(ctx, data, file_id) : 0;
         if (biased_file_index != 0)
         {
             file_index = biased_file_index - 1;
         }
 
-        /* This means that there is a part in this file that we need to add.  It
-            can also have children.  We see that in the carburetor part */
-        if (product_refs->biased_index_part != 0)
+        /* biased_index_part/biased_index_prototype below are indices into
+           the file structure named by file_id, not necessarily the current
+           product's own file. If that file structure was requested but
+           isn't among the ones currently loaded (e.g. a deliberately-
+           isolated single-file-structure slice of a larger assembly, or any
+           file missing an external reference target), file_index is still
+           whatever it defaulted to above (the current product's own file) --
+           using it would walk that file's part/product arrays with an index
+           meant for a different, absent file. Skip both blocks below rather
+           than reading out of range. */
+        if (wants_cross_file_ref && biased_file_index == 0)
+        {
+            /* leave part/prototype unprocessed for this product */
+        }
+        else if (product_refs->biased_index_part != 0)
         {
             part = &data_in->file_struct[file_index].tree->parts[product_refs->biased_index_part - 1];
 
@@ -2000,8 +2016,10 @@ prc_api_helper_count_items(prc_context *ctx, prc_api_data data, uint32_t num_fil
         }
 
         /* These are refs to the product. Continue to drill. Product is added in
-            this call so don't add it here */
-        if (product_refs->biased_index_prototype != 0)
+            this call so don't add it here. Guarded by the same
+            wants_cross_file_ref/biased_file_index check as the part block
+            above -- see its comment. */
+        if (!(wants_cross_file_ref && biased_file_index == 0) && product_refs->biased_index_prototype != 0)
         {
             prototype_product =
                 &data_in->file_struct[file_index].tree->products[product_refs->biased_index_prototype - 1];
@@ -2994,6 +3012,7 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
             uint32_t file_index = work_curr_file_index;
             prc_asm_product_occurrence *prototype_product;
             prc_api_transform new_transform;
+            uint8_t wants_cross_file_ref = 0;
             char *base_name;
             prc_api_object_style *product_style;
 
@@ -3011,14 +3030,17 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
             if (product_refs->biased_index_prototype != 0 && product_refs->prototype_in_same_file_structure.flag == 0)
             {
                 file_id = product_refs->prototype_in_same_file_structure.unique_id;
+                wants_cross_file_ref = 1;
             }
 
             if (product_refs->biased_index_external_data != 0 && product_refs->external_data_in_same_file_structure.flag == 0)
             {
                 file_id = product_refs->external_data_in_same_file_structure.unique_id;
+                wants_cross_file_ref = 1;
             }
 
-            biased_file_index = prc_api_helper_get_biased_file_index_from_unique_id(ctx, data, file_id);
+            biased_file_index = wants_cross_file_ref
+                ? prc_api_helper_get_biased_file_index_from_unique_id(ctx, data, file_id) : 0;
             if (biased_file_index != 0)
             {
                 file_index = biased_file_index - 1;
@@ -3048,7 +3070,15 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
                 prc_api_update_transform(ctx, &work_incoming_transform, &new_transform);
             }
 
-            if (product_refs->biased_index_prototype != 0 &&
+            /* !(wants_cross_file_ref && biased_file_index == 0): don't follow
+               a prototype reference whose target file structure couldn't be
+               resolved (see the identical guard/comment in
+               prc_api_helper_count_items) -- file_index would still be this
+               product's own file, not the one biased_index_prototype below
+               is an index into. Fall through to the "last prototype" case
+               instead of reading out of range. */
+            if (!(wants_cross_file_ref && biased_file_index == 0) &&
+                product_refs->biased_index_prototype != 0 &&
                 product_refs->number_of_child_product_occurrences == 0)
             {
                 /* IMPORTANT: pass product_style as the parent for the prototype
