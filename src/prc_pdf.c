@@ -2658,7 +2658,20 @@ pdf_extract_prc_internal(prc_context *ctx, uint8_t *pdf_buff_in, uint32_t size_i
         return code;
     }
 
-    code = sscanf((const char*) ptr, "%u", &xref_offset);
+    /* pdf_buff_in is a raw byte buffer with no guaranteed NUL terminator, so
+       scanning it directly with sscanf risks reading past the allocation if
+       the numeric run isn't followed by a non-digit before EOF (the
+       startxref value is frequently the last thing in the file). Copy a
+       bounded, NUL-terminated window into a stack buffer first instead --
+       more than enough for any real xref byte offset. */
+    {
+        char numbuf[32];
+        size_t avail = (size_t)(file_end - ptr);
+        size_t n = avail < sizeof(numbuf) - 1 ? avail : sizeof(numbuf) - 1;
+        memcpy(numbuf, ptr, n);
+        numbuf[n] = '\0';
+        code = sscanf(numbuf, "%u", &xref_offset);
+    }
     if (code != 1)
     {
         prc_error(ctx, PRC_ERROR_PARSE, "Did not find xref offset in PDF file\n");
