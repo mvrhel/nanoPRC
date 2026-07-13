@@ -64,6 +64,9 @@ add_executable(verify_manifold_pdf tests/internal/verify_manifold_pdf.c)
 target_link_libraries(verify_manifold_pdf prc_static)
 target_include_directories(verify_manifold_pdf PRIVATE tests)
 
+add_executable(detect_tess_spikes tests/internal/detect_tess_spikes.c)
+target_link_libraries(detect_tess_spikes prc_static)
+target_include_directories(detect_tess_spikes PRIVATE tests)
 
 add_executable(dump_raw_tess_arrays tests/internal/dump_raw_tess_arrays.c)
 target_link_libraries(dump_raw_tess_arrays prc_static)
