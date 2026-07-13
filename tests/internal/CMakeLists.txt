@@ -63,3 +63,7 @@ target_include_directories(verify_manifold_real PRIVATE tests)
 add_executable(verify_manifold_pdf tests/internal/verify_manifold_pdf.c)
 target_link_libraries(verify_manifold_pdf prc_static)
 target_include_directories(verify_manifold_pdf PRIVATE tests)
+
+add_executable(prc_to_pdf tests/internal/prc_to_pdf.c)
+target_link_libraries(prc_to_pdf prc_static)
+target_include_directories(prc_to_pdf PRIVATE tests)
