@@ -67,3 +67,7 @@ target_include_directories(verify_manifold_pdf PRIVATE tests)
 add_executable(prc_to_pdf tests/internal/prc_to_pdf.c)
 target_link_libraries(prc_to_pdf prc_static)
 target_include_directories(prc_to_pdf PRIVATE tests)
+
+add_executable(reauthor_tess_pdf tests/internal/reauthor_tess_pdf.c)
+target_link_libraries(reauthor_tess_pdf prc_static)
+target_include_directories(reauthor_tess_pdf PRIVATE tests)
