@@ -1138,6 +1138,12 @@ prc_internal_api_compute_normals(prc_context *ctx,
     uint8_t edge_index, triangle_index;
     uint8_t normal_not_set;
     size_t num_pos = uncompressed_data->position_normal_lut.number_values;
+    uint8_t had_failure = 0;
+
+    /* Per-face scratch mappings must be either fully built or fully released. */
+    uncompressed_data->first_duplicate_for_original = NULL;
+    uncompressed_data->vertex_to_original = NULL;
+    uncompressed_data->vertex_to_original_capacity = 0;
 
 #if 0
     /* Check all edge indices are within bounds */
@@ -1177,8 +1183,10 @@ prc_internal_api_compute_normals(prc_context *ctx,
         (uint32_t *)prc_calloc(ctx, num_pos, sizeof(uint32_t));
     if (uncompressed_data->first_duplicate_for_original == NULL)
     {
-        printf("ERROR: Failed to allocate first_duplicate_for_original\n");
-        return PRC_API_ERROR_MEMORY;
+        code = PRC_API_ERROR_MEMORY;
+        prc_error(ctx, code,
+            "Failed to allocate first_duplicate_for_original in prc_internal_api_compute_normals\n");
+        goto failure;
     }
 
     /* Initialize all to UINT32_MAX (no duplicates yet) */
@@ -1192,9 +1200,10 @@ prc_internal_api_compute_normals(prc_context *ctx,
         (uint32_t *)prc_calloc(ctx, initial_capacity, sizeof(uint32_t));
     if (uncompressed_data->vertex_to_original == NULL)
     {
-        printf("ERROR: Failed to allocate vertex_to_original\n");
-        prc_free(ctx, uncompressed_data->first_duplicate_for_original);
-        return PRC_API_ERROR_MEMORY;
+        code = PRC_API_ERROR_MEMORY;
+        prc_error(ctx, code,
+            "Failed to allocate vertex_to_original in prc_internal_api_compute_normals\n");
+        goto failure;
     }
     uncompressed_data->vertex_to_original_capacity = initial_capacity;
 
@@ -1235,7 +1244,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 edge_index, triangle_index, edge_point0_tri1_set,
                 PRC_INTERNAL_API_SET_FIRST_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (triangle1 edge0) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
 
             edge_index = 1;
             code = prc_internal_api_vertex_edge_normal(ctx, edge,
@@ -1243,7 +1256,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 edge_index, triangle_index, edge_point1_tri1_set,
                 PRC_INTERNAL_API_SET_SECOND_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (triangle1 edge1) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
         }
         else
         {
@@ -1270,7 +1287,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                     code = prc_internal_api_split_edge(ctx, vertex_indices,
                         vertex_out, indices_tri1, edge, uncompressed_data);
                     if (code < 0)
-                        return code;
+                    {
+                        prc_error(ctx, code,
+                            "Failed in prc_internal_api_split_edge in prc_internal_api_compute_normals\n");
+                        goto failure;
+                    }
 
                     /* Assign normals for triangle1 (may cause additional vertex splits) */
                     triangle_index = 1;
@@ -1280,7 +1301,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                         crease_angle, edge_index, triangle_index, edge_point0_tri1_set,
                         PRC_INTERNAL_API_SET_FIRST_NORMAL_OF_EDGE, uncompressed_data);
                     if (code < 0)
-                        return code;
+                    {
+                        prc_error(ctx, code,
+                            "Failed in prc_internal_api_vertex_edge_normal (split triangle1 edge0) in prc_internal_api_compute_normals\n");
+                        goto failure;
+                    }
 
                     edge_index = 1;
                     code = prc_internal_api_vertex_edge_normal(ctx, edge,
@@ -1288,7 +1313,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                         crease_angle, edge_index, triangle_index, edge_point1_tri1_set,
                         PRC_INTERNAL_API_SET_SECOND_NORMAL_OF_EDGE, uncompressed_data);
                     if (code < 0)
-                        return code;
+                    {
+                        prc_error(ctx, code,
+                            "Failed in prc_internal_api_vertex_edge_normal (split triangle1 edge1) in prc_internal_api_compute_normals\n");
+                        goto failure;
+                    }
 
                     /* Assign normals to triangle2 (new duplicates) */
                     triangle_index = 2;
@@ -1302,7 +1331,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                         crease_angle, edge_index, triangle_index, normal_not_set,
                         PRC_INTERNAL_API_SET_FIRST_NORMAL_OF_EDGE, uncompressed_data);
                     if (code < 0)
-                        return code;
+                    {
+                        prc_error(ctx, code,
+                            "Failed in prc_internal_api_vertex_edge_normal (split triangle2 edge0) in prc_internal_api_compute_normals\n");
+                        goto failure;
+                    }
 
                     edge_index = 1;
                     code = prc_internal_api_vertex_edge_normal(ctx, edge,
@@ -1310,7 +1343,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                         crease_angle, edge_index, triangle_index, normal_not_set,
                         PRC_INTERNAL_API_SET_SECOND_NORMAL_OF_EDGE, uncompressed_data);
                     if (code < 0)
-                        return code;
+                    {
+                        prc_error(ctx, code,
+                            "Failed in prc_internal_api_vertex_edge_normal (split triangle2 edge1) in prc_internal_api_compute_normals\n");
+                        goto failure;
+                    }
 
                     continue;
                 }
@@ -1333,7 +1370,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 crease_angle, edge_index, triangle_index, edge_point0_tri1_set,
                 PRC_INTERNAL_API_SET_FIRST_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (avg triangle1 edge0) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
 
             edge_index = 1;
             triangle_index = 1;
@@ -1342,7 +1383,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 crease_angle, edge_index, triangle_index, edge_point1_tri1_set,
                 PRC_INTERNAL_API_SET_SECOND_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (avg triangle1 edge1) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
 
             edge_index = 0;
             triangle_index = 2;
@@ -1351,7 +1396,11 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 crease_angle, edge_index, triangle_index, edge_point0_tri2_set,
                 PRC_INTERNAL_API_SET_FIRST_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (avg triangle2 edge0) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
 
             edge_index = 1;
             triangle_index = 2;
@@ -1360,11 +1409,16 @@ prc_internal_api_compute_normals(prc_context *ctx,
                 crease_angle, edge_index, triangle_index, edge_point1_tri2_set,
                 PRC_INTERNAL_API_SET_SECOND_NORMAL_OF_EDGE, uncompressed_data);
             if (code < 0)
-                return code;
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_vertex_edge_normal (avg triangle2 edge1) in prc_internal_api_compute_normals\n");
+                goto failure;
+            }
         }
     }
 
     /* ===== FREE PER-FACE LOCAL ALLOCATIONS ===== */
+success_cleanup:
     if (uncompressed_data->vertex_to_original != NULL)
     {
         prc_free(ctx, uncompressed_data->vertex_to_original);
@@ -1378,12 +1432,23 @@ prc_internal_api_compute_normals(prc_context *ctx,
         uncompressed_data->first_duplicate_for_original = NULL;
     }
 
+    if (had_failure)
+        return code;
+
     /* Compact vertex buffer so only referenced vertices remain */
     code = prc_internal_api_compact_vertices(ctx, uncompressed_data);
     if (code < 0)
+    {
+        prc_error(ctx, code,
+            "Failed in prc_internal_api_compact_vertices in prc_internal_api_compute_normals\n");
         return code;
+    }
 
     return 0;
+
+failure:
+    had_failure = 1;
+    goto success_cleanup;
 }
 
 static void
@@ -1451,38 +1516,49 @@ prc_internal_api_get_vertices(prc_context *ctx, prc_api_data data_in,
     prc_data *data = (prc_data *)data_in;
     prc_tesslation_t tess_type;
     size_t k;
+    int code = 0;
     size_t num_vertices = 0;
     prc_filestructure *file_struct = &data->file_struct[file_index];
+    prc_tess *tess_entry;
+    prc_internal_api_vertex *vertex_buffer = NULL;
 
-    *num_vertices_out = num_vertices;
+    *num_vertices_out = 0;
+    *vertex_buffer_out = NULL;
 
     if (tess_index > file_struct->tessellation->tess_count - 1)
     {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Tessellation index out of range in prc_internal_api_get_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
-    tess_type = file_struct->tessellation->tess[tess_index].tess_type;
+    tess_entry = &file_struct->tessellation->tess[tess_index];
+    tess_type = tess_entry->tess_type;
 
     switch (tess_type)
     {
     case PRC_TYPE_TESS_3D:
     {
-        prc_tess_3d *tess = file_struct->tessellation->tess[tess_index].tess_3d;
+        prc_tess_3d *tess = tess_entry->tess_3d;
         num_vertices = (size_t)tess->tessellation_coordinates.number_of_coordinates / 3;
         if (num_vertices == 0)
-            return PRC_API_ERROR_PARSER;
+        {
+            code = PRC_API_ERROR_PARSER;
+            prc_error(ctx, code,
+                "No uncompressed 3D vertices available in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
-        *num_vertices_out = num_vertices;
-        prc_internal_api_vertex *vertex_buffer =
+        vertex_buffer =
             (prc_internal_api_vertex*) prc_calloc(ctx, num_vertices,
                                                   sizeof(prc_internal_api_vertex));
         if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
-
-        file_struct->tessellation->tess[tess_index].vertices_internal = vertex_buffer;
-
-        if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            code = PRC_API_ERROR_MEMORY;
+            prc_error(ctx, code,
+                "Memory allocation failed for uncompressed 3D vertex buffer in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
         for (k = 0; k < num_vertices; k++)
         {
@@ -1490,28 +1566,30 @@ prc_internal_api_get_vertices(prc_context *ctx, prc_api_data data_in,
             vertex_buffer[k].position[1] = (float)tess->tessellation_coordinates.coordinates[k * 3 + 1];
             vertex_buffer[k].position[2] = (float)tess->tessellation_coordinates.coordinates[k * 3 + 2];
         }
-        *vertex_buffer_out = vertex_buffer;
         break;
     }
     case PRC_TYPE_TESS_3D_Compressed:
     {
-        prc_tess_3d_compressed *tess =
-            file_struct->tessellation->tess[tess_index].tess_3d_compressed;
+        prc_tess_3d_compressed *tess = tess_entry->tess_3d_compressed;
         num_vertices = (size_t)tess->num_vertices_prc_compressed_3d;
         if (num_vertices == 0)
-            return PRC_API_ERROR_PARSER;
+        {
+            code = PRC_API_ERROR_PARSER;
+            prc_error(ctx, code,
+                "No compressed 3D vertices available in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
-        *num_vertices_out = num_vertices;
-        prc_internal_api_vertex *vertex_buffer =
+        vertex_buffer =
             (prc_internal_api_vertex*) prc_calloc(ctx, num_vertices,
                                                   sizeof(prc_internal_api_vertex));
         if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
-
-        file_struct->tessellation->tess[tess_index].vertices_internal = vertex_buffer;
-
-        if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            code = PRC_API_ERROR_MEMORY;
+            prc_error(ctx, code,
+                "Memory allocation failed for compressed 3D vertex buffer in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
         for (k = 0; k < num_vertices; k++)
         {
@@ -1522,30 +1600,36 @@ prc_internal_api_get_vertices(prc_context *ctx, prc_api_data data_in,
             vertex_buffer[k].position[2] =
                 (float)tess->vertices_prc_compressed_3d[k * 3 + 2];
         }
-        *vertex_buffer_out = vertex_buffer;
         break;
     }
     case PRC_TYPE_TESS_Face:
-        break;
+        code = PRC_API_ERROR_PARSER;
+        prc_error(ctx, code,
+            "PRC_TYPE_TESS_Face does not provide vertices in prc_internal_api_get_vertices\n");
+        goto failure;
     case PRC_TYPE_TESS_3D_Wire:
     {
-        prc_tess_3d_wire *tess = file_struct->tessellation->tess[tess_index].tess_3d_wire;
+        prc_tess_3d_wire *tess = tess_entry->tess_3d_wire;
 
         num_vertices = (size_t)tess->tessellation_coordinates.number_of_coordinates / 3;
         if (num_vertices == 0)
-            return PRC_API_ERROR_PARSER;
+        {
+            code = PRC_API_ERROR_PARSER;
+            prc_error(ctx, code,
+                "No wire vertices available in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
-        *num_vertices_out = num_vertices;
-        prc_internal_api_vertex *vertex_buffer =
+        vertex_buffer =
             (prc_internal_api_vertex *)prc_calloc(ctx, num_vertices,
                 sizeof(prc_internal_api_vertex));
         if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
-
-        file_struct->tessellation->tess[tess_index].vertices_internal = vertex_buffer;
-
-        if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            code = PRC_API_ERROR_MEMORY;
+            prc_error(ctx, code,
+                "Memory allocation failed for wire vertex buffer in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
         for (k = 0; k < num_vertices; k++)
         {
@@ -1553,31 +1637,29 @@ prc_internal_api_get_vertices(prc_context *ctx, prc_api_data data_in,
             vertex_buffer[k].position[1] = (float)tess->tessellation_coordinates.coordinates[k * 3 + 1];
             vertex_buffer[k].position[2] = (float)tess->tessellation_coordinates.coordinates[k * 3 + 2];
         }
-
-        *vertex_buffer_out = vertex_buffer;
         break;
     }
     case PRC_TYPE_TESS_MarkUp:
     {
-        prc_tess_markup *tess = file_struct->tessellation->tess[tess_index].tess_markup;
+        prc_tess_markup *tess = tess_entry->tess_markup;
         num_vertices = tess->decode_num_vertices;
         if (num_vertices == 0)
         {
+            *num_vertices_out = 0;
             *vertex_buffer_out = NULL;
             return 0;
         }
 
-        *num_vertices_out = num_vertices;
-        prc_internal_api_vertex *vertex_buffer =
+        vertex_buffer =
             (prc_internal_api_vertex *)prc_calloc(ctx, num_vertices,
                 sizeof(prc_internal_api_vertex));
         if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
-
-        file_struct->tessellation->tess[tess_index].vertices_internal = vertex_buffer;
-
-        if (vertex_buffer == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            code = PRC_API_ERROR_MEMORY;
+            prc_error(ctx, code,
+                "Memory allocation failed for markup vertex buffer in prc_internal_api_get_vertices\n");
+            goto failure;
+        }
 
         for (k = 0; k < num_vertices; k++)
         {
@@ -1585,15 +1667,34 @@ prc_internal_api_get_vertices(prc_context *ctx, prc_api_data data_in,
             vertex_buffer[k].position[1] = (float)tess->decode_vertices[k].y;
             vertex_buffer[k].position[2] = (float)tess->decode_vertices[k].z;
         }
-
-        *vertex_buffer_out = vertex_buffer;
         break;
     }
 
     default:
-        return PRC_API_ERROR_PARSER;
+        code = PRC_API_ERROR_PARSER;
+        prc_error(ctx, code,
+            "Unsupported tessellation type in prc_internal_api_get_vertices\n");
+        goto failure;
     }
+
+    tess_entry->vertices_internal = vertex_buffer;
+    *num_vertices_out = num_vertices;
+    *vertex_buffer_out = vertex_buffer;
     return 0;
+
+failure:
+    if (vertex_buffer != NULL)
+    {
+        prc_free(ctx, vertex_buffer);
+        vertex_buffer = NULL;
+    }
+    if (tess_entry != NULL)
+    {
+        tess_entry->vertices_internal = NULL;
+    }
+    *num_vertices_out = 0;
+    *vertex_buffer_out = NULL;
+    return code;
 }
 
 static int
@@ -2416,7 +2517,11 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
     code = prc_api_helper_get_tess_and_file_index2(ctx, data_in, tess_index_in,
         &file_index, &tess_index);
     if (code < 0)
+    {
+        prc_error(ctx, code,
+            "Failed in prc_api_helper_get_tess_and_file_index2 in prc_api_get_line_tessellation_vertices\n");
         return code;
+    }
 
     file_struct = &data->file_struct[file_index];
     global_data = &file_struct->globals->global_data;
@@ -2424,6 +2529,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
     if (tess_index > file_struct->tessellation->tess_count - 1)
     {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Tessellation index out of range in prc_api_get_line_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
     tess = &file_struct->tessellation->tess[tess_index];
@@ -2431,6 +2538,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
     if (file_struct == NULL || file_index >= data->file_structure_count)
     {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "File index out of range in prc_api_get_line_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
@@ -2452,12 +2561,18 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         if (tess3d_compressed->edge_indices == NULL ||
             tess3d_compressed->edge_vertices == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Compressed wire edge arrays are NULL in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
         vertex_remap = (uint32_t *)prc_malloc(ctx, num_vertices * sizeof(uint32_t));
         if (vertex_remap == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for vertex_remap (compressed wire) in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_MEMORY;
+        }
 
         for (k = 0; k < num_vertices; k++)
         {
@@ -2472,6 +2587,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 uint32_t old_index = tess3d_compressed->edge_indices[k * 2 + j];
                 if (old_index >= num_vertices)
                 {
+                    prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                        "Compressed wire edge index out of range in prc_api_get_line_tessellation_vertices\n");
                     prc_free(ctx, vertex_remap);
                     return PRC_API_ERROR_PARAMETER;
                 }
@@ -2489,6 +2606,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             sizeof(prc_api_vertex));
         if (vertex_out->vertices == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for compressed wire vertex buffer in prc_api_get_line_tessellation_vertices\n");
             prc_free(ctx, vertex_remap);
             return PRC_API_ERROR_MEMORY;
         }
@@ -2514,6 +2633,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             sizeof(prc_internal_api_wire));
         if (wire == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for compressed wire primitive array in prc_api_get_line_tessellation_vertices\n");
             prc_free(ctx, vertex_out->vertices);
             vertex_out->vertices = NULL;
             vertex_out->num_vertices = 0;
@@ -2529,6 +2650,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             wire[k].vertex_indices = (uint32_t *)prc_calloc(ctx, 2, sizeof(uint32_t));
             if (wire[k].vertex_indices == NULL)
             {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for compressed wire primitive indices in prc_api_get_line_tessellation_vertices\n");
                 for (j = 0; j < k; j++)
                 {
                     prc_free(ctx, wire[j].vertex_indices);
@@ -2571,6 +2694,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         if (tess3d->face_tessellation_data == NULL ||
             face_index >= tess3d->number_of_face_tessellation)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Face index out of range for uncompressed wire extraction in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
@@ -2590,16 +2715,22 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
         if (size_of_sizes_wire > 0 && sizes_wire == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "sizes_wire is NULL for uncompressed wire extraction in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
         if (number_of_wire_indices > 0 && wire_indices == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "wire_indices is NULL for uncompressed wire extraction in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
         if (start_of_wire_data > number_of_wire_indices)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "start_of_wire_data out of range in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
@@ -2608,6 +2739,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             uint32_t num_indices = sizes_wire[k] & 0x3FFF;
             if (num_indices > number_of_wire_indices - total_face_wire_indices)
             {
+                prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                    "Wire index count exceeds available indices in prc_api_get_line_tessellation_vertices\n");
                 return PRC_API_ERROR_PARAMETER;
             }
             total_face_wire_indices += num_indices;
@@ -2615,6 +2748,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
         if (total_face_wire_indices > number_of_wire_indices - start_of_wire_data)
         {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Computed total face wire indices out of range in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_PARAMETER;
         }
 
@@ -2626,7 +2761,11 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
         vertex_remap = (uint32_t *)prc_malloc(ctx, prc_num_vertices * sizeof(uint32_t));
         if (vertex_remap == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for vertex_remap (uncompressed wire) in prc_api_get_line_tessellation_vertices\n");
             return PRC_API_ERROR_MEMORY;
+        }
 
         for (k = 0; k < prc_num_vertices; k++)
         {
@@ -2644,6 +2783,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 wire_index_offset++;
                 if (old_index >= prc_num_vertices)
                 {
+                    prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                        "Uncompressed wire index out of range in prc_api_get_line_tessellation_vertices\n");
                     prc_free(ctx, vertex_remap);
                     return PRC_API_ERROR_PARAMETER;
                 }
@@ -2661,6 +2802,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                                                     sizeof(prc_api_vertex));
         if (vertex_out->vertices == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for uncompressed wire vertex buffer in prc_api_get_line_tessellation_vertices\n");
             prc_free(ctx, vertex_remap);
             return PRC_API_ERROR_MEMORY;
         }
@@ -2686,6 +2829,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             sizeof(prc_internal_api_wire));
         if (wire == NULL)
         {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for uncompressed wire primitive array in prc_api_get_line_tessellation_vertices\n");
             prc_free(ctx, vertex_out->vertices);
             vertex_out->vertices = NULL;
             vertex_out->num_vertices = 0;
@@ -2702,6 +2847,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             wire[k].vertex_indices = (uint32_t *)prc_calloc(ctx, wire[k].num_indices, sizeof(uint32_t));
             if (wire[k].vertex_indices == NULL)
             {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for uncompressed wire primitive indices in prc_api_get_line_tessellation_vertices\n");
                 for (j = 0; j < k; j++)
                 {
                     prc_free(ctx, wire[j].vertex_indices);
@@ -2773,12 +2920,22 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
     uint8_t external_style_defined = true;
     uint8_t is_uncompressed_with_no_texture_entities = false;
 
+#define PRC_API_FAIL(_code, _msg)            \
+    do {                                     \
+        prc_error(ctx, (_code), (_msg));     \
+        code = (_code);                      \
+        goto failure;                        \
+    } while (0)
+
     api_tess->has_transparency = 0;
 
     code = prc_api_helper_get_tess_and_file_index2(ctx, data_in, tess_index_in,
         &file_index, &tess_index);
     if (code < 0)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed in prc_api_helper_get_tess_and_file_index2\n");
         return code;
+    }
 
     file_struct = &data->file_struct[file_index];
     global_data = &file_struct->globals->global_data;
@@ -2786,6 +2943,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
     if (tess_index > file_struct->tessellation->tess_count - 1)
     {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "Tess index larger than available tessellations\n");
         return PRC_API_ERROR_PARAMETER;
     }
     tess = &file_struct->tessellation->tess[tess_index];
@@ -2793,6 +2951,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
     if (file_struct == NULL || file_index >= data->file_structure_count)
     {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "File index larger than available file structure\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
@@ -2805,7 +2964,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
         face_out->reserved = (void *)prc_calloc(ctx, 1, sizeof(prc_internal_api_face));
         if (face_out->reserved == NULL)
-            return PRC_API_ERROR_MEMORY;
+            PRC_API_FAIL(PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_out->reserved in prc_api_get_tessellation_vertices\n");
         face_out_reserved = prc_face_internal_face(face_out);
 
         if (tess_type == PRC_TYPE_TESS_3D)
@@ -2813,7 +2973,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             prc_tess_3d *tess3d = tess->tess_3d;
 
             if (face_index > tess3d->number_of_face_tessellation - 1)
-                return PRC_API_ERROR_PARAMETER;
+                PRC_API_FAIL(PRC_API_ERROR_PARAMETER,
+                    "Face index out of range for uncompressed tessellation in prc_api_get_tessellation_vertices\n");
 
             prc_tess_face face = tess3d->face_tessellation_data[face_index];
 
@@ -2827,7 +2988,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 1, sizeof(prc_internal_graph_style));
             if (face_out_reserved->style == NULL)
             {
-                return PRC_API_ERROR_MEMORY; // Memory allocation failed
+                PRC_API_FAIL(PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_out_reserved->style in prc_api_get_tessellation_vertices\n");
             }
 
             /* Lets get the style information for this face. We will traverse
@@ -2838,8 +3000,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 &leaf_style_unbiased_index, &leaf_style_file_index);
             if (code < 0)
             {
-                prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
-                return code;
+                PRC_API_FAIL(code,
+                    "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
             }
 
             code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
@@ -2849,8 +3011,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 tess_index_in, &has_ref_style_defined);
             if (code < 0)
             {
-                prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get face style in prc_api_get_tessellation_vertices\n");
-                return code;
+                PRC_API_FAIL(code,
+                    "Failed to get face style in prc_api_get_tessellation_vertices\n");
             }
 
             if (leaf_style_unbiased_index == -1 && !has_ref_style_defined)
@@ -2871,7 +3033,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                have both. */
             prc_tess_3d_compressed *tess_compressed = tess->tess_3d_compressed;
             if (tess_compressed == NULL)
-                return PRC_API_ERROR_PARSER;
+                PRC_API_FAIL(PRC_API_ERROR_PARSER,
+                    "Compressed tessellation payload is NULL in prc_api_get_tessellation_vertices\n");
 
             /* Defines Triangle, Fan, and Strips locations */
             if (tess_compressed->point_array_size == 0)
@@ -2892,7 +3055,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 tess_compressed->face_number, sizeof(prc_internal_graph_style));
             if (face_out_reserved->style == NULL)
             {
-                return PRC_API_ERROR_MEMORY; // Memory allocation failed
+                PRC_API_FAIL(PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for compressed style table in prc_api_get_tessellation_vertices\n");
             }
             face_out_reserved->number_of_styles = tess_compressed->face_number;
             uint32_t leaf_style_face_0;
@@ -2909,8 +3073,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     &leaf_style_unbiased_index, &leaf_style_file_index);
                 if (code < 0)
                 {
-                    prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
-                    return code;
+                    PRC_API_FAIL(code,
+                        "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
                 }
 
                 if (k == 0)
@@ -2934,8 +3098,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     tess_index_in, &has_ref_style_defined);
                 if (code < 0)
                 {
-                    prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get face style in prc_api_get_tessellation_vertices\n");
-                    return code;
+                    PRC_API_FAIL(code,
+                        "Failed to get face style in prc_api_get_tessellation_vertices\n");
                 }
             }
         }
@@ -2947,7 +3111,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         code = prc_internal_api_get_vertices(ctx, data_in, file_index, tess_index,
             &tess->vertices_internal, &tess->num_vertices_internal);
         if (code < 0)
-            return code;
+        {
+            PRC_API_FAIL(code,
+                "Failed to decode tessellation vertices in prc_api_get_tessellation_vertices\n");
+        }
     }
 
     /* From the vertices compute a bounding box for this tessellation. This can be
@@ -2964,7 +3131,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_get_normals(ctx, data_in, file_index,
                 tess_index, &tess->normals_internal, &tess->num_normals_internal);
             if (code < 0)
-                return code;
+            {
+                PRC_API_FAIL(code,
+                    "Failed to decode tessellation normals in prc_api_get_tessellation_vertices\n");
+            }
         }
     }
 
@@ -2985,16 +3155,16 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         size_t num_indices = 0;
         prc_tess_3d *tess3d = tess->tess_3d;
         size_t index_count = 0;
-        uint32_t *prc_vertex_indice_to_api_vertex_indice;
-        uint32_t *prc_normal_indice_to_api_normal_indice;
-        uint32_t *prc_texture_indice_to_api_texture_indice;
-        float *face_initial_normals;
-        float *face_initial_texture_coords;
-        float *face_initial_positions;
-        uint32_t *face_position_indices;
-        uint32_t *face_normal_indices;
-        uint32_t *face_texture_indices;
-        uint32_t *face_vertex_color_indices;
+        uint32_t *prc_vertex_indice_to_api_vertex_indice = NULL;
+        uint32_t *prc_normal_indice_to_api_normal_indice = NULL;
+        uint32_t *prc_texture_indice_to_api_texture_indice = NULL;
+        float *face_initial_normals = NULL;
+        float *face_initial_texture_coords = NULL;
+        float *face_initial_positions = NULL;
+        uint32_t *face_position_indices = NULL;
+        uint32_t *face_normal_indices = NULL;
+        uint32_t *face_texture_indices = NULL;
+        uint32_t *face_vertex_color_indices = NULL;
         uint32_t single_normal_set;
 
         /* Set to avoid issues during release if this is skipped */
@@ -3012,7 +3182,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         }
 
         if (face_index > tess3d->number_of_face_tessellation - 1)
-            return PRC_API_ERROR_PARAMETER;
+        {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Face index out of range in uncompressed branch of prc_api_get_tessellation_vertices\n");
+            code = PRC_API_ERROR_PARAMETER;
+            goto uncompressed_failure;
+        }
 
         prc_tess_face face = tess3d->face_tessellation_data[face_index];
 
@@ -3032,7 +3207,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             if (code < 0)
             {
                 prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get face style in prc_api_get_tessellation_vertices\n");
-                return code;
+                goto uncompressed_failure;
             }
         }
 
@@ -3040,7 +3215,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         uint32_t *src_index_data = &tess3d->triangulated_index_array[tess3d->face_tessellation_data[face_index].start_triangulated];
 
         if (face_out == NULL)
-            return PRC_API_ERROR_PARAMETER;
+        {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "face_out is NULL in uncompressed branch of prc_api_get_tessellation_vertices\n");
+            code = PRC_API_ERROR_PARAMETER;
+            goto uncompressed_failure;
+        }
 
         /* This gets set even if we don't have a texture. In some files the style
            will not have a texture but the 3D tessellation data still has texture
@@ -3085,7 +3265,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 0, entities_multiple_norms,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripe)
         {
@@ -3093,7 +3273,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 0, entities_multiple_norms,
                                             &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
 
         /* Now we must check the single norm objects */
@@ -3109,7 +3289,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 1, entities_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeOneNormal)
         {
@@ -3117,7 +3297,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 1, entities_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
 
         /* Now we must check the multiple norm textured objects */
@@ -3133,7 +3313,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 0, entities_textured_multiple_norms,
                                             &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeTextured)
         {
@@ -3142,13 +3322,16 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                         entities_textured_multiple_norms, &face_tessellation_index,
                         &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
 
         /* Now we must check the single norm textured objects */
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleOneNormalTextured)
         {
-            return PRC_ERROR_NOT_IMPLEMENTED;
+            code = PRC_ERROR_NOT_IMPLEMENTED;
+            prc_error(ctx, PRC_ERROR_NOT_IMPLEMENTED,
+                "TriangleOneNormalTextured is not implemented in prc_api_get_tessellation_vertices\n");
+            goto uncompressed_failure;
             /* Read number of triangles with one norm and texture */
             prc_internal_api_set_triangles(ctx, face, 1, entities_textured_one_norm,
                                         &face_tessellation_index, &num_indices);
@@ -3159,7 +3342,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 1, entities_textured_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeOneNormalTextured)
         {
@@ -3167,7 +3350,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 1, entities_textured_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
-                return code;
+                goto uncompressed_failure;
         }
 
         if (num_indices == 0)
@@ -3194,7 +3377,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             (uint32_t *)prc_calloc(ctx, num_indices, sizeof(uint32_t));
         if (face_out_reserved->vertex_indices == NULL)
         {
-            return PRC_API_ERROR_MEMORY;
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_out_reserved->vertex_indices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
         }
 
         /* For the mapping tables we have to take the max of the indices and the
@@ -3203,7 +3389,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             (uint32_t *)prc_calloc(ctx, tess->num_vertices_internal, sizeof(uint32_t));
         if (prc_vertex_indice_to_api_vertex_indice == NULL)
         {
-            return PRC_API_ERROR_MEMORY;
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for prc_vertex_indice_to_api_vertex_indice\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
         }
         if (tess->num_normals_internal > 0)
         {
@@ -3211,7 +3400,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 (uint32_t *)prc_calloc(ctx, tess->num_normals_internal, sizeof(uint32_t));
             if (prc_normal_indice_to_api_normal_indice == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for prc_normal_indice_to_api_normal_indice\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3226,7 +3418,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 (uint32_t *) prc_calloc(ctx, tess->tess_3d->number_of_texture_coordinates / 2, sizeof(uint32_t));
             if (prc_texture_indice_to_api_texture_indice == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for prc_texture_indice_to_api_texture_indice\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3261,7 +3456,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             face_initial_normals = (float *)prc_calloc(ctx, num_indices * 3, sizeof(float));
             if (face_initial_normals == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_initial_normals\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3270,16 +3468,26 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         }
 
         face_initial_positions = (float *)prc_calloc(ctx, num_indices * 3, sizeof(float));
+        if (face_initial_positions == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_initial_positions\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
+        }
 
         if (has_texture)
         {
-            for (k = 0; k < texture_indice_num_per_position; k++)
+            /* This buffer is consumed as a single contiguous array in downstream
+               decode helpers; allocating once avoids overwrite leaks. */
+            (void)texture_indice_num_per_position;
+            face_initial_texture_coords = (float *)prc_calloc(ctx, num_indices * 2, sizeof(float));
+            if (face_initial_texture_coords == NULL)
             {
-                face_initial_texture_coords = (float *)prc_calloc(ctx, num_indices * 2, sizeof(float));
-                if (face_initial_texture_coords == NULL)
-                {
-                    return PRC_API_ERROR_MEMORY;
-                }
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_initial_texture_coords\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3292,14 +3500,20 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         face_position_indices = (uint32_t *)prc_calloc(ctx, num_indices, sizeof(uint32_t));
         if (face_position_indices == NULL)
         {
-            return PRC_API_ERROR_MEMORY;
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_position_indices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
         }
         if (tess->num_normals_internal > 0)
         {
             face_normal_indices = (uint32_t *)prc_calloc(ctx, num_indices, sizeof(uint32_t));
             if (face_normal_indices == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_normal_indices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3311,7 +3525,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             face_texture_indices = (uint32_t *)prc_calloc(ctx, num_indices, sizeof(uint32_t));
             if (face_texture_indices == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_texture_indices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3325,7 +3542,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             face_vertex_color_indices = (uint32_t *)prc_calloc(ctx, num_indices, sizeof(uint32_t));
             if (face_vertex_color_indices == NULL)
             {
-                return PRC_API_ERROR_MEMORY;
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_vertex_color_indices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
             }
         }
         else
@@ -3345,7 +3565,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             (prc_internal_api_position_normal_pair *)prc_calloc(ctx, num_indices,
             sizeof(prc_internal_api_position_normal_pair));
         if (tess->position_normal_lut.position_normal_pair == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for tess->position_normal_lut.position_normal_pair\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
+        }
 
         /* Get position_normal_lut initialized */
         for (k = 0; k < num_indices; k++)
@@ -3362,7 +3587,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         face_vertex_out->vertices = (prc_api_vertex *)prc_calloc(ctx, num_indices,
             sizeof(prc_api_vertex));
         if (face_vertex_out->vertices == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_vertex_out->vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto uncompressed_failure;
+        }
 
         face_vertex_out->num_vertices = 0;
         face_vertex_out->capacity = num_indices;
@@ -3389,7 +3619,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 entities_textured_multiple_norms->num_fans > 0 || entities_textured_multiple_norms->num_strips > 0 ||
                 entities_one_norm->num_fans > 0 || entities_one_norm->num_strips > 0)
             {
-                return PRC_API_ERROR_UNSUPPORTED;
+                prc_error(ctx, PRC_API_ERROR_UNSUPPORTED,
+                    "Normal recompute only supports pure triangles in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_UNSUPPORTED;
+                goto uncompressed_failure;
             }
         }
 
@@ -3402,7 +3635,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 entities_multiple_norms->num_strips > 0 || entities_one_norm->num_triangles > 0 ||
                 entities_one_norm->num_fans > 0 || entities_one_norm->num_strips > 0)
             {
-                return PRC_API_ERROR_UNSUPPORTED;
+                prc_error(ctx, PRC_API_ERROR_UNSUPPORTED,
+                    "Mixed textured/non-textured entities are unsupported in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_UNSUPPORTED;
+                goto uncompressed_failure;
             }
         }
 
@@ -3464,7 +3700,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             total_color_values = total_color_values * 3;  /* Three vertices per triangle */
             decoded_colors = (float *)prc_malloc(ctx, total_color_values * 4 * sizeof(float));
             if (decoded_colors == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for decoded vertex colors\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto uncompressed_failure;
+            }
 
             prc_internal_api_process_vertex_color_data(ctx, total_color_values,
                 &face.vertex_colors.color_data, has_alpha, decoded_colors);
@@ -3483,47 +3724,75 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                             entities_multiple_norms->num_triangles, false,
                             &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_triangle_multinorm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_fan_multinorm(ctx,
             entities_multiple_norms->num_fans, entities_multiple_norms->fan_offsets,
             false, &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_fan_multinorm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_strip_multinorm(ctx,
             entities_multiple_norms->num_strips, entities_multiple_norms->strip_offsets,
             false, &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_strip_multinorm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         /* Single norm case no texture */
         code = prc_internal_api_vertex_triangle_one_norm(ctx,
                                 entities_one_norm->num_triangles, false,
                                 &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_triangle_one_norm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_fan_one_norm(ctx,
                                     entities_one_norm->num_fans,
                                     entities_one_norm->fan_offsets, false,
                                     &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_fan_one_norm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_strip_one_norm(ctx,
                                 entities_one_norm->num_strips,
                                 entities_one_norm->strip_offsets, false,
                                 &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_strip_one_norm (non-textured)\n");
+            goto uncompressed_failure;
+        }
 
         /* Multiple norm textured cases */
         code = prc_internal_api_vertex_triangle_multinorm(ctx,
             entities_textured_multiple_norms->num_triangles,
             true, &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_triangle_multinorm (textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_fan_multinorm(ctx,
             entities_textured_multiple_norms->num_fans,
@@ -3531,35 +3800,55 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             true, &uncompressed_data);
 
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_fan_multinorm (textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_strip_multinorm(ctx,
             entities_textured_multiple_norms->num_strips,
             entities_textured_multiple_norms->strip_offsets,
             true, &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_strip_multinorm (textured)\n");
+            goto uncompressed_failure;
+        }
 
         /* Single norm textured case */
         code = prc_internal_api_vertex_triangle_one_norm(ctx,
             entities_textured_one_norm->num_triangles, true,
             &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_triangle_one_norm (textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_fan_one_norm(ctx,
             entities_textured_one_norm->num_fans,
             entities_textured_one_norm->fan_offsets, true,
             &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_fan_one_norm (textured)\n");
+            goto uncompressed_failure;
+        }
 
         code = prc_internal_api_vertex_strip_one_norm(ctx,
             entities_textured_one_norm->num_strips,
             entities_textured_one_norm->strip_offsets, true,
             &uncompressed_data);
         if (code < 0)
-            return code;
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_api_vertex_strip_one_norm (textured)\n");
+            goto uncompressed_failure;
+        }
 
 #if 0
         /* DEBUG. Print out all the vertex positions, normals and diffuse color */
@@ -3627,6 +3916,74 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             prc_free(ctx, tess->position_normal_lut.position_normal_pair);
             tess->position_normal_lut.position_normal_pair = NULL;
         }
+
+        goto uncompressed_done;
+
+uncompressed_failure:
+        if (code == 0)
+            code = PRC_API_ERROR_PARSER;
+        if (code == PRC_API_ERROR_MEMORY || code == PRC_ERROR_MEMORY)
+        {
+            if (face_vertex_out->vertices != NULL)
+            {
+                prc_free(ctx, face_vertex_out->vertices);
+                face_vertex_out->vertices = NULL;
+                face_vertex_out->num_vertices = 0;
+                face_vertex_out->capacity = 0;
+            }
+            if (face_out_reserved != NULL && face_out_reserved->vertex_indices != NULL)
+            {
+                prc_free(ctx, face_out_reserved->vertex_indices);
+                face_out_reserved->vertex_indices = NULL;
+                face_out_reserved->num_indices = 0;
+                face_out_reserved->capacity = 0;
+            }
+        }
+
+        if (uncompressed_data.decoded_colors != NULL)
+            prc_free(ctx, uncompressed_data.decoded_colors);
+        if (prc_vertex_indice_to_api_vertex_indice != NULL)
+            prc_free(ctx, prc_vertex_indice_to_api_vertex_indice);
+        if (prc_normal_indice_to_api_normal_indice != NULL)
+            prc_free(ctx, prc_normal_indice_to_api_normal_indice);
+        if (prc_texture_indice_to_api_texture_indice != NULL)
+            prc_free(ctx, prc_texture_indice_to_api_texture_indice);
+        if (face_initial_normals != NULL)
+            prc_free(ctx, face_initial_normals);
+        if (face_initial_texture_coords != NULL)
+            prc_free(ctx, face_initial_texture_coords);
+        if (face_initial_positions != NULL)
+            prc_free(ctx, face_initial_positions);
+        if (face_position_indices != NULL)
+            prc_free(ctx, face_position_indices);
+        if (face_normal_indices != NULL)
+            prc_free(ctx, face_normal_indices);
+        if (face_texture_indices != NULL)
+            prc_free(ctx, face_texture_indices);
+        if (face_vertex_color_indices != NULL)
+            prc_free(ctx, face_vertex_color_indices);
+        if (tess->position_normal_lut.position_normal_pair != NULL)
+        {
+            for (j = 0; j < tess->position_normal_lut.number_values; j++)
+            {
+                prc_internal_api_position_normal_pair *curr =
+                    tess->position_normal_lut.position_normal_pair[j].next;
+                while (curr != NULL)
+                {
+                    prc_internal_api_position_normal_pair *next = curr->next;
+                    prc_free(ctx, curr);
+                    curr = next;
+                }
+            }
+            prc_free(ctx, tess->position_normal_lut.position_normal_pair);
+            tess->position_normal_lut.position_normal_pair = NULL;
+        }
+        prc_error(ctx, code,
+            "Failure in uncompressed branch of prc_api_get_tessellation_vertices\n");
+        goto failure;
+
+uncompressed_done:
+        ;
     }
     break;
 
@@ -3660,7 +4017,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         uint32_t *prc_normal_indices = tess->normal_indices_prc_compressed_3d;
         int num_prc_vertices = tess->num_vertices_prc_compressed_3d;
         int num_prc_normals = tess->num_normals_prc_compressed_3d;
-        prc_internal_api_position_normal_pair *position_normal_pair, *current;
+        prc_internal_api_position_normal_pair *position_normal_pair = NULL, *current;
         prc_internal_api_position_normal_pair *prev = NULL;
         size_t count = 0;
         int j, k;
@@ -3715,7 +4072,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
            position though */
 
         if (face_out == NULL)
-            return PRC_API_ERROR_PARAMETER;
+        {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "face_out is NULL in compressed branch of prc_api_get_tessellation_vertices\n");
+            code = PRC_API_ERROR_PARAMETER;
+            goto compressed_failure;
+        }
 
         /* We will be returning triangles, no other types of primatives */
         face_out->num_graphic_primitives = 1;
@@ -3746,14 +4108,24 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             (prc_internal_api_position_normal_pair *)prc_calloc(ctx, num_prc_vertices,
                                         sizeof(prc_internal_api_position_normal_pair));
         if (position_normal_pair == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for position_normal_pair in compressed branch\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto compressed_failure;
+        }
 
         /* Allocate twice as many for the possible multiple normal, multiple color,
             situation. We may need to realloc this as we go along */
         vertex_out->vertices = (prc_api_vertex *)prc_calloc(ctx,
                                         num_prc_vertices * 2, sizeof(prc_api_vertex));
         if (vertex_out->vertices == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for vertex_out->vertices in compressed branch\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto compressed_failure;
+        }
 
         vertex_out->num_vertices = num_prc_vertices;
         vertex_out->capacity = num_prc_vertices * 2;
@@ -3762,7 +4134,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         face_out_reserved->vertex_indices = (uint32_t *)prc_calloc(ctx,
                                                 num_prc_indices, sizeof(uint32_t));
         if (face_out_reserved->vertex_indices == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for face_out_reserved->vertex_indices in compressed branch\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto compressed_failure;
+        }
         face_out_reserved->num_indices = num_prc_indices;
         face_out_reserved->capacity = num_prc_indices;
 
@@ -3897,9 +4274,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             /* Ensure triangle index is valid */
             if (current_triangle >= tess->triangle_face_array_size)
             {
+                prc_error(ctx, PRC_API_ERROR_PARSER,
+                    "triangle index exceeds triangle_face_array_size in compressed branch\n");
                 printf("ERROR: triangle_count %u exceeds triangle_face_array_size %u\n",
                     current_triangle, tess->triangle_face_array_size);
-                return PRC_API_ERROR_PARSER;
+                code = PRC_API_ERROR_PARSER;
+                goto compressed_failure;
             }
 
             face_ref_index = tess->triangle_face_array[current_triangle];
@@ -4020,7 +4400,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                             {
                                 if (current->color_set != PRC_INTERNAL_API_COLOR_SET)
                                 {
-                                    return PRC_API_ERROR_PARSER; /* Sanity check */
+                                    prc_error(ctx, PRC_API_ERROR_PARSER,
+                                        "Unexpected color_set state in compressed branch\n");
+                                    code = PRC_API_ERROR_PARSER; /* Sanity check */
+                                    goto compressed_failure;
                                 }
                                 /* Compare the color */
                                 if (prc_api_helper_color_mismatch(ctx,
@@ -4058,7 +4441,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                             {
                                 if (current->style_set != PRC_INTERNAL_API_STYLE_SET_FROM_TESS)
                                 {
-                                    return PRC_API_ERROR_PARSER; /* Sanity check */
+                                    prc_error(ctx, PRC_API_ERROR_PARSER,
+                                        "Unexpected style_set (tess) state in compressed branch\n");
+                                    code = PRC_API_ERROR_PARSER; /* Sanity check */
+                                    goto compressed_failure;
                                 }
                                 /* Compare the style */
                                 if (tess->triangle_styles[triangle_count] !=
@@ -4088,7 +4474,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                             {
                                 if (current->style_set != PRC_INTERNAL_API_STYLE_SET_FROM_REF_DATA)
                                 {
-                                    return PRC_API_ERROR_PARSER; /* Sanity check */
+                                    prc_error(ctx, PRC_API_ERROR_PARSER,
+                                        "Unexpected style_set (ref) state in compressed branch\n");
+                                    code = PRC_API_ERROR_PARSER; /* Sanity check */
+                                    goto compressed_failure;
                                 }
                                 /* Compare the style */
                                 face_ref_index = tess->triangle_face_array[triangle_count];
@@ -4133,7 +4522,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                         (prc_internal_api_position_normal_pair *)prc_calloc(ctx, 1,
                             sizeof(prc_internal_api_position_normal_pair));
                     if (prev->next == NULL)
-                        return PRC_API_ERROR_MEMORY;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_MEMORY,
+                            "Memory allocation failed for position_normal_pair linked node\n");
+                        code = PRC_API_ERROR_MEMORY;
+                        goto compressed_failure;
+                    }
                     prev->next->next = NULL;
                     prev->next->api_vertex_index = (uint32_t)vertex_out->num_vertices;
                     prev->next->normal_set = PRC_INTERNAL_API_NORM_SET;
@@ -4163,7 +4557,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                             vertex_out->vertices,
                             vertex_out->capacity * sizeof(prc_api_vertex));
                         if (new_vertices == NULL)
-                            return PRC_API_ERROR_MEMORY;
+                        {
+                            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                                "Memory reallocation failed for vertex_out->vertices in compressed branch\n");
+                            code = PRC_API_ERROR_MEMORY;
+                            goto compressed_failure;
+                        }
                         vertex_out->vertices = new_vertices;
 
                         /* Clear out any of the new items */
@@ -4350,6 +4749,25 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         prc_free(ctx, position_normal_pair);
 
         break;
+
+compressed_failure:
+        if (position_normal_pair != NULL)
+        {
+            for (k = 0; k < num_prc_vertices; k++)
+            {
+                prc_internal_api_position_normal_pair *temp;
+                current = position_normal_pair[k].next;
+                while (current != NULL)
+                {
+                    temp = current;
+                    current = current->next;
+                    prc_free(ctx, temp);
+                }
+            }
+            prc_free(ctx, position_normal_pair);
+            position_normal_pair = NULL;
+        }
+        goto failure;
     }
     case PRC_TYPE_TESS_Face:
         return PRC_API_ERROR_PARSER;
@@ -4362,11 +4780,18 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             file_struct->tessellation->tess[tess_index].tess_3d_wire;
         uint32_t num_vertices = tess->tessellation_coordinates.number_of_coordinates / 3;
         float *vertex_colors = NULL;
+        prc_internal_api_wire *wire = NULL;
+        uint32_t wire_capacity = 0;
 
         /* Lets allocate the space for the vertices */
         vertex_out->vertices = (prc_api_vertex *)prc_calloc(ctx, num_vertices, sizeof(prc_api_vertex));
         if (vertex_out->vertices == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for wire vertex buffer in prc_api_get_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto wire_failure;
+        }
 
         vertex_out->num_vertices = num_vertices;
         vertex_out->capacity = num_vertices;
@@ -4384,7 +4809,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             uint32_t num_vertex_colors = tess->vertex_color_count;
             vertex_colors = (float *)prc_calloc(ctx, num_vertex_colors * 4, sizeof(float));
             if (vertex_colors == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for wire vertex colors in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto wire_failure;
+            }
 
             prc_internal_api_process_vertex_color_data(ctx, num_vertex_colors,
                 &tess->vertex_color_data.color_data, tess->vertex_color_data.is_rgba,
@@ -4447,15 +4877,26 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             api_tess->num_line_primitives = 1;
 
             /* We have a single wire edge */
-            prc_internal_api_wire *wire = (prc_internal_api_wire *)prc_calloc(ctx, 1,
+            wire_capacity = 1;
+            wire = (prc_internal_api_wire *)prc_calloc(ctx, 1,
                                             sizeof(prc_internal_api_wire));
             if (wire == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for wire primitive array in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto wire_failure;
+            }
 
             wire->num_indices = tess->tessellation_coordinates.number_of_coordinates / 3;
             wire->vertex_indices = (uint32_t *)prc_calloc(ctx, wire->num_indices, sizeof(uint32_t));
             if (wire->vertex_indices == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for wire->vertex_indices in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto wire_failure;
+            }
 
             /* Copy the indices */
             for (k = 0; k < wire->num_indices; k++)
@@ -4481,11 +4922,17 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
             /* For now allocate enough to hold the twice the number of wire indexes.
                This is sufficient to hold all the primitives if they are all connected */
-            prc_internal_api_wire *wire = (prc_internal_api_wire *)prc_calloc(ctx,
+            wire_capacity = 2 * tess->number_of_wire_indexes;
+            wire = (prc_internal_api_wire *)prc_calloc(ctx,
                                                     2 * tess->number_of_wire_indexes,
                                                     sizeof(prc_internal_api_wire));
             if (wire == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for wire primitive array in multi-wire case\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto wire_failure;
+            }
 
             for (k = 0; k < tess->number_of_wire_elements; k++)
             {
@@ -4498,7 +4945,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     wire[wire_count].vertex_indices = (uint32_t *)prc_calloc(ctx,
                                                     num_indices, sizeof(uint32_t));
                     if (wire[wire_count].vertex_indices == NULL)
-                        return PRC_API_ERROR_MEMORY;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_MEMORY,
+                            "Memory allocation failed for closing wire indices\n");
+                        code = PRC_API_ERROR_MEMORY;
+                        goto wire_failure;
+                    }
 
                     /* Copy the indices and divide them each by 3 */
                     for (j = 0; j < num_indices; j++)
@@ -4518,7 +4970,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     wire[wire_count].vertex_indices = (uint32_t *)prc_calloc(ctx,
                                                     num_indices, sizeof(uint32_t));
                     if (wire[wire_count].vertex_indices == NULL)
-                        return PRC_API_ERROR_MEMORY;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_MEMORY,
+                            "Memory allocation failed for continuous wire indices\n");
+                        code = PRC_API_ERROR_MEMORY;
+                        goto wire_failure;
+                    }
 
                     /* Copy the indices and divide them each by 3 */
                     for (j = 0; j < num_indices; j++)
@@ -4539,7 +4996,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     wire[wire_count].vertex_indices = (uint32_t *)prc_calloc(ctx,
                                                                 2, sizeof(uint32_t));
                     if (wire[wire_count].vertex_indices == NULL)
-                        return PRC_API_ERROR_MEMORY;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_MEMORY,
+                            "Memory allocation failed for connecting wire indices\n");
+                        code = PRC_API_ERROR_MEMORY;
+                        goto wire_failure;
+                    }
 
                     /* Copy the indices */
                     prc_tess_3d_wire_element *prev_wire_elements = &tess->wire_elements[k - 1];
@@ -4559,7 +5021,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     wire[wire_count].vertex_indices = (uint32_t *)prc_calloc(ctx,
                                                     num_indices, sizeof(uint32_t));
                     if (wire[wire_count].vertex_indices == NULL)
-                        return PRC_API_ERROR_MEMORY;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_MEMORY,
+                            "Memory allocation failed for wire strip indices\n");
+                        code = PRC_API_ERROR_MEMORY;
+                        goto wire_failure;
+                    }
 
                     /* Copy the indices and divide them each by 3 */
                     for (j = 0; j < num_indices; j++)
@@ -4580,6 +5047,39 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             api_tess->reserved = (void *)wire;
         }
         break;
+
+wire_failure:
+        if (vertex_colors != NULL)
+        {
+            prc_free(ctx, vertex_colors);
+            vertex_colors = NULL;
+        }
+
+        if (wire != NULL)
+        {
+            for (k = 0; k < wire_capacity; k++)
+            {
+                if (wire[k].vertex_indices != NULL)
+                {
+                    prc_free(ctx, wire[k].vertex_indices);
+                    wire[k].vertex_indices = NULL;
+                }
+            }
+            prc_free(ctx, wire);
+            wire = NULL;
+        }
+
+        if (vertex_out != NULL && vertex_out->vertices != NULL)
+        {
+            prc_free(ctx, vertex_out->vertices);
+            vertex_out->vertices = NULL;
+            vertex_out->num_vertices = 0;
+            vertex_out->capacity = 0;
+        }
+
+        api_tess->num_line_primitives = 0;
+        api_tess->reserved = NULL;
+        goto failure;
     }
     case PRC_TYPE_TESS_MarkUp:
     {
@@ -4600,7 +5100,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         /* Lets allocate the space for the vertices */
         vertex_out->vertices = (prc_api_vertex *)prc_calloc(ctx, num_vertices, sizeof(prc_api_vertex));
         if (vertex_out->vertices == NULL)
-            return PRC_API_ERROR_MEMORY;
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for markup vertex buffer in prc_api_get_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto markup_failure;
+        }
 
         vertex_out->num_vertices = num_vertices;
         vertex_out->capacity = num_vertices;
@@ -4621,7 +5126,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             api_tess->text_primitives = (prc_api_text_primitive *)prc_calloc(ctx,
                 api_tess->num_text_primitives, sizeof(prc_api_text_primitive));
             if (api_tess->text_primitives == NULL)
-                return PRC_API_ERROR_MEMORY;
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for markup text primitives in prc_api_get_tessellation_vertices\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto markup_failure;
+            }
         }
 
         if (api_tess->num_line_primitives)
@@ -4631,7 +5141,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                  tess->decode_number_primitives,
                  sizeof(prc_internal_api_wire));
              if (wire == NULL)
-                 return PRC_API_ERROR_MEMORY;
+             {
+                 prc_error(ctx, PRC_API_ERROR_MEMORY,
+                     "Memory allocation failed for markup wire primitives in prc_api_get_tessellation_vertices\n");
+                 code = PRC_API_ERROR_MEMORY;
+                 goto markup_failure;
+             }
         }
 
         /* At this point, we are going to assume that all these primitives have
@@ -4652,7 +5167,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 if (code < 0)
                 {
                     prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get face style in prc_api_get_tessellation_vertices\n");
-                    return code;
+                    goto markup_failure;
                 }
             }
         }
@@ -4690,7 +5205,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 {
                     uint32_t color_index = (tess->decode_primitives[k].biased_color_index - 1)/3;
                     if (color_index > global_data->color_count)
-                    return PRC_API_ERROR_PARSER;
+                    {
+                        prc_error(ctx, PRC_API_ERROR_PARSER,
+                            "Markup text color index out of range in prc_api_get_tessellation_vertices\n");
+                        code = PRC_API_ERROR_PARSER;
+                        goto markup_failure;
+                    }
                     api_tess->text_primitives[text_prim_count].color[0] =
                         global_data->colors[color_index].red;
                     api_tess->text_primitives[text_prim_count].color[1] =
@@ -4723,7 +5243,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 wire[line_prim_count].vertex_indices = (uint32_t *)prc_calloc(ctx,
                     wire[line_prim_count].num_indices, sizeof(uint32_t));
                 if (wire[line_prim_count].vertex_indices == NULL)
-                    return PRC_API_ERROR_MEMORY;
+                {
+                    prc_error(ctx, PRC_API_ERROR_MEMORY,
+                        "Memory allocation failed for markup line primitive indices\n");
+                    code = PRC_API_ERROR_MEMORY;
+                    goto markup_failure;
+                }
 
                 memcpy(wire[line_prim_count].vertex_indices, tess->decode_primitives[k].indices,
                     wire[line_prim_count].num_indices * sizeof(uint32_t));
@@ -4753,12 +5278,86 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         api_tess->reserved = (void *)wire;
 
         break;
+
+markup_failure:
+        if (wire != NULL)
+        {
+            for (j = 0; j < tess->decode_number_primitives; j++)
+            {
+                if (wire[j].vertex_indices != NULL)
+                {
+                    prc_free(ctx, wire[j].vertex_indices);
+                    wire[j].vertex_indices = NULL;
+                }
+            }
+            prc_free(ctx, wire);
+            wire = NULL;
+        }
+
+        if (api_tess->text_primitives != NULL)
+        {
+            prc_free(ctx, api_tess->text_primitives);
+            api_tess->text_primitives = NULL;
+        }
+        api_tess->num_text_primitives = 0;
+
+        if (vertex_out != NULL && vertex_out->vertices != NULL)
+        {
+            prc_free(ctx, vertex_out->vertices);
+            vertex_out->vertices = NULL;
+            vertex_out->num_vertices = 0;
+            vertex_out->capacity = 0;
+        }
+
+        api_tess->num_line_primitives = 0;
+        api_tess->reserved = NULL;
+        goto failure;
     }
 
     default:
-        return PRC_API_ERROR_PARSER;
+        PRC_API_FAIL(PRC_API_ERROR_PARSER,
+            "Unsupported tessellation type in prc_api_get_tessellation_vertices\n");
     }
+
+#undef PRC_API_FAIL
     return 0;
+
+failure:
+    if (has_face && face_out != NULL)
+    {
+        if (face_out->reserved != NULL)
+        {
+            face_out_reserved = prc_face_internal_face(face_out);
+            if (face_out_reserved != NULL)
+            {
+                if (face_out_reserved->style != NULL)
+                {
+                    prc_free(ctx, face_out_reserved->style);
+                    face_out_reserved->style = NULL;
+                }
+            }
+            prc_free(ctx, face_out->reserved);
+            face_out->reserved = NULL;
+        }
+
+        if (face_out->face_vertices.vertices != NULL)
+        {
+            prc_free(ctx, face_out->face_vertices.vertices);
+            face_out->face_vertices.vertices = NULL;
+            face_out->face_vertices.num_vertices = 0;
+            face_out->face_vertices.capacity = 0;
+        }
+    }
+
+    if (vertex_out != NULL && vertex_out->vertices != NULL)
+    {
+        prc_free(ctx, vertex_out->vertices);
+        vertex_out->vertices = NULL;
+        vertex_out->num_vertices = 0;
+        vertex_out->capacity = 0;
+    }
+
+    return code;
 }
 
 PRC_EXPORT uint32_t
