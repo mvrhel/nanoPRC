@@ -803,8 +803,8 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
             for (j = 0; j < tess.num_faces; j++)
             {
                 code = prc_api_get_tessellation_vertices(ctx, data, model_tree,
-                                                        k, j, tess.tess_faces + j,
-                                                        &tess);
+                    k, j, tess.tess_faces + j,
+                    &tess);
                 if (code < 0)
                 {
                     printf("Scene::load: prc_api_get_tessallation_vertices failed\n");

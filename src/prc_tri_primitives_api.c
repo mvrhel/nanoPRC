@@ -3265,7 +3265,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 0, entities_multiple_norms,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleFan entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripe)
         {
@@ -3273,7 +3277,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 0, entities_multiple_norms,
                                             &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleStripe entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
 
         /* Now we must check the single norm objects */
@@ -3289,7 +3297,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 1, entities_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleFanOneNormal entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeOneNormal)
         {
@@ -3297,7 +3309,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 1, entities_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleStripeOneNormal entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
 
         /* Now we must check the multiple norm textured objects */
@@ -3313,7 +3329,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 0, entities_textured_multiple_norms,
                                             &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleFanTextured entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeTextured)
         {
@@ -3322,7 +3342,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                         entities_textured_multiple_norms, &face_tessellation_index,
                         &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleStripeTextured entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
 
         /* Now we must check the single norm textured objects */
@@ -3342,7 +3366,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_fans(ctx, face, 1, entities_textured_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleFanOneNormalTextured entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
         if (face.used_entities_flag & PRC_FACETESSDATA_TriangleStripeOneNormalTextured)
         {
@@ -3350,7 +3378,11 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_internal_api_set_strips(ctx, face, 1, entities_textured_one_norm,
                                         &face_tessellation_index, &num_indices);
             if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed to parse TriangleStripeOneNormalTextured entities in uncompressed PRC_TYPE_TESS_3D branch\n");
                 goto uncompressed_failure;
+            }
         }
 
         if (num_indices == 0)
@@ -3717,6 +3749,8 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         }
 
         single_normal_set = 0;
+        /* When we have mixed types (e.g. fan, triangle, strips we have to keep a running count of the index position */
+        uncompressed_data.index_count = 0;
 
         /* This section is where all heavy work happens */
         /* Multiple norm non-textured cases */
@@ -3850,6 +3884,44 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             goto uncompressed_failure;
         }
 
+        /* NOW we can deal with cleaning up and creating the vertices. We
+           have to wait until we get through all the types */
+        code = prc_internal_uncompressed_create_vertices(ctx, &uncompressed_data);
+        if (code < 0)
+        {
+            prc_error(ctx, code,
+                "Failed in prc_internal_uncompressed_create_vertices\n");
+            goto uncompressed_failure;
+        }
+
+        /* If we have to compute the normals, do that now. This will end up doing
+           vertex splitting as we encounter different normals for triangles that
+           share an edge (assuming the edge angle is greater than the specified
+           crease angle).  WARNING we really should only be here in the case
+           where face.used_entities_flag has only triangle types (no fans or strips) */
+        if (uncompressed_data.must_calculate_normals &&
+            (face.used_entities_flag == PRC_FACETESSDATA_Triangle ||
+             face.used_entities_flag == PRC_FACETESSDATA_TriangleTextured))
+        {
+            size_t num_triangles;
+
+            if (face.used_entities_flag == PRC_FACETESSDATA_Triangle)
+            {
+                num_triangles = entities_multiple_norms->num_triangles;
+            }
+            else
+            {
+                num_triangles = entities_textured_multiple_norms->num_triangles;
+            }
+            code = prc_internal_api_calculate_normals_triangles(ctx, num_triangles,
+                                                                &uncompressed_data);
+            if (code < 0)
+            {
+                prc_error(ctx, code,
+                    "Failed in prc_internal_api_calculate_normals_triangles\n");
+                goto uncompressed_failure;
+            }
+        }
 #if 0
         /* DEBUG. Print out all the vertex positions, normals and diffuse color */
         for (k = 0; k < face_vertex_out->num_vertices; k++)

@@ -46,7 +46,7 @@ prc_internal_api_face_has_vertex_colors(prc_context *ctx,
 /* After we have extracted the vertices from the uncompressed encoding list, we can
    finally compute the normals if needed. Right now, we only support this for
    the case of triangles, NOT fans or strips. */
-static int
+int
 prc_internal_api_calculate_normals_triangles(prc_context *ctx, uint32_t num_triangles,
                             prc_internal_api_uncomm_tess_data *uncompressed_data)
 {
@@ -741,6 +741,35 @@ prc_internal_api_remap_indices(prc_context *ctx,
     return 0;
 }
 
+/* This has to be done after we have added ALL the different types of
+   triangles, stripes and fans. I used to do this with each one but that
+   will not work. */
+int
+prc_internal_uncompressed_create_vertices(prc_context *ctx,
+    prc_internal_api_uncomm_tess_data *uncompressed_data)
+{
+    uint32_t indice_count = uncompressed_data->index_count;
+    int code;
+    uint32_t k;
+    size_t vertex_index;
+    uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
+    uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
+
+    /* Now we want to create the vertices (which include the location, texture,
+       and normal) and the single list of indices to those vertices. */
+    for (k = 0; k < indice_count; k++)
+    {
+        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
+            uncompressed_data->face_texture_indices, num_text_coord,
+            uncompressed_data, k);
+        if (code < 0)
+            return code;
+
+        vertex_indices[k] = (uint32_t)vertex_index;
+    }
+    return 0;
+}
+
 /* PRC_FACETESSDATA_Triangle and PRC_FACETESSDATA_TriangleTextured */
 int
 prc_internal_api_vertex_triangle_multinorm(prc_context *ctx, size_t num_triangles,
@@ -748,8 +777,7 @@ prc_internal_api_vertex_triangle_multinorm(prc_context *ctx, size_t num_triangle
 {
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
-    size_t vertex_index;
+    uint32_t indice_count = uncompressed_data->index_count;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
 
@@ -773,31 +801,7 @@ prc_internal_api_vertex_triangle_multinorm(prc_context *ctx, size_t num_triangle
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
-
-    /* If we have to compute the normals, do that now. This will end up doing
-       vertex splitting as we encounter different normals for triangles that
-       share an edge (assuming the edge angle is greater than the specified
-       crease angle) */
-    if (uncompressed_data->must_calculate_normals)
-    {
-        code = prc_internal_api_calculate_normals_triangles(ctx, num_triangles,
-            uncompressed_data);
-        if (code < 0)
-            return code;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }
@@ -811,7 +815,7 @@ prc_internal_api_vertex_fan_multinorm(prc_context *ctx, size_t num_fans,
 {
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
+    uint32_t indice_count = uncompressed_data->index_count;
     size_t vertex_index;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
@@ -837,19 +841,7 @@ prc_internal_api_vertex_fan_multinorm(prc_context *ctx, size_t num_fans,
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }
@@ -863,7 +855,7 @@ prc_internal_api_vertex_strip_multinorm(prc_context *ctx, size_t num_strips,
 {
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
+    uint32_t indice_count = uncompressed_data->index_count;
     size_t vertex_index;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
@@ -889,19 +881,7 @@ prc_internal_api_vertex_strip_multinorm(prc_context *ctx, size_t num_strips,
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }
@@ -917,7 +897,7 @@ prc_internal_api_vertex_triangle_one_norm(prc_context *ctx,
        triangle indice */
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
+    uint32_t indice_count = uncompressed_data->index_count;
     size_t vertex_index;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
@@ -947,31 +927,7 @@ prc_internal_api_vertex_triangle_one_norm(prc_context *ctx,
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
-
-    /* If we have to compute the normals, do that now. This will end up doing
-       vertex splitting as we encounter different normals for triangles that
-       share an edge (assuming the edge angle is greater than the specified
-       crease angle) */
-    if (uncompressed_data->must_calculate_normals)
-    {
-        code = prc_internal_api_calculate_normals_triangles(ctx, num_triangles,
-            uncompressed_data);
-        if (code < 0)
-            return code;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }
@@ -985,7 +941,7 @@ prc_internal_api_vertex_fan_one_norm(prc_context *ctx,
 {
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
+    uint32_t indice_count = uncompressed_data->index_count;
     size_t vertex_index;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
@@ -1016,19 +972,7 @@ prc_internal_api_vertex_fan_one_norm(prc_context *ctx,
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }
@@ -1042,7 +986,7 @@ prc_internal_api_vertex_strip_one_norm(prc_context *ctx,
 {
     size_t k, j;
     int code;
-    uint32_t indice_count = 0;
+    uint32_t indice_count = uncompressed_data->index_count;
     size_t vertex_index;
     uint32_t num_text_coord = uncompressed_data->face_out_reserved->num_texture_coords;
     uint32_t *vertex_indices = uncompressed_data->face_out_reserved->vertex_indices;
@@ -1072,19 +1016,7 @@ prc_internal_api_vertex_strip_one_norm(prc_context *ctx,
             indice_count++;
         }
     }
-
-    /* Now we want to create the vertices (which include the location, texture,
-       and normal) and the single list of indices to those vertices. */
-    for (k = 0; k < indice_count; k++)
-    {
-        code = prc_internal_api_get_vertex_index(ctx, &vertex_index,
-            uncompressed_data->face_texture_indices, num_text_coord,
-            uncompressed_data, k);
-        if (code < 0)
-            return code;
-
-        vertex_indices[k] = (uint32_t)vertex_index;
-    }
+    uncompressed_data->index_count = indice_count;
 
     return 0;
 }

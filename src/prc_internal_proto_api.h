@@ -149,6 +149,7 @@ typedef struct prc_internal_api_uncomm_tess_data_s
     uint32_t debug_tess_index;
     uint32_t debug_face_index;
 
+    uint32_t index_count;
 } prc_internal_api_uncomm_tess_data;
 
 /**
@@ -286,6 +287,12 @@ void prc_internal_api_set_vertex_texture_coords(prc_context *ctx, prc_api_vertex
 int prc_internal_get_surface_material(prc_context *ctx,
     prc_file_struct_internal_global_data *global_data, int32_t index,
     prc_api_material *material);
+
+int prc_internal_uncompressed_create_vertices(prc_context *ctx,
+    prc_internal_api_uncomm_tess_data *uncompressed_data);
+
+int prc_internal_api_calculate_normals_triangles(prc_context *ctx, uint32_t num_triangles,
+    prc_internal_api_uncomm_tess_data *uncompressed_data);
 
 /** @} */
 

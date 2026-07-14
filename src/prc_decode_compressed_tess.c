@@ -2080,23 +2080,24 @@ int
 prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8_t debug_tess)
 {
     int k;
-    prc_vec3 *point_array_scaled;
+    prc_vec3 *point_array_scaled = NULL;
     int num_triangles;
-    uint32_t *triangle_indices;
+    uint32_t *triangle_indices = NULL;
     int num_points = data->point_array_size / 3;
-    prc_vec3 *normals_vertex;
+    prc_vec3 *normals_vertex = NULL;
     uint32_t point_array_count = 0;
     int reference_array_count = 0;
     treated_triangle treated_tri;
     int points_is_reference_index = 3;
     int vertex_treatment_count = 0;
     int triangle_indice_count = 0;
-    int code;
+    int code = 0;
+    int status_code = 0;
     prc_treated_details treated_details;
     prc_triangle_stack stack;
     prc_vec3 new_point;
-    prc_vec3 *vertices_out;
-    uint32_t *vertex_normal_indices;
+    prc_vec3 *vertices_out = NULL;
+    uint32_t *vertex_normal_indices = NULL;
     int vertex_count;
     int current_bits_zero[4] = {0, 0, 0, 0};
     int new_normal_index;
@@ -2117,10 +2118,16 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     /* Initially set the edge_list to be of size that is half the number of
        points since we will be referencing by the smallest index */
 
-	num_edges = num_points / 2;
+    edge_list.edge = NULL;
+    edge_list.capacity = 0;
+    num_edges = num_points / 2;
 	edge_list.edge = (treated_edge *)prc_calloc(ctx, num_edges, sizeof(treated_edge));
 	if (edge_list.edge == NULL)
-		return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate edge list in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 	edge_list.capacity = num_edges;
 
     /* Items needed if the normals are compressed in the stream and do
@@ -2166,16 +2173,28 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     {
         face_styles = (uint32_t *)prc_calloc(ctx, number_faces, sizeof(uint32_t));
         if (face_styles == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate face_styles in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
 
 		triangle_style_array = (uint32_t *)prc_calloc(ctx,
             data->triangle_face_array_size, sizeof(uint32_t));
 		if (triangle_style_array == NULL)
-			return PRC_ERROR_MEMORY;
+		{
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate triangle_style_array in prc_decode_compressed_tess\n");
+        goto cleanup;
+      }
 
 		face_encountered = (uint8_t *)prc_calloc(ctx, number_faces, sizeof(uint8_t));
 		if (face_encountered == NULL)
-			return PRC_ERROR_MEMORY;
+		{
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate face_encountered in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
     }
 
     /* Can we have a case where we have one normal per face AND we
@@ -2185,14 +2204,20 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     if (has_faces && data->is_face_planar != NULL && data->triangle_face_array != NULL &&
         data->is_face_planar[data->triangle_face_array[0]] && must_calculate_normals)
     {
-        return PRC_ERROR_PARSE;
+        code = PRC_ERROR_PARSE;
+        prc_error(ctx, code, "Unsupported planar-face normal recalculation case in prc_decode_compressed_tess\n");
+        goto cleanup;
     }
 
     if (!must_calculate_normals)
     {
         decoded_angles = (double *)prc_calloc(ctx, sizeof(double), data->normal_angle_array_size);
         if (decoded_angles == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate decoded_angles in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
         prc_decode_angles(ctx, data, decoded_angles);
     }
 
@@ -2202,30 +2227,50 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     /* Allocate the vertices */
     point_array_scaled = (prc_vec3 *)prc_calloc(ctx, sizeof(prc_vec3), num_points);
     if (point_array_scaled == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate point_array_scaled in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     /* Allocate the indices for the triangles.  Number of triangles is the size of
        the triangle_face_array */
     num_triangles = data->triangle_face_array_size;
     triangle_indices = (uint32_t *)prc_calloc(ctx, sizeof(uint32_t), num_triangles * 3);
     if (triangle_indices == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate triangle_indices in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     /* Allocate a normal index for each of the triangle vertices (num_triangles * 3) */
     vertex_normal_indices = (uint32_t *)prc_calloc(ctx, sizeof(uint32_t), num_triangles * 3);
     if (vertex_normal_indices == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate vertex_normal_indices in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     /* output vertices */
     vertices_out = (prc_vec3 *)prc_calloc(ctx, sizeof(prc_vec3), num_points);
     if (vertices_out == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate vertices_out in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     /* The normal vectors that we index. Number of angles divided by 2 */
     /* Or if we have to compute them, it is the number of triangles times three. */
     normals_vertex = (prc_vec3 *)prc_calloc(ctx, sizeof(prc_vec3), num_triangles * 3);
     if (normals_vertex == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate normals_vertex in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     /* multiple_norms is to keep track of info about calculated normals. Mainly about
        if a vertex has multiple normals or not. If it does then when we are decoding
@@ -2263,7 +2308,11 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         multiple_normals = (decoded_normal_info *)prc_calloc(ctx, num_triangles * 3,
                                                         sizeof(decoded_normal_info));
         if (multiple_normals == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate multiple_normals in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
         multiple_normals_size = num_triangles * 3;
     }
 
@@ -2275,7 +2324,11 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         multiple_normals = (decoded_normal_info *)prc_calloc(ctx, number_faces,
             sizeof(decoded_normal_info));
         if (multiple_normals == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate multiple_normals in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
         multiple_normals_size = number_faces;
     }
 #endif
@@ -2285,7 +2338,11 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         multiple_normals = (decoded_normal_info *)prc_calloc(ctx, num_triangles * 3,
             sizeof(decoded_normal_info));
         if (multiple_normals == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate multiple_normals in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
         multiple_normals_size = num_triangles * 3;
     }
 
@@ -2308,15 +2365,27 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     {
         face_normal_decoded = (uint8_t *)prc_calloc(ctx, sizeof(uint8_t), number_faces);
         if (face_normal_decoded == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate face_normal_decoded in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
 
         face_normals = (prc_vec3 *)prc_calloc(ctx, sizeof(prc_vec3), number_faces);
         if (face_normals == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate face_normals in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
 
 		face_normal_indices = (uint32_t*)prc_calloc(ctx, sizeof(uint32_t), number_faces);
 		if (face_normal_indices == NULL)
-			return PRC_ERROR_MEMORY;
+		{
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate face_normal_indices in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
     }
 
 #if VERTEX_DEBUG
@@ -2333,13 +2402,13 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         code = debug_prc_read_vertices_from_JSON_file(ctx, "Add file here", &actual_vertices, num_points);
         if (code < 0)
         {
-            return code;
+            goto cleanup;
         }
 
         code = debug_prc_read_vertices_from_JSON_file(ctx, "Add file here", &actual_normals, 1857);
         if (code < 0)
         {
-            return code;
+            goto cleanup;
         }
 
         /* Open the file */
@@ -2347,7 +2416,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         if (fid == NULL)
         {
             prc_error(ctx, PRC_ERROR_FILE, "Failed to open vertex difference file\n");
-            return PRC_ERROR_FILE;
+            code = PRC_ERROR_FILE;
+            goto cleanup;
         }
     }
 #endif
@@ -2381,7 +2451,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                              0,  &normal_state, debug_tess);
     if (code < 0)
     {
-        return code;
+        prc_error(ctx, code, "Failed in prc_handle_normal_calculation\n");
+        goto cleanup;
     }
 
     /* Store the triangle vertex indices and the normal indices (should be 0, 1, 2) */
@@ -2408,7 +2479,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             code = prc_add_edges_to_list(ctx, &edge_list, &treated_tri);
             if (code < 0)
             {
-                return code;
+                prc_error(ctx, code, "Failed in prc_add_edges_to_list\n");
+                goto cleanup;
             }
         }
 
@@ -2440,12 +2512,14 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                                   &treated_details, PRC_EDGE_RIGHT);
                 if (code < 0)
                 {
-                    return code;
+                    prc_error(ctx, code, "Failed in prc_compute_triangle_basis\n");
+                    goto cleanup;
                 }
                 code = push_stack(ctx, &stack, &treated_details);
                 if (code < 0)
                 {
-                    return code;
+                    prc_error(ctx, code, "Failed in push_stack\n");
+                    goto cleanup;
                 }
             }
 
@@ -2455,12 +2529,14 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                                   &treated_details, PRC_EDGE_LEFT);
                 if (code < 0)
                 {
-                    return code;
+                    prc_error(ctx, code, "Failed in prc_compute_triangle_basis\n");
+                    goto cleanup;
                 }
                 code = push_stack(ctx, &stack, &treated_details);
                 if (code < 0)
                 {
-                    return code;
+                    prc_error(ctx, code, "Failed in push_stack\n");
+                    goto cleanup;
                 }
             }
         }
@@ -2485,7 +2561,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                     &points_is_reference_index);
             if (code < 0)
             {
-                return code;
+                prc_error(ctx, code, "Failed in prc_handle_empty_stack_decode\n");
+                goto cleanup;
             }
 			stack_was_empty = 1;
         }
@@ -2496,7 +2573,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             code = pop_stack(ctx, &stack, &treated_details);
             if (code < 0)
             {
-                return code;
+                prc_error(ctx, code, "Failed in pop_stack\n");
+                goto cleanup;
             }
 
             /* If we had no edges pushed onto the stack, then we need to search
@@ -2525,7 +2603,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                 &points_is_reference_index);
                             if (code < 0)
                             {
-                                return code;
+                                prc_error(ctx, code, "Failed in prc_handle_empty_stack_decode\n");
+                                goto cleanup;
                             }
                         }
                         else
@@ -2534,7 +2613,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                             code = pop_stack(ctx, &stack, &treated_details);
                             if (code < 0)
                             {
-                                return code;
+                                prc_error(ctx, code, "Failed in pop_stack\n");
+                                goto cleanup;
                             }
                         }
                     }
@@ -2553,7 +2633,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                 (uint32_t)points_is_reference_index >= data->reference_array_size)
             {
                 prc_error(ctx, PRC_ERROR_PARSE, "points_is_reference_index out of range\n");
-                return PRC_ERROR_PARSE;
+                code = PRC_ERROR_PARSE;
+                goto cleanup;
             }
 
             /* Only one point is a reference.. */
@@ -2565,13 +2646,15 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                     (uint32_t)reference_array_count >= data->point_reference_array_size)
                 {
                     prc_error(ctx, PRC_ERROR_PARSE, "reference_array_count out of range\n");
-                    return PRC_ERROR_PARSE;
+                    code = PRC_ERROR_PARSE;
+                    goto cleanup;
                 }
                 ref_value = data->point_reference_array[reference_array_count];
                 if (ref_value < 0 || (uint32_t)ref_value >= (uint32_t)num_points)
                 {
                     prc_error(ctx, PRC_ERROR_PARSE, "point_reference_array value out of range\n");
-                    return PRC_ERROR_PARSE;
+                    code = PRC_ERROR_PARSE;
+                    goto cleanup;
                 }
 
                 /* This is a reference point */
@@ -2602,7 +2685,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                     vertex_treatment_count >= num_points)
                 {
                     prc_error(ctx, PRC_ERROR_PARSE, "point_array_count/vertex_treatment_count out of range\n");
-                    return PRC_ERROR_PARSE;
+                    code = PRC_ERROR_PARSE;
+                    goto cleanup;
                 }
 
                 DEBUG_LOG("Origin: [%.17f %.17f %.17f]\n", treated_details.origin.x,
@@ -2675,7 +2759,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                              &normal_state, debug_tess);
         if (code < 0)
         {
-            return code;
+            prc_error(ctx, code, "Failed in prc_handle_normal_calculation\n");
+            goto cleanup;
         }
 
         /* Store the triangle vertex indices and the normal indices */
@@ -2702,6 +2787,7 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         }
 #endif
     }
+
 #if VERTEX_DEBUG
     if (debug_tess)
     {
@@ -2727,18 +2813,30 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         data->point_colors_prc_compressed_3d = (float *)prc_calloc(ctx, sizeof(float),
             data->decoded_point_color_array_size);
         if (data->point_colors_prc_compressed_3d == NULL)
-            return PRC_ERROR_MEMORY;
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate point_colors_prc_compressed_3d in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
         memcpy(data->point_colors_prc_compressed_3d, data->decoded_point_color_array,
             data->decoded_point_color_array_size * sizeof(float));
     }
 
     data->vertices_prc_compressed_3d = (double *)prc_calloc(ctx, sizeof(double), num_points * 3);
     if (data->vertices_prc_compressed_3d == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate vertices_prc_compressed_3d in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     data->normals_prc_compressed_3d = (double *)prc_calloc(ctx, sizeof(double), number_of_normals * 3);
     if (data->normals_prc_compressed_3d == NULL)
-        return PRC_ERROR_MEMORY;
+    {
+        code = PRC_ERROR_MEMORY;
+        prc_error(ctx, code, "Failed to allocate normals_prc_compressed_3d in prc_decode_compressed_tess\n");
+        goto cleanup;
+    }
 
     vertex_count = 0;
     DEBUG_LOG("\nVertices\n");
@@ -2813,12 +2911,20 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     }
 
     /* Check if the stack is empty. If not, then clear it */
+    code = 0;
+
+cleanup:
+    status_code = code;
+
     while (!prc_stack_empty(ctx, &stack))
     {
         code = pop_stack(ctx, &stack, &treated_details);
         if (code < 0)
         {
-            return code;
+            if (status_code >= 0)
+                status_code = code;
+            /* Keep best-effort unwinding on stack cleanup errors. */
+            break;
         }
     }
 
@@ -2856,7 +2962,55 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         edge_list.edge[k].capacity = 0;
         edge_list.edge[k].num_second_indices = 0;
     }
-    prc_free(ctx, edge_list.edge);
+    if (edge_list.edge != NULL)
+    {
+        prc_free(ctx, edge_list.edge);
+        edge_list.edge = NULL;
+    }
+
+    if (status_code < 0)
+    {
+        if (triangle_indices != NULL)
+        {
+            if (data->triangle_indices_prc_compressed_3d == triangle_indices)
+                data->triangle_indices_prc_compressed_3d = NULL;
+            prc_free(ctx, triangle_indices);
+            triangle_indices = NULL;
+            data->num_triangle_indices_prc_compressed_3d = 0;
+        }
+        if (vertex_normal_indices != NULL)
+        {
+            if (data->normal_indices_prc_compressed_3d == vertex_normal_indices)
+                data->normal_indices_prc_compressed_3d = NULL;
+            prc_free(ctx, vertex_normal_indices);
+            vertex_normal_indices = NULL;
+            data->num_normal_indices_prc_compressed_3d = 0;
+        }
+        if (triangle_style_array != NULL)
+        {
+            if (data->triangle_styles == triangle_style_array)
+                data->triangle_styles = NULL;
+            prc_free(ctx, triangle_style_array);
+            triangle_style_array = NULL;
+        }
+        if (data->point_colors_prc_compressed_3d != NULL)
+        {
+            prc_free(ctx, data->point_colors_prc_compressed_3d);
+            data->point_colors_prc_compressed_3d = NULL;
+        }
+        if (data->vertices_prc_compressed_3d != NULL)
+        {
+            prc_free(ctx, data->vertices_prc_compressed_3d);
+            data->vertices_prc_compressed_3d = NULL;
+        }
+        if (data->normals_prc_compressed_3d != NULL)
+        {
+            prc_free(ctx, data->normals_prc_compressed_3d);
+            data->normals_prc_compressed_3d = NULL;
+        }
+        data->num_vertices_prc_compressed_3d = 0;
+        data->num_normals_prc_compressed_3d = 0;
+    }
 
     prc_free(ctx, normals_vertex);
     prc_free(ctx, point_array_scaled);
@@ -2888,7 +3042,7 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             prc_free(ctx, actual_indices);
     }
 #endif
-    return 0;
+    return status_code;
 }
 
 static void
