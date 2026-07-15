@@ -57,7 +57,7 @@ double tess_spike_global_median(const double *max_edge, uint32_t ntri);
 /* Evaluates triangle t's spike ratios against precomputed adjacency/
    max_edge/global_median data. Returns 1 if flagged (local ratio exceeds
    ratio_threshold OR global ratio exceeds global_ratio_threshold), 0
-   otherwise. *out_ratio/*out_local_median/*out_global_ratio/*out_by_global
+   otherwise. *out_ratio / *out_local_median / *out_global_ratio / *out_by_global
    are always filled regardless of the flag outcome, so a caller re-scoring
    a hypothetical candidate position (with max_edge[t] recomputed for that
    candidate, everything else held fixed) can compare severities directly. */

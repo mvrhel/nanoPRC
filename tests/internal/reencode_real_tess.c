@@ -108,7 +108,7 @@ typedef struct
 /* Attempt to re-encode file structure k's tessellation section (its section
    index 3, [section_offset[3], section_offset[4])) with nanoPRC's own
    writer, fed the values nanoPRC's own parser decoded from the real bytes.
-   On success, *out_bytes/*out_len receive a malloc'd deflated blob (caller
+   On success, *out_bytes / *out_len receive a malloc'd deflated blob (caller
    frees) and the function returns 1. On any "not eligible" or parse/write
    failure, prints a one-line reason and returns 0 (leave this fs's section
    untouched -- not a fatal error for the whole file). */
