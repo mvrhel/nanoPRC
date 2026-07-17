@@ -342,8 +342,8 @@ prc_acofdoe_find_exponent(unsigned exponent_value)
    the single immediately-preceding byte) -- confirmed via a multi-day,
    bit-position-level bisection investigation (2026-07-16/17, see the
    Acrobat blank-model-tree TRIANGLES-write investigation notes) to be
-   accepted by this codebase's own reader and by an independent commercial
-   PRC SDK (Interchange3D), yet SILENTLY MISHANDLED by real Adobe Acrobat
+   accepted by this codebase's own reader and by another independent
+   commercial PRC tool, yet SILENTLY MISHANDLED by real Adobe Acrobat
    for at least one real-world value in a way that leaves both the 3D
    canvas and model tree completely blank with no error -- while every
    other encoding choice this writer emits (literal bytes, the two bulk
