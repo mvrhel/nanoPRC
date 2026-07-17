@@ -438,7 +438,7 @@ void main()
     //color = vec3(alpha, uMaterial.alpha, alpha * uMaterial.alpha);
 
      //  FragColor = vec4(boostShadedColor(color), alpha * uMaterial.alpha);
-     FragColor = vec4(color, 1.0);
+     FragColor = vec4(color, uMaterial.alpha);
 
     return;
 }

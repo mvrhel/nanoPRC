@@ -3284,8 +3284,12 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
         }
 
         prc_tess_face face = tess3d->face_tessellation_data[face_index];
-
-        if (!external_style_defined && face.size_of_line_attributes != 0)
+        /* Different entitities in the face can have different line attributes
+           That is what the size relates to. TODO. Add that feature here
+           where we use different styles for the different entities. At this
+           point we assume the case where this is just the same one for the
+           entire face. */
+        if (face.size_of_line_attributes != 0 && face.line_attributes[0] > 0)
         {
             /* line_attributes is biased */
             face_out_reserved->style->face_style_index = face.line_attributes[0] - 1;
