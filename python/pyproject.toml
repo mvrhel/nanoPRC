@@ -15,17 +15,17 @@ license = { text = "AGPL-3.0-or-later" }
 authors = [
   { name = "nanoPRC contributors" }
 ]
-urls = {
-  Homepage = "https://github.com/mvrhel/nanoPRC",
-  Repository = "https://github.com/mvrhel/nanoPRC",
-  Issues = "https://github.com/mvrhel/nanoPRC/issues"
-}
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: C++",
   "License :: OSI Approved :: GNU Affero General Public License v3",
   "Operating System :: OS Independent"
 ]
+
+[project.urls]
+Homepage = "https://github.com/mvrhel/nanoPRC"
+Repository = "https://github.com/mvrhel/nanoPRC"
+Issues = "https://github.com/mvrhel/nanoPRC/issues"
 
 [tool.scikit-build]
 cmake.version = ">=3.20"
