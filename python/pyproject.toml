@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "nanoprc-py"
-version = "0.1.0"
+version = "0.1.1.dev1"
 description = "Python bindings for reading and writing PRC and PDF-embedded PRC data with nanoPRC"
 readme = "README.md"
 requires-python = ">=3.9"
