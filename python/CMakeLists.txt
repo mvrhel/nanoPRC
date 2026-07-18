@@ -8,8 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
-# This scaffold links against an already-built nano_prc shared library from the
-# main project build tree. Build nanoPRC first in ../build.
+# Prefer an already-built nano_prc shared library from the main project build
+# tree for local development. For wheel builds/CI where that does not exist,
+# fall back to building nanoPRC from source in-tree and link statically.
 find_library(NANOPRC_LIBRARY
     NAMES nano_prc
     PATHS
@@ -22,14 +23,19 @@ find_library(NANOPRC_LIBRARY
     NO_DEFAULT_PATH
 )
 
-if(NOT NANOPRC_LIBRARY)
-    message(FATAL_ERROR
-        "Could not find nano_prc library. Build the main project first (cmake -S .. -B ../build) "
-        "or update NANOPRC_LIBRARY search paths in python/CMakeLists.txt.")
-endif()
-
 pybind11_add_module(_core MODULE src/bindings.cpp)
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../include")
-target_link_libraries(_core PRIVATE ${NANOPRC_LIBRARY})
+
+if(NANOPRC_LIBRARY)
+    message(STATUS "Using prebuilt nano_prc library: ${NANOPRC_LIBRARY}")
+    target_link_libraries(_core PRIVATE ${NANOPRC_LIBRARY})
+else()
+    message(STATUS "Prebuilt nano_prc library not found; building in-tree static nanoPRC for _core")
+    set(NANOPRC_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
+    set(NANOPRC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(NANOPRC_BUILD_SDL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}/nanoprc-core")
+    target_link_libraries(_core PRIVATE prc_static)
+endif()
 
 install(TARGETS _core LIBRARY DESTINATION nanoprc_py)

@@ -1,0 +1,58 @@
+name: python-wheels
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: Build Wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Ensure zlib source is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d thirdparty/zlib ]; then
+            git clone --depth 1 https://github.com/madler/zlib.git thirdparty/zlib
+          fi
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "pp* *-musllinux* *-win32 *_i686"
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_ENVIRONMENT: "CMAKE_ARGS='-DNANOPRC_BUILD_DEMOS=OFF -DNANOPRC_BUILD_TESTS=OFF -DNANOPRC_BUILD_SDL=OFF'"
+          CIBW_TEST_COMMAND: "python -c \"import nanoprc_py; import nanoprc_py._core as c; print(c.__file__)\""
+          CIBW_BUILD_VERBOSITY: "1"
+        with:
+          package-dir: python
+          output-dir: wheelhouse
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl

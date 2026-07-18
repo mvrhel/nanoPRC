@@ -1,0 +1,59 @@
+name: python-verify-pypi
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to verify (e.g. 0.1.0). Leave blank for latest from PyPI."
+        required: false
+        type: string
+  workflow_run:
+    workflows: ["python-publish"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    name: Verify PyPI (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install package from PyPI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          PKG="nanoprc-py"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            PKG="nanoprc-py==${{ github.event.inputs.version }}"
+          fi
+          python -m pip install "$PKG"
+
+      - name: Verify import and basic API
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import nanoprc_py
+          import nanoprc_py._core as core
+
+          print("nanoprc_py module:", nanoprc_py.__file__)
+          print("nanoprc_py._core:", core.__file__)
+
+          ctx = nanoprc_py.Context()
+          print("Context created:", type(ctx).__name__)
+          PY

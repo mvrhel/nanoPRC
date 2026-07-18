@@ -203,6 +203,38 @@ python python/examples/08_display_attributes.py path/to/model.prc
 python python/examples/09_prc_teapot_write.py [output.prc] [output.pdf] [samples]
 ```
 
+## Publishing nanoprc-py
+
+The repository now includes production workflows for building and publishing
+binary wheels and source distributions:
+
+- `.github/workflows/python-wheels.yaml`
+  - CI wheel build on Linux/macOS/Windows.
+  - Targets CPython 3.9-3.13.
+  - Runs a basic import smoke test for each built wheel.
+
+- `.github/workflows/python-publish.yaml`
+  - Builds wheels + sdist and publishes via Trusted Publishing.
+  - `workflow_dispatch` supports explicit `testpypi` or `pypi` target.
+  - Tag pushes matching `v*` publish to PyPI.
+
+- `.github/workflows/python-verify-testpypi.yaml`
+  - Matrix install verification from TestPyPI (Linux/macOS/Windows, Python 3.9-3.13).
+  - Optional `version` input to pin the exact release being validated.
+
+- `.github/workflows/python-verify-pypi.yaml`
+  - Matrix install verification from PyPI (Linux/macOS/Windows, Python 3.9-3.13).
+  - Runs automatically after successful tag-driven publish runs and can be run manually.
+
+Before first publish, configure Trusted Publishing in both indexes:
+
+1. On PyPI and TestPyPI, create a project and enable Trusted Publisher for this repository/workflow.
+2. In GitHub, keep environments `testpypi` and `pypi` (optionally with required reviewers).
+3. Trigger `python-publish` manually to `testpypi` first, validate install, then publish to `pypi`.
+4. Run `python-verify-testpypi` after test publish, then run `python-verify-pypi` after PyPI publish.
+
+The Python package metadata is configured for AGPLv3 in `pyproject.toml`.
+
 In `07_opengl_viewer.py`, press `P` to show/hide the attributes window for the currently selected tessellation (single-tess mode).
 
 PowerShell equivalent for the third example:
