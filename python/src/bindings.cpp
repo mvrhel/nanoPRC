@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -134,6 +135,288 @@ static py::array make_uint32_array(const uint32_t* data, size_t count, const py:
     return py::array(info, owner);
 }
 
+struct OwnedWriteTessellation
+{
+    prc_api_write_tessellation tess = {};
+    std::vector<double> positions;
+    std::vector<double> normals;
+    std::vector<uint32_t> tri_indices;
+    std::vector<uint32_t> norm_indices;
+    std::vector<uint32_t> face_tri_counts;
+};
+
+struct OwnedWriteNode
+{
+    prc_api_write_node node = {};
+    std::vector<prc_api_write_rep_item> rep_items;
+    std::vector<std::unique_ptr<OwnedWriteNode>> children_storage;
+    std::vector<prc_api_write_node*> child_ptrs;
+    std::string name_storage;
+    std::string part_name_storage;
+};
+
+static std::string to_lower_ascii(std::string value)
+{
+    for (char &c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+static prc_api_write_ri_kind_t parse_ri_kind(const py::handle &h)
+{
+    if (py::isinstance<py::str>(h)) {
+        std::string s = to_lower_ascii(py::cast<std::string>(h));
+        if (s == "surface")
+            return PRC_API_WRITE_RI_SURFACE;
+        if (s == "wire")
+            return PRC_API_WRITE_RI_WIRE;
+    }
+
+    int v = py::cast<int>(h);
+    if (v == static_cast<int>(PRC_API_WRITE_RI_SURFACE))
+        return PRC_API_WRITE_RI_SURFACE;
+    if (v == static_cast<int>(PRC_API_WRITE_RI_WIRE))
+        return PRC_API_WRITE_RI_WIRE;
+    throw std::runtime_error("invalid rep-item kind");
+}
+
+static prc_api_write_tess_kind_t parse_tess_kind(const py::handle &h)
+{
+    if (py::isinstance<py::str>(h)) {
+        std::string s = to_lower_ascii(py::cast<std::string>(h));
+        if (s == "triangles")
+            return PRC_API_WRITE_TESS_KIND_TRIANGLES;
+        if (s == "wire")
+            return PRC_API_WRITE_TESS_KIND_WIRE;
+        if (s == "compressed")
+            return PRC_API_WRITE_TESS_KIND_COMPRESSED;
+    }
+
+    int v = py::cast<int>(h);
+    if (v == static_cast<int>(PRC_API_WRITE_TESS_KIND_TRIANGLES))
+        return PRC_API_WRITE_TESS_KIND_TRIANGLES;
+    if (v == static_cast<int>(PRC_API_WRITE_TESS_KIND_WIRE))
+        return PRC_API_WRITE_TESS_KIND_WIRE;
+    if (v == static_cast<int>(PRC_API_WRITE_TESS_KIND_COMPRESSED))
+        return PRC_API_WRITE_TESS_KIND_COMPRESSED;
+    throw std::runtime_error("invalid tessellation kind");
+}
+
+static std::vector<double> read_vec3d_array(const py::handle &h, const char *field_name)
+{
+    py::object obj = py::reinterpret_borrow<py::object>(h);
+    py::array_t<double, py::array::c_style | py::array::forcecast> arr(obj);
+    py::buffer_info info = arr.request();
+
+    if (info.ndim != 2 || info.shape[1] != 3)
+        throw std::runtime_error(std::string(field_name) + " must be shape (N,3)");
+
+    const size_t count = static_cast<size_t>(info.shape[0]) * 3;
+    const auto *src = static_cast<const double*>(info.ptr);
+    return std::vector<double>(src, src + count);
+}
+
+static std::vector<uint32_t> read_u32_index_array(const py::handle &h, const char *field_name)
+{
+    py::object obj = py::reinterpret_borrow<py::object>(h);
+    py::array_t<uint32_t, py::array::c_style | py::array::forcecast> arr(obj);
+    py::buffer_info info = arr.request();
+
+    if (info.ndim == 1) {
+        const size_t count = static_cast<size_t>(info.shape[0]);
+        const auto *src = static_cast<const uint32_t*>(info.ptr);
+        return std::vector<uint32_t>(src, src + count);
+    }
+
+    if (info.ndim == 2 && info.shape[1] == 3) {
+        const size_t count = static_cast<size_t>(info.shape[0]) * 3;
+        const auto *src = static_cast<const uint32_t*>(info.ptr);
+        return std::vector<uint32_t>(src, src + count);
+    }
+
+    throw std::runtime_error(std::string(field_name) + " must be shape (N,3) or flat 1D");
+}
+
+static std::vector<uint32_t> read_u32_1d_array(const py::handle &h, const char *field_name)
+{
+    py::object obj = py::reinterpret_borrow<py::object>(h);
+    py::array_t<uint32_t, py::array::c_style | py::array::forcecast> arr(obj);
+    py::buffer_info info = arr.request();
+    if (info.ndim != 1)
+        throw std::runtime_error(std::string(field_name) + " must be 1D");
+
+    const size_t count = static_cast<size_t>(info.shape[0]);
+    const auto *src = static_cast<const uint32_t*>(info.ptr);
+    return std::vector<uint32_t>(src, src + count);
+}
+
+static void set_vec3(double dst[3], const py::dict &d, const char *key, const double defaults[3])
+{
+    if (!d.contains(py::str(key))) {
+        dst[0] = defaults[0];
+        dst[1] = defaults[1];
+        dst[2] = defaults[2];
+        return;
+    }
+
+    py::sequence seq = py::cast<py::sequence>(d[py::str(key)]);
+    if (py::len(seq) != 3)
+        throw std::runtime_error(std::string(key) + " must have 3 elements");
+    for (int i = 0; i < 3; ++i)
+        dst[i] = py::cast<double>(seq[i]);
+}
+
+static OwnedWriteTessellation parse_write_tessellation(const py::dict &d)
+{
+    OwnedWriteTessellation out;
+    out.tess.kind = parse_tess_kind(d[py::str("kind")]);
+
+    if (out.tess.kind == PRC_API_WRITE_TESS_KIND_WIRE) {
+        throw std::runtime_error("WIRE write tessellations are not yet exposed by this Python binding");
+    }
+
+    out.positions = read_vec3d_array(d[py::str("positions")], "positions");
+    out.tess.positions = out.positions.data();
+    out.tess.num_positions = static_cast<uint32_t>(out.positions.size() / 3);
+
+    if (d.contains(py::str("normals")) && !d[py::str("normals")].is_none()) {
+        out.normals = read_vec3d_array(d[py::str("normals")], "normals");
+        out.tess.normals = out.normals.data();
+        out.tess.num_normals = static_cast<uint32_t>(out.normals.size() / 3);
+    }
+
+    out.tri_indices = read_u32_index_array(d[py::str("tri_indices")], "tri_indices");
+    if ((out.tri_indices.size() % 3) != 0)
+        throw std::runtime_error("tri_indices length must be divisible by 3");
+    out.tess.tri_indices = out.tri_indices.data();
+    out.tess.num_triangles = static_cast<uint32_t>(out.tri_indices.size() / 3);
+
+    if (d.contains(py::str("norm_indices")) && !d[py::str("norm_indices")].is_none()) {
+        out.norm_indices = read_u32_index_array(d[py::str("norm_indices")], "norm_indices");
+        if (out.norm_indices.size() != out.tri_indices.size())
+            throw std::runtime_error("norm_indices must match tri_indices element count");
+        out.tess.norm_indices = out.norm_indices.data();
+    } else if (!out.normals.empty()) {
+        out.norm_indices = out.tri_indices;
+        out.tess.norm_indices = out.norm_indices.data();
+    }
+
+    if (d.contains(py::str("face_tri_counts")) && !d[py::str("face_tri_counts")].is_none()) {
+        out.face_tri_counts = read_u32_1d_array(d[py::str("face_tri_counts")], "face_tri_counts");
+    } else {
+        out.face_tri_counts.push_back(out.tess.num_triangles);
+    }
+
+    uint64_t face_sum = 0;
+    for (uint32_t v : out.face_tri_counts)
+        face_sum += v;
+    if (face_sum != out.tess.num_triangles)
+        throw std::runtime_error("sum(face_tri_counts) must equal num_triangles");
+
+    out.tess.face_tri_counts = out.face_tri_counts.data();
+    out.tess.num_faces = static_cast<uint32_t>(out.face_tri_counts.size());
+
+    if (d.contains(py::str("crease_angle_degrees")))
+        out.tess.crease_angle_degrees = py::cast<double>(d[py::str("crease_angle_degrees")]);
+    if (d.contains(py::str("must_calculate_normals")))
+        out.tess.must_calculate_normals = py::cast<bool>(d[py::str("must_calculate_normals")]) ? 1 : 0;
+
+    return out;
+}
+
+static std::unique_ptr<OwnedWriteNode> parse_write_node(const py::dict &d)
+{
+    auto out = std::make_unique<OwnedWriteNode>();
+
+    if (d.contains(py::str("rep_items")) && !d[py::str("rep_items")].is_none()) {
+        py::sequence rep_seq = py::cast<py::sequence>(d[py::str("rep_items")]);
+        out->rep_items.reserve(static_cast<size_t>(py::len(rep_seq)));
+
+        for (py::handle rep_h : rep_seq) {
+            py::dict rep = py::cast<py::dict>(rep_h);
+            prc_api_write_rep_item item = {};
+            item.kind = parse_ri_kind(rep[py::str("kind")]);
+            item.biased_tessellation_index = py::cast<uint32_t>(rep[py::str("biased_tessellation_index")]);
+            if (rep.contains(py::str("is_closed")))
+                item.is_closed = py::cast<bool>(rep[py::str("is_closed")]) ? 1 : 0;
+            out->rep_items.push_back(item);
+        }
+    }
+
+    out->node.rep_items = out->rep_items.empty() ? nullptr : out->rep_items.data();
+    out->node.num_rep_items = static_cast<uint32_t>(out->rep_items.size());
+
+    const double bbox_defaults_min[3] = {0.0, 0.0, 0.0};
+    const double bbox_defaults_max[3] = {0.0, 0.0, 0.0};
+    set_vec3(out->node.bbox_min, d, "bbox_min", bbox_defaults_min);
+    set_vec3(out->node.bbox_max, d, "bbox_max", bbox_defaults_max);
+
+    if (d.contains(py::str("has_empty_part")))
+        out->node.has_empty_part = py::cast<bool>(d[py::str("has_empty_part")]) ? 1 : 0;
+
+    if (d.contains(py::str("name")) && !d[py::str("name")].is_none()) {
+        out->name_storage = py::cast<std::string>(d[py::str("name")]);
+        out->node.name = out->name_storage.c_str();
+    }
+
+    if (d.contains(py::str("part_name")) && !d[py::str("part_name")].is_none()) {
+        out->part_name_storage = py::cast<std::string>(d[py::str("part_name")]);
+        out->node.part_name = out->part_name_storage.c_str();
+    }
+
+    if (d.contains(py::str("has_transform")))
+        out->node.has_transform = py::cast<bool>(d[py::str("has_transform")]) ? 1 : 0;
+    if (d.contains(py::str("is_identity")))
+        out->node.is_identity = py::cast<bool>(d[py::str("is_identity")]) ? 1 : 0;
+
+    if (d.contains(py::str("transform")) && !d[py::str("transform")].is_none()) {
+        py::sequence seq = py::cast<py::sequence>(d[py::str("transform")]);
+        if (py::len(seq) != 16)
+            throw std::runtime_error("transform must have 16 elements");
+        for (int i = 0; i < 16; ++i)
+            out->node.transform[i] = py::cast<double>(seq[i]);
+    }
+
+    if (d.contains(py::str("children")) && !d[py::str("children")].is_none()) {
+        py::sequence child_seq = py::cast<py::sequence>(d[py::str("children")]);
+        out->children_storage.reserve(static_cast<size_t>(py::len(child_seq)));
+        for (py::handle child_h : child_seq) {
+            out->children_storage.push_back(parse_write_node(py::cast<py::dict>(child_h)));
+        }
+    }
+
+    out->child_ptrs.reserve(out->children_storage.size());
+    for (const auto &child : out->children_storage)
+        out->child_ptrs.push_back(&child->node);
+
+    out->node.children = out->child_ptrs.empty() ? nullptr : out->child_ptrs.data();
+    out->node.num_children = static_cast<uint32_t>(out->child_ptrs.size());
+
+    return out;
+}
+
+class Context;
+
+static void context_write_prc_file(
+    Context &ctx,
+    const std::string &filename,
+    const std::string &model_name,
+    const py::dict &root,
+    const py::sequence &tess_entries);
+
+static py::bytes context_write_prc_buffer(
+    Context &ctx,
+    const std::string &model_name,
+    const py::dict &root,
+    const py::sequence &tess_entries);
+
+static void context_pdf_embed_prc(
+    Context &ctx,
+    const std::string &pdf_path,
+    const py::bytes &prc_bytes,
+    py::object options_obj);
+
 class Context {
 public:
     Context() : ctx_(prc_api_new_context(nullptr)) {
@@ -178,6 +461,162 @@ public:
 private:
     prc_context* ctx_;
 };
+
+static std::vector<OwnedWriteTessellation> parse_write_tessellations(const py::sequence &tess_entries)
+{
+    if (py::len(tess_entries) == 0)
+        throw std::runtime_error("tess_entries must contain at least one tessellation");
+
+    std::vector<OwnedWriteTessellation> out;
+    out.reserve(static_cast<size_t>(py::len(tess_entries)));
+    for (py::handle h : tess_entries) {
+        out.push_back(parse_write_tessellation(py::cast<py::dict>(h)));
+    }
+    return out;
+}
+
+static void context_write_prc_file(
+    Context &ctx,
+    const std::string &filename,
+    const std::string &model_name,
+    const py::dict &root,
+    const py::sequence &tess_entries)
+{
+    std::vector<OwnedWriteTessellation> tess_owned = parse_write_tessellations(tess_entries);
+    std::vector<prc_api_write_tessellation> tess_raw;
+    tess_raw.reserve(tess_owned.size());
+    for (const auto &t : tess_owned)
+        tess_raw.push_back(t.tess);
+
+    std::unique_ptr<OwnedWriteNode> root_owned = parse_write_node(root);
+    const char *model_name_c = model_name.empty() ? nullptr : model_name.c_str();
+
+    int code = prc_api_write_prc_file(
+        ctx.raw(),
+        filename.c_str(),
+        model_name_c,
+        &root_owned->node,
+        tess_raw.data(),
+        static_cast<uint32_t>(tess_raw.size()));
+
+    if (code != 0)
+        throw std::runtime_error("prc_api_write_prc_file failed");
+}
+
+static py::bytes context_write_prc_buffer(
+    Context &ctx,
+    const std::string &model_name,
+    const py::dict &root,
+    const py::sequence &tess_entries)
+{
+    std::vector<OwnedWriteTessellation> tess_owned = parse_write_tessellations(tess_entries);
+    std::vector<prc_api_write_tessellation> tess_raw;
+    tess_raw.reserve(tess_owned.size());
+    for (const auto &t : tess_owned)
+        tess_raw.push_back(t.tess);
+
+    std::unique_ptr<OwnedWriteNode> root_owned = parse_write_node(root);
+    const char *model_name_c = model_name.empty() ? nullptr : model_name.c_str();
+
+    uint8_t *buf = nullptr;
+    size_t out_size = 0;
+    int code = prc_api_write_prc_buffer(
+        ctx.raw(),
+        model_name_c,
+        &root_owned->node,
+        tess_raw.data(),
+        static_cast<uint32_t>(tess_raw.size()),
+        &buf,
+        &out_size);
+
+    if (code != 0)
+        throw std::runtime_error("prc_api_write_prc_buffer failed");
+
+    py::bytes out(reinterpret_cast<const char*>(buf), out_size);
+    prc_api_write_prc_buffer_free(ctx.raw(), buf);
+    return out;
+}
+
+static void context_pdf_embed_prc(
+    Context &ctx,
+    const std::string &pdf_path,
+    const py::bytes &prc_bytes,
+    py::object options_obj)
+{
+    std::string prc = py::cast<std::string>(prc_bytes);
+
+    std::vector<prc_pdf_view_spec> views_storage;
+    std::vector<std::string> view_names_storage;
+    prc_pdf_write_options options = {};
+    const prc_pdf_write_options *options_ptr = nullptr;
+
+    if (!options_obj.is_none()) {
+        py::dict d = py::cast<py::dict>(options_obj);
+        options_ptr = &options;
+
+        if (d.contains(py::str("page_width_pt")))
+            options.page_width_pt = py::cast<double>(d[py::str("page_width_pt")]);
+        if (d.contains(py::str("page_height_pt")))
+            options.page_height_pt = py::cast<double>(d[py::str("page_height_pt")]);
+        if (d.contains(py::str("margin_pt")))
+            options.margin_pt = py::cast<double>(d[py::str("margin_pt")]);
+
+        if (d.contains(py::str("views")) && !d[py::str("views")].is_none()) {
+            py::sequence views = py::cast<py::sequence>(d[py::str("views")]);
+            views_storage.reserve(static_cast<size_t>(py::len(views)));
+            view_names_storage.reserve(static_cast<size_t>(py::len(views)));
+
+            for (py::handle vh : views) {
+                py::dict vd = py::cast<py::dict>(vh);
+                prc_pdf_view_spec v = {};
+
+                if (vd.contains(py::str("name")) && !vd[py::str("name")].is_none()) {
+                    view_names_storage.push_back(py::cast<std::string>(vd[py::str("name")]));
+                } else {
+                    view_names_storage.push_back(std::string());
+                }
+
+                auto set_vec3_from_dict = [&](const char *key, double out[3]) {
+                    py::sequence seq = py::cast<py::sequence>(vd[py::str(key)]);
+                    if (py::len(seq) != 3)
+                        throw std::runtime_error(std::string("view ") + key + " must have 3 elements");
+                    out[0] = py::cast<double>(seq[0]);
+                    out[1] = py::cast<double>(seq[1]);
+                    out[2] = py::cast<double>(seq[2]);
+                };
+
+                set_vec3_from_dict("eye", v.eye);
+                set_vec3_from_dict("target", v.target);
+                set_vec3_from_dict("up", v.up);
+
+                if (vd.contains(py::str("is_default")))
+                    v.is_default = py::cast<bool>(vd[py::str("is_default")]) ? 1 : 0;
+
+                views_storage.push_back(v);
+            }
+
+            for (size_t i = 0; i < views_storage.size(); ++i) {
+                if (!view_names_storage[i].empty())
+                    views_storage[i].name = view_names_storage[i].c_str();
+            }
+
+            if (!views_storage.empty()) {
+                options.views = views_storage.data();
+                options.num_views = static_cast<uint32_t>(views_storage.size());
+            }
+        }
+    }
+
+    int code = prc_api_pdf_embed_prc(
+        ctx.raw(),
+        pdf_path.c_str(),
+        reinterpret_cast<const uint8_t*>(prc.data()),
+        prc.size(),
+        options_ptr);
+
+    if (code != 0)
+        throw std::runtime_error("prc_api_pdf_embed_prc failed");
+}
 
 class Document;
 
@@ -756,12 +1195,26 @@ PYBIND11_MODULE(_core, m) {
     m.attr("PRC_API_ERROR_PARAMETER") = py::int_(PRC_API_ERROR_PARAMETER);
     m.attr("PRC_API_ERROR_PARSER") = py::int_(PRC_API_ERROR_PARSER);
     m.attr("PRC_API_ERROR_UNSUPPORTED") = py::int_(PRC_API_ERROR_UNSUPPORTED);
+        m.attr("PRC_API_WRITE_RI_SURFACE") = py::int_(static_cast<int>(PRC_API_WRITE_RI_SURFACE));
+        m.attr("PRC_API_WRITE_RI_WIRE") = py::int_(static_cast<int>(PRC_API_WRITE_RI_WIRE));
+        m.attr("PRC_API_WRITE_TESS_KIND_TRIANGLES") = py::int_(static_cast<int>(PRC_API_WRITE_TESS_KIND_TRIANGLES));
+        m.attr("PRC_API_WRITE_TESS_KIND_WIRE") = py::int_(static_cast<int>(PRC_API_WRITE_TESS_KIND_WIRE));
+        m.attr("PRC_API_WRITE_TESS_KIND_COMPRESSED") = py::int_(static_cast<int>(PRC_API_WRITE_TESS_KIND_COMPRESSED));
 
     py::class_<Context, std::shared_ptr<Context>>(m, "Context")
         .def(py::init<>())
         .def("open", &context_open, py::arg("infile"), "Open PRC/PDF contents")
         .def("print_error_stack", &Context::print_error_stack,
-             "Print current nanoPRC error stack to stdout");
+               "Print current nanoPRC error stack to stdout")
+           .def("write_prc_file", &context_write_prc_file,
+               py::arg("filename"), py::arg("model_name"), py::arg("root"), py::arg("tess_entries"),
+               "Write a PRC file using write-node/tessellation dictionaries.")
+           .def("write_prc_buffer", &context_write_prc_buffer,
+               py::arg("model_name"), py::arg("root"), py::arg("tess_entries"),
+               "Encode PRC bytes in memory and return them as Python bytes.")
+           .def("pdf_embed_prc", &context_pdf_embed_prc,
+               py::arg("pdf_path"), py::arg("prc_bytes"), py::arg("options") = py::none(),
+               "Embed PRC bytes into a single-page 3D PDF file.");
 
     py::class_<View>(m, "View")
         .def_property_readonly("name", &View::name)

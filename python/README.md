@@ -200,6 +200,7 @@ python python/examples/05_model_tree_summary.py path/to/model.prc
 python python/examples/06_tessellation_summary.py path/to/model.prc
 python python/examples/07_opengl_viewer.py path/to/model.prc
 python python/examples/08_display_attributes.py path/to/model.prc
+python python/examples/09_prc_teapot_write.py [output.prc] [output.pdf] [samples]
 ```
 
 In `07_opengl_viewer.py`, press `P` to show/hide the attributes window for the currently selected tessellation (single-tess mode).

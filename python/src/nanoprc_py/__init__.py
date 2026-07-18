@@ -83,16 +83,24 @@ _add_windows_dll_search_paths()
 _try_import_local_debug_extension()
 
 
-from ._core import (
-    Context,
-    Document,
-    ModelNode,
-    View,
-    PRC_API_ERROR_MEMORY,
-    PRC_API_ERROR_PARAMETER,
-    PRC_API_ERROR_PARSER,
-    PRC_API_ERROR_UNSUPPORTED,
-)
+from . import _core as _core_mod
+
+Context = _core_mod.Context
+Document = _core_mod.Document
+ModelNode = _core_mod.ModelNode
+View = _core_mod.View
+
+PRC_API_ERROR_MEMORY = _core_mod.PRC_API_ERROR_MEMORY
+PRC_API_ERROR_PARAMETER = _core_mod.PRC_API_ERROR_PARAMETER
+PRC_API_ERROR_PARSER = _core_mod.PRC_API_ERROR_PARSER
+PRC_API_ERROR_UNSUPPORTED = _core_mod.PRC_API_ERROR_UNSUPPORTED
+
+# Keep import resilient if an older debug _core build is still on disk.
+PRC_API_WRITE_RI_SURFACE = getattr(_core_mod, "PRC_API_WRITE_RI_SURFACE", 0)
+PRC_API_WRITE_RI_WIRE = getattr(_core_mod, "PRC_API_WRITE_RI_WIRE", 1)
+PRC_API_WRITE_TESS_KIND_TRIANGLES = getattr(_core_mod, "PRC_API_WRITE_TESS_KIND_TRIANGLES", 0)
+PRC_API_WRITE_TESS_KIND_WIRE = getattr(_core_mod, "PRC_API_WRITE_TESS_KIND_WIRE", 1)
+PRC_API_WRITE_TESS_KIND_COMPRESSED = getattr(_core_mod, "PRC_API_WRITE_TESS_KIND_COMPRESSED", 2)
 
 __all__ = [
     "Context",
@@ -103,4 +111,9 @@ __all__ = [
     "PRC_API_ERROR_PARAMETER",
     "PRC_API_ERROR_PARSER",
     "PRC_API_ERROR_UNSUPPORTED",
+    "PRC_API_WRITE_RI_SURFACE",
+    "PRC_API_WRITE_RI_WIRE",
+    "PRC_API_WRITE_TESS_KIND_TRIANGLES",
+    "PRC_API_WRITE_TESS_KIND_WIRE",
+    "PRC_API_WRITE_TESS_KIND_COMPRESSED",
 ]
