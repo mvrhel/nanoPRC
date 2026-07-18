@@ -8,13 +8,18 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "nanoprc-py"
 version = "0.1.0"
-description = "Initial Python bindings for nanoPRC"
+description = "Python bindings for reading and writing PRC and PDF-embedded PRC data with nanoPRC"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "AGPL-3.0-or-later" }
 authors = [
   { name = "nanoPRC contributors" }
 ]
+urls = {
+  Homepage = "https://github.com/mvrhel/nanoPRC",
+  Repository = "https://github.com/mvrhel/nanoPRC",
+  Issues = "https://github.com/mvrhel/nanoPRC/issues"
+}
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: C++",
