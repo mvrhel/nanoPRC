@@ -475,6 +475,8 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
     uint8_t has_part = api_product->part != NULL;
 
     app_product->setName(api_product->name);
+    app_product->setIsPartNode(false);
+    app_product->setPartNameSameAsProduct(false);
     if (!location.is_identity)
     {
         /* Set the tranformation matrix in the model*/
@@ -515,6 +517,8 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
             Product *app_child = app_product->getChildFromHeap(0, heap, product_count);
             app_child->setParent(app_product);
             app_child->setName(api_product->part->name);
+            app_child->setIsPartNode(true);
+            app_child->setPartNameSameAsProduct(api_product->part->name_same_as_product != 0);
             app_child->setModel(Matrix4(1.0f));
 
             if (api_product->part->attributes.num_base_attributes > 0)

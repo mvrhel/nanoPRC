@@ -78,6 +78,10 @@ public:
 
     void setName(const char *name) { _name = strdup(name); }
     constexpr const char *name() const { return _name; }
+    constexpr void setIsPartNode(bool is_part_node) { _isPartNode = is_part_node; }
+    constexpr bool isPartNode() const { return _isPartNode; }
+    constexpr void setPartNameSameAsProduct(bool value) { _partNameSameAsProduct = value; }
+    constexpr bool partNameSameAsProduct() const { return _partNameSameAsProduct; }
 
     void createChildren(uint32_t num_children);
     Product *getChildFromHeap(uint32_t child_index, Product *product_heap, uint32_t *index);
@@ -139,6 +143,8 @@ private:
 
     char *_name;
     Product *_parent;
+    bool _isPartNode;
+    bool _partNameSameAsProduct;
 
     Product **_children;
     uint32_t _nchildren;

@@ -2286,9 +2286,10 @@ prc_api_helper_init_model_node(prc_context *ctx, prc_api_product *product,
     /* Prefer the name actually stored in the PRC_TYPE_ASM_ModelFile's own
        ContentPRCBase (same == 0 means a name follows), falling back to the
        generic "Model" placeholder only when the file carries none -- most
-       PRC producers never set this field, hence the fallback. */
+       PRC producers never set this field, hence the fallback. --
+       Oddly Adobe always seems to set this to Model so lets do the same */
     if (model_in != NULL && model_in->base.name.same == 0 &&
-        model_in->base.name.name.string != NULL)
+        model_in->base.name.name.string != NULL && 0)
     {
         file_name = model_in->base.name.name.string;
     }
@@ -2620,6 +2621,18 @@ prc_api_helper_copy_product_details(prc_context *ctx, prc_api_data data,
     }
     memcpy(product_tree->name, name, strlen(name));
 
+#if 0
+    /* Handy for debugging tree issues */
+    if (name != NULL)
+    {
+        char temp_str[] = "MixingCover-01-1 (Default)\0";
+        if (strncmp(name, temp_str, strlen(temp_str) - 1) == 0)
+        {
+            int zz = 1;
+        }
+    }
+#endif
+
     memcpy(&product_tree->location, &incoming_matrix, sizeof(prc_api_transform));
     product_tree->is_model = 0;
     product_tree->type = PRC_API_NODE_PRODUCT;
@@ -2926,6 +2939,19 @@ prc_api_add_product_push(prc_context *ctx, prc_api_add_product_work **worklist,
         *worklist = new_worklist;
         *worklist_capacity = new_capacity;
     }
+
+#if 0
+    /* Handy for debugging tree issues */
+    if (base_product_name != NULL)
+    {
+        char temp_str[] = "MixingCover-01-1 (Default)\0";
+        if (strncmp(base_product_name, temp_str, strlen(temp_str) - 1) == 0)
+        {
+            int zz = 1;
+        }
+    }
+#endif
+
     (*worklist)[*worklist_size].curr_file_index = curr_file_index;
     (*worklist)[*worklist_size].base_product_name = base_product_name;
     (*worklist)[*worklist_size].incoming_transform = incoming_transform;
@@ -3024,6 +3050,18 @@ prc_api_helper_add_product(prc_context *ctx, prc_api_data data, uint32_t num_fil
             {
                 base_name = (char *)work_product->base.base.name.name.string;
             }
+
+#if 0
+            /* Handy for debugging tree issues */
+            if (base_name != NULL)
+            {
+                char temp_str[] = "MixingCover-01-1 (Default)\0";
+                if (strncmp(base_name, temp_str, strlen(temp_str) - 1) == 0)
+                {
+                    int zz = 1;
+                }
+            }
+#endif
 
             prc_api_helper_init_unique_id(ctx, &file_id);
 

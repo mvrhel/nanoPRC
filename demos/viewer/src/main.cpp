@@ -1414,6 +1414,16 @@ static void DrawSelectedProductAttributesWindow()
 
 static void DrawTree(Product &prod)
 {
+    if (prod.numChildren() == 1)
+    {
+        Product *onlyChild = prod.children()[0];
+        if (onlyChild->isPartNode() && onlyChild->partNameSameAsProduct())
+        {
+            DrawTree(*onlyChild);
+            return;
+        }
+    }
+
     ImGui::PushID(&prod);
     ImGuiTreeNodeFlags flag = 0; // Removed ImGuiTreeNodeFlags_DefaultOpen to collapse by default
 

@@ -877,6 +877,8 @@ Product::Product() :
     _enabled(true),
     _name(nullptr),
     _parent(nullptr),
+    _isPartNode(false),
+    _partNameSameAsProduct(false),
     _children(nullptr), _nchildren(0),
     _renderCompanion(nullptr),
     _dirty(true),
