@@ -52,7 +52,7 @@ jobs:
           output-dir: wheelhouse
 
       - name: Upload wheel artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: python-wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
