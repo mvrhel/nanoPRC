@@ -21,6 +21,55 @@ static std::string safe_string(const char* cstr) {
     return cstr ? std::string(cstr) : std::string();
 }
 
+static py::object attribute_value_to_python(const prc_api_attribute_entry& entry)
+{
+    switch (entry.type) {
+    case PRC_API_INTEGER_ATTRIBUTE:
+        return py::int_(entry.value_integer);
+    case PRC_API_DOUBLE_ATTRIBUTE:
+        return py::float_(entry.value_double);
+    case PRC_API_VALUE_SECS_INTEGER_ATTRIBUTE:
+        return py::int_(entry.value_secs_integer);
+    case PRC_API_STRING_ATTRIBUTE:
+        return py::str(safe_string(entry.value_string));
+    case PRC_API_VALUE_TIME_ATTRIBUTE:
+        return py::int_(entry.value_time);
+    default:
+        return py::none();
+    }
+}
+
+static py::list attributes_to_python(const prc_api_attributes* attrs)
+{
+    py::list bases;
+    if (!attrs || attrs->num_base_attributes == 0 || !attrs->base_attributes) {
+        return bases;
+    }
+
+    for (uint32_t base_index = 0; base_index < attrs->num_base_attributes; ++base_index) {
+        const prc_api_attribute_base& base = attrs->base_attributes[base_index];
+        py::dict base_obj;
+        base_obj["base_title"] = py::str(safe_string(base.attribute_base_title));
+
+        py::list entries;
+        if (base.num_attributes > 0 && base.attributes) {
+            for (size_t entry_index = 0; entry_index < base.num_attributes; ++entry_index) {
+                const prc_api_attribute_entry& entry = base.attributes[entry_index];
+                py::dict entry_obj;
+                entry_obj["entry_title"] = py::str(safe_string(entry.entry_title));
+                entry_obj["type"] = py::int_(static_cast<int>(entry.type));
+                entry_obj["value"] = attribute_value_to_python(entry);
+                entries.append(entry_obj);
+            }
+        }
+
+        base_obj["entries"] = entries;
+        bases.append(base_obj);
+    }
+
+    return bases;
+}
+
 static py::array make_float_array_from_vertex_field(
     const prc_api_tess_vertex_buffer& buffer,
     const float* field_ptr,
@@ -172,6 +221,22 @@ public:
 
     bool has_part() const {
         return node_->part != nullptr;
+    }
+
+    std::string part_name() const {
+        return node_->part ? safe_string(node_->part->name) : std::string();
+    }
+
+    bool part_name_same_as_product() const {
+        return node_->part ? (node_->part->name_same_as_product != 0) : false;
+    }
+
+    py::list attributes() const {
+        return attributes_to_python(&node_->attributes);
+    }
+
+    py::list part_attributes() const {
+        return node_->part ? attributes_to_python(&node_->part->attributes) : py::list();
     }
 
     std::string repr() const {
@@ -405,6 +470,19 @@ public:
             owner);
     }
 
+    py::dict tessellation_info(uint32_t tess_index) {
+        initialize_tessellations();
+        const prc_api_tess& tess = get_tessellation(tess_index);
+
+        py::dict result;
+        result["name"] = py::str(safe_string(tess.name));
+        result["tess_index"] = py::int_(tess.tess_index);
+        result["part_index"] = py::int_(tess.part_index);
+        result["product_index"] = py::int_(tess.product_index);
+        result["mark_up_index"] = py::int_(tess.mark_up_index);
+        return result;
+    }
+
     prc_api_tess_vertex_buffer get_face_vertex_buffer(uint32_t tess_index, uint32_t face_index) {
         initialize_tessellations();
         const prc_api_tess& tess = get_tessellation(tess_index);
@@ -433,6 +511,16 @@ public:
         return make_float_array_from_vertex_field(
             face_vertices,
             face_vertices.vertices ? face_vertices.vertices[0].position : nullptr,
+            3,
+            owner);
+    }
+
+    py::array face_vertex_normals(uint32_t tess_index, uint32_t face_index) {
+        prc_api_tess_vertex_buffer face_vertices = get_face_vertex_buffer(tess_index, face_index);
+        py::object owner = py::cast(shared_from_this());
+        return make_float_array_from_vertex_field(
+            face_vertices,
+            face_vertices.vertices ? face_vertices.vertices[0].normal : nullptr,
             3,
             owner);
     }
@@ -687,6 +775,12 @@ PYBIND11_MODULE(_core, m) {
         .def_property_readonly("num_children", &ModelNode::num_children)
         .def_property_readonly("num_markups", &ModelNode::num_markups)
         .def_property_readonly("has_part", &ModelNode::has_part)
+           .def_property_readonly("part_name", &ModelNode::part_name)
+           .def_property_readonly("part_name_same_as_product", &ModelNode::part_name_same_as_product)
+           .def("attributes", &ModelNode::attributes,
+               "Return model-node attributes as a list of {base_title, entries[]} dictionaries.")
+           .def("part_attributes", &ModelNode::part_attributes,
+               "Return part attributes as a list of {base_title, entries[]} dictionaries.")
         .def("children", &ModelNode::children)
         .def("__repr__", &ModelNode::repr);
 
@@ -714,12 +808,17 @@ PYBIND11_MODULE(_core, m) {
              "Return a zero-copy (n,4) float array of tessellation vertex colors.")
         .def("tessellation_vertex_uvs", &Document::tessellation_vertex_uvs, py::arg("tess_index"),
              "Return a zero-copy (n,2) float array of tessellation vertex UV coordinates.")
+           .def("tessellation_info", &Document::tessellation_info, py::arg("tess_index"),
+               "Return metadata for one tessellation (name and source indices).")
         .def("face_vertex_count", &Document::face_vertex_count,
              py::arg("tess_index"), py::arg("face_index"),
              "Return the number of vertices in a tessellation face.")
         .def("face_vertex_positions", &Document::face_vertex_positions,
              py::arg("tess_index"), py::arg("face_index"),
              "Return a zero-copy (m,3) float array of face vertex positions.")
+           .def("face_vertex_normals", &Document::face_vertex_normals,
+               py::arg("tess_index"), py::arg("face_index"),
+               "Return a zero-copy (m,3) float array of face vertex normals.")
         .def("face_vertices", &Document::face_vertices,
              py::arg("tess_index"), py::arg("face_index"),
              "Return a list of vertex positions for a tessellation face.")

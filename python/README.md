@@ -117,9 +117,21 @@ cmake --build build-debug --config Debug
 
 3. Ensure the debug `nano_prc.dll` is on the DLL search path when importing `nanoprc_py`.
 
-On Windows, `python/src/__init__.py` already adds `build/Debug` and `build/bin/Debug` to the DLL search path, so placing the Debug DLL there is usually sufficient.
+On Windows, `python/src/nanoprc_py/__init__.py` already adds debug DLL directories including `build-debug/bin/Debug`, `build-debug/Debug`, `build/bin/Debug`, and `build/Debug` to the DLL search path.
 
-4. Run Python with the same interpreter you used to build the extension.
+4. Verify Python is importing the local Debug extension (not a stale site-packages wheel):
+
+```powershell
+python -c "import nanoprc_py; import nanoprc_py._core as c; print('nanoprc_py:', nanoprc_py.__file__); print('_core:', c.__file__)"
+```
+
+Expected `_core` path for Debug sessions:
+
+```text
+.../python/build-debug/Debug/_core.cp<pyver>-win_amd64.pyd
+```
+
+5. Run Python with the same interpreter you used to build the extension.
 
 ## Troubleshooting
 
@@ -135,11 +147,26 @@ On Windows, `python/src/__init__.py` already adds `build/Debug` and `build/bin/D
 
 - Use the same `python` interpreter for both installing `pybind11` and building the extension.
 
+- Quick one-command debug sanity check:
+
+  ```powershell
+  python python/tools/debug_env_check.py
+  ```
+
+  This reports `PASS` only when `_core` is loaded from `python/build-debug/Debug`.
+
 ```powershell
 python python/examples/06_tessellation_summary.py examples/cylinder.pdf
 ```
 
-5. Debug in Visual Studio by launching `python.exe` and using the example script as the command arguments.
+6. Debug in Visual Studio by launching `python.exe` and using the example script as the command arguments.
+Open `python/build-debug/nanoprc_py.sln`, set `_core` as the Startup Project, and set:
+
+- Command: the same `python.exe` used to build/install
+- Command Arguments: `python/examples/06_tessellation_summary.py examples/cylinder.pdf`
+- Working Directory: repo root
+
+You can keep `build/nano_prc.sln` open in a separate Visual Studio instance.
 
 This lets you set breakpoints in `python/src/bindings.cpp` and the native nanoPRC sources such as `src/prc_api.c`.
 
@@ -172,7 +199,10 @@ python python/examples/04_list_views.py path/to/model.prc
 python python/examples/05_model_tree_summary.py path/to/model.prc
 python python/examples/06_tessellation_summary.py path/to/model.prc
 python python/examples/07_opengl_viewer.py path/to/model.prc
+python python/examples/08_display_attributes.py path/to/model.prc
 ```
+
+In `07_opengl_viewer.py`, press `P` to show/hide the attributes window for the currently selected tessellation (single-tess mode).
 
 PowerShell equivalent for the third example:
 

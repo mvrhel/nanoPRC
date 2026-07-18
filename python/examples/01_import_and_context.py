@@ -10,7 +10,7 @@ import nanoprc_py
 def main() -> int:
     ctx = nanoprc_py.Context()
     print("Context created:", type(ctx).__name__)
-    print("Known error code PRC_API_ERROR_PARSER =", nanoprc_py.PRC_API_ERROR_PARSER)
+    print("A known error code PRC_API_ERROR_PARSER =", nanoprc_py.PRC_API_ERROR_PARSER)
     return 0
 
 
