@@ -5,10 +5,10 @@ project(nano_prc VERSION 0.1.0)
 find_package(Git QUIET)
 
 set(PRC_GIT_DESCRIBE "v${PROJECT_VERSION}")
-if (GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+if (GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
 	execute_process(
 		COMMAND ${GIT_EXECUTABLE} describe --tags --dirty --always --match "v[0-9]*"
-		WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 		OUTPUT_VARIABLE PRC_GIT_DESCRIBE
 		OUTPUT_STRIP_TRAILING_WHITESPACE
 		ERROR_QUIET)
@@ -21,17 +21,24 @@ endif()
 string(REGEX REPLACE "^v" "" PRC_VERSION_STRING "${PRC_GIT_DESCRIBE}")
 
 configure_file(
-	"${CMAKE_SOURCE_DIR}/include/prc_version.h.in"
-	"${CMAKE_BINARY_DIR}/generated/prc_version.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/include/prc_version.h.in"
+	"${CMAKE_CURRENT_BINARY_DIR}/generated/prc_version.h"
 	@ONLY)
 
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 option(PRC_ENABLE_DEBUG_MEMORY "Enable PRC debug memory tracking" OFF)
 option(PRC_ENABLE_UNZIPPED_FUZZ "Enable deterministic fuzzing of unzipped PRC sections" OFF)
 option(NANOPRC_ENABLE_BREP "Enable B-Rep write facility (Phase 2)" OFF)
+option(NANOPRC_BUILD_DEMOS "Build nanoPRC demo executables" ON)
+option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
+option(NANOPRC_BUILD_SDL "Build SDL dependency (needed for viewer demos)" ON)
+
+if (NANOPRC_BUILD_DEMOS AND NOT NANOPRC_BUILD_SDL)
+	message(FATAL_ERROR "NANOPRC_BUILD_DEMOS=ON requires NANOPRC_BUILD_SDL=ON")
+endif()
 
 add_subdirectory(thirdparty) # thirdparty libraries
 # demos are added after the library target so demo executables can link
@@ -103,7 +110,7 @@ endif()
 # Specify C99 Standard
 set_property(TARGET nano_prc PROPERTY C_STANDARD 99)
 
-target_include_directories(nano_prc PUBLIC "${CMAKE_BINARY_DIR}/generated")
+target_include_directories(nano_prc PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(nano_prc PRIVATE PRC_VERSION_STRING="${PRC_VERSION_STRING}")
 target_compile_definitions(nano_prc PUBLIC PRC_DEBUG_MEMORY=$<BOOL:${PRC_ENABLE_DEBUG_MEMORY}>)
 target_compile_definitions(nano_prc PUBLIC PRC_ENABLE_UNZIPPED_FUZZ=$<BOOL:${PRC_ENABLE_UNZIPPED_FUZZ}>)
@@ -115,7 +122,8 @@ target_compile_definitions(nano_prc PUBLIC PRC_ENABLE_UNZIPPED_FUZZ=$<BOOL:${PRC
 # nano_prc) so test binaries can reach internal headers like prc_bit.h.
 add_library(prc_static STATIC ${PRC_CORE_SOURCES})
 set_property(TARGET prc_static PROPERTY C_STANDARD 99)
-target_include_directories(prc_static PUBLIC "include" "src" "${CMAKE_BINARY_DIR}/generated")
+set_property(TARGET prc_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_include_directories(prc_static PUBLIC "include" "src" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(prc_static PUBLIC zlib)
 if (UNIX)
 	target_link_libraries(prc_static PUBLIC m)
@@ -124,11 +132,15 @@ target_compile_definitions(prc_static PRIVATE PRC_VERSION_STRING="${PRC_VERSION_
 target_compile_definitions(prc_static PUBLIC PRC_DEBUG_MEMORY=$<BOOL:${PRC_ENABLE_DEBUG_MEMORY}>)
 target_compile_definitions(prc_static PUBLIC PRC_ENABLE_UNZIPPED_FUZZ=$<BOOL:${PRC_ENABLE_UNZIPPED_FUZZ}>)
 
-add_subdirectory(demos)
+if (NANOPRC_BUILD_DEMOS)
+	add_subdirectory(demos)
+endif()
 
-enable_testing()
-include(tests/CMakeLists.txt)
-include(tests/internal/CMakeLists.txt)
+if (NANOPRC_BUILD_TESTS)
+	enable_testing()
+	include(tests/CMakeLists.txt)
+	include(tests/internal/CMakeLists.txt)
+endif()
 
 # Install what we built
 install(TARGETS nano_prc)

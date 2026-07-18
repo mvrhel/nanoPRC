@@ -19,3 +19,16 @@
    - migration notes
    - known issues
 8. Archive release artifacts and CI `version.env` metadata.
+
+## Python Package Release (nanoprc-py)
+
+1. Confirm `python/pyproject.toml` version and metadata are correct.
+2. Run `.github/workflows/python-wheels.yaml` and verify wheel build/test passes on Linux/macOS/Windows.
+3. Run `.github/workflows/python-publish.yaml` with `repository=testpypi`.
+4. Run `.github/workflows/python-verify-testpypi.yaml` (optionally pinning `version`).
+5. Install from TestPyPI in a clean environment and run example smoke tests.
+6. Publish to PyPI:
+   - push a `vMAJOR.MINOR.PATCH` tag, or
+   - run `.github/workflows/python-publish.yaml` with `repository=pypi`.
+7. Confirm `.github/workflows/python-verify-pypi.yaml` passes (auto-triggered after tag publish, or manual run).
+8. Confirm PyPI page, wheel availability, and `pip install nanoprc-py` on all supported OSes.

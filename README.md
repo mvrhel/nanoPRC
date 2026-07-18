@@ -1,6 +1,12 @@
 # nanoPRC
 
+## CI Badges
+
 [![build](https://github.com/mvrhel/nanoPRC/actions/workflows/build.yaml/badge.svg)](https://github.com/mvrhel/nanoPRC/actions/workflows/build.yaml)
+[![python-wheels](https://github.com/mvrhel/nanoPRC/actions/workflows/python-wheels.yaml/badge.svg)](https://github.com/mvrhel/nanoPRC/actions/workflows/python-wheels.yaml)
+[![python-publish](https://github.com/mvrhel/nanoPRC/actions/workflows/python-publish.yaml/badge.svg)](https://github.com/mvrhel/nanoPRC/actions/workflows/python-publish.yaml)
+[![python-verify-testpypi](https://github.com/mvrhel/nanoPRC/actions/workflows/python-verify-testpypi.yaml/badge.svg)](https://github.com/mvrhel/nanoPRC/actions/workflows/python-verify-testpypi.yaml)
+[![python-verify-pypi](https://github.com/mvrhel/nanoPRC/actions/workflows/python-verify-pypi.yaml/badge.svg)](https://github.com/mvrhel/nanoPRC/actions/workflows/python-verify-pypi.yaml)
 
 ## License
 
