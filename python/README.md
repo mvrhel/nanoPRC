@@ -1,11 +1,11 @@
 # nanoprc-py
 
-Python bindings for nanoPRC, a library for reading PRC and PDF-embedded PRC 3D data.
+Python bindings for nanoPRC, a library for reading and writing PRC and PDF embedded-PRC 3D data. For details see nanoprc.org. For commerical licensing see cascadiavoxel.com
 
 This package provides:
 
 - PRC/PDF open and parse APIs
-- Model tree and view inspection
+- Model tree view inspection
 - Tessellation and face-level geometry access
 - PRC writing and optional PDF embedding
 
