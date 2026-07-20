@@ -35,9 +35,17 @@ option(NANOPRC_ENABLE_BREP "Enable B-Rep write facility (Phase 2)" OFF)
 option(NANOPRC_BUILD_DEMOS "Build nanoPRC demo executables" ON)
 option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
 option(NANOPRC_BUILD_SDL "Build SDL dependency (needed for viewer demos)" ON)
+option(NANOPRC_ENABLE_WINDOWS_GAMEINPUT "Enable SDL GameInput integration on Windows (requires gameinput.h)" OFF)
 
 if (NANOPRC_BUILD_DEMOS AND NOT NANOPRC_BUILD_SDL)
 	message(FATAL_ERROR "NANOPRC_BUILD_DEMOS=ON requires NANOPRC_BUILD_SDL=ON")
+endif()
+
+if (WIN32 AND NOT NANOPRC_ENABLE_WINDOWS_GAMEINPUT)
+	# SDL probes for gameinput.h and enables code paths that require it when found.
+	# On clean machines this can be inconsistent across configure/build contexts;
+	# force-disable unless explicitly requested.
+	set(HAVE_GAMEINPUT_H FALSE CACHE INTERNAL "Disable SDL GameInput header usage" FORCE)
 endif()
 
 add_subdirectory(thirdparty) # thirdparty libraries
