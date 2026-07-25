@@ -550,6 +550,19 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         return NULL;
     }
 
+    /* Each element is read via prc_bitread_uncompressed_uint32 below, a
+       fixed 32 bits per word; reject a huffman_array_size that couldn't
+       possibly be backed by what's left of the stream so a single
+       corrupted length field can't drive an arbitrarily large calloc
+       before any of it is validated (same pattern/precedent as the
+       tess_count fix, prc_parse_file_structure.c ~line 749). */
+    if (state->bit_count <= 0 ||
+        (uint64_t)huffman_array_size > (uint64_t)state->bit_count / 32)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "huffman_array_size implausible for remaining section size\n");
+        return NULL;
+    }
+
     huffman_array = (uint32_t *)prc_calloc(ctx, huffman_array_size, sizeof(uint32_t));
     if (huffman_array == NULL)
     {
@@ -891,6 +904,16 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
 
         if (huffman_array_size > 0)
         {
+            /* See the matching guard in prc_huffman_data_decoder above --
+               same unguarded-length-drives-unbounded-calloc pattern, same
+               fix (bound against the remaining section's own bit count). */
+            if (state->bit_count <= 0 ||
+                (uint64_t)huffman_array_size > (uint64_t)state->bit_count / 32)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE, "huffman_array_size implausible for remaining section size\n");
+                return NULL;
+            }
+
             huffman_array = (uint32_t*)prc_calloc(ctx, huffman_array_size, sizeof(uint32_t));
             if (huffman_array == NULL)
             {
