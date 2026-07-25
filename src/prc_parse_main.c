@@ -457,7 +457,34 @@ prc_uncompress(prc_context *ctx, const unsigned char *src, size_t src_len,
     }
     ret = inflateEnd(&zInfo);   // zlib function
     if (ret == Z_OK)
+    {
+        /* NUL-terminate: callers of prc_uncompress (e.g. pdf_get_stream_data,
+           used for PDF object-stream decompression) hand this buffer to
+           sscanf-based text parsing (pdf_parse_array_prc and friends) that
+           assumes a NUL-terminated C string. total_out can legitimately
+           equal the current allocation's size exactly (the buffer is only
+           ever grown in response to inflate() returning Z_OK with the
+           output space exhausted), leaving no guaranteed trailing byte --
+           confirmed via AddressSanitizer as a real heap-buffer-overread on
+           a real-world multi-object-stream PDF (DiscBrakeAssemblySolidWorks
+           PRC.pdf), same bug class as the main file-read buffer's own
+           missing NUL terminator (prc_parse_main.c's prc_open_contents). */
+        if ((size_t)zInfo.total_out >= des_len)
+        {
+            unsigned char *padded = (unsigned char *)prc_realloc(ctx, dest, (size_t)zInfo.total_out + 1);
+            if (padded == NULL)
+            {
+                prc_free(ctx, dest);
+                *dst = NULL;
+                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_uncompress NUL-pad\n");
+                return PRC_ERROR_MEMORY;
+            }
+            dest = padded;
+            *dst = dest;
+        }
+        dest[zInfo.total_out] = '\0';
         return zInfo.total_out;
+    }
     return ret; // -1 or len of output
 }
 
