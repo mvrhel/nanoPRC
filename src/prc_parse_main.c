@@ -674,7 +674,12 @@ prc_open_contents(prc_context *ctx, const char* infile)
     size = ftell(fid);
     fseek(fid, 0L, SEEK_SET);
 
-    buff = prc_malloc(ctx, size);
+    /* +1 and NUL-terminate: the PDF-parsing path (prc_pdf*.c) runs sscanf()
+       directly on pointers into this buffer, which assumes a NUL-terminated
+       C string -- without the extra byte, a PDF whose xref data runs to the
+       end of the file with no embedded NUL causes sscanf/strnlen to read
+       past the allocation. */
+    buff = prc_malloc(ctx, size + 1);
     if (buff == NULL)
     {
         prc_free(ctx, output);
@@ -684,6 +689,7 @@ prc_open_contents(prc_context *ctx, const char* infile)
 
     size_read = fread(buff, 1, size, fid);
     fclose(fid);
+    buff[size] = '\0';
 
     /* Determine if this is a PDF or a PRC file */
     if (buff[0] != 'P' && buff[1] != 'R' && buff[2] != 'C')
