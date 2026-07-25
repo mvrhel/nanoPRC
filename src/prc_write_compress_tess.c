@@ -3176,17 +3176,32 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
         }
 
     }
-    /* DIAGNOSTIC (2026-07-22, PRC_DIAG_USE_PROXY_NORMALS): experimental --
-       when must_recalculate_normals and this env var is set, compute a
-       smooth per-mesh-vertex normal (equal-weighted average of adjacent
-       MESH-order face normals) and feed it into prc_encode_traversal's
-       real_normals parameter so prc_encode_decide_reversed makes a real,
-       traversal-consistent reversed-bit decision for EVERY triangle
-       (including growing ones), instead of leaving trav.triangle_reversed
-       all-zero. Testing whether matching a real encoder's non-zero
-       reversed-bit pattern (see RG comparison) fixes Acrobat rejection now
-       that chain fragmentation is separately ruled out. */
-    if (must_recalculate_normals && getenv("PRC_DIAG_USE_PROXY_NORMALS") != NULL)
+    /* When normals must be recalculated (no per-vertex normals supplied),
+       compute a smooth per-mesh-vertex proxy normal (equal-weighted average
+       of adjacent MESH-order face normals) and feed it into
+       prc_encode_traversal's real_normals parameter so
+       prc_encode_decide_reversed makes a real, traversal-consistent
+       reversed-bit decision for EVERY triangle (including growing ones),
+       instead of leaving trav.triangle_reversed all-zero (the previous
+       behavior, via prc_encode_normals_c1's must-recalculate path, which
+       unconditionally forced growing triangles' reversed bit to 0 even when
+       geometrically wrong -- see prc_encode_normals_c1's own long comment
+       on that gap). This was originally an opt-in diagnostic
+       (PRC_DIAG_USE_PROXY_NORMALS) added to test whether matching a real
+       encoder's non-zero reversed-bit pattern (see the RG cross-check in
+       the mixed_chains investigation writeup) fixes Acrobat rendering --
+       promoted to permanent default behavior after verifying it's lossless
+       (nano_prc_stl_import --verify passes on UK_original.stl/
+       beetle_1000000.stl) and regression-free (full ctest suite), and
+       matches an independently-produced encoder's reversed-bit/
+       edge_status_array output exactly on the fan8 synthetic case. It did
+       NOT resolve the specific Acrobat blank-tree bug those two real files
+       exhibit (still open), but is a genuine, standalone correctness fix
+       (previously 100% of growing triangles got the wrong reversed-normal
+       bit whenever normals had to be recalculated) worth keeping on its
+       own merits -- also produces smaller output (more internally
+       consistent data compresses better). */
+    if (must_recalculate_normals)
     {
         double *vertex_normal = (double *)prc_calloc(ctx, (size_t)mesh.num_positions * 3, sizeof(double));
 
@@ -3283,7 +3298,7 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
             code = 0;
         }
     }
-    else if (getenv("PRC_DIAG_USE_PROXY_NORMALS") != NULL)
+    else
     {
         /* Proxy normals were fed to prc_encode_traversal above, so
            trav.triangle_reversed already holds a real, traversal-consistent
@@ -3298,10 +3313,6 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
         }
         memcpy(rev, trav.triangle_reversed, (size_t)trav.edge_status_array_size * sizeof(uint8_t));
         code = 0;
-    }
-    else
-    {
-        code = prc_encode_normals_c1(ctx, &mesh, &trav, NULL, &rev);
     }
     if (code != 0) goto cleanup;
 
