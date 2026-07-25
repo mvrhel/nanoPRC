@@ -1607,10 +1607,6 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
     uint8_t *bit_lengths;
     uint32_t k;
     int result;
-    size_t saved_byte_pos;
-    uint8_t saved_bit_accum;
-    uint8_t saved_bit_fill;
-    int attempt;
 
     if (state->error)
         return -1;
@@ -1650,35 +1646,39 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
     }
 
     /* WORKAROUND (2026-07-25, mixed_chains/fan8 Acrobat blank-tree bug --
-       see mixed_chains_fan8_boundary_investigation-24July.md): real Adobe
-       Acrobat blanks the model tree for a COMPRESSED tessellation entry
-       when a point_array value needing exactly 22 bits starts at exactly
-       bit-phase 1 (bit position mod 8) within the decompressed
-       tessellation bitstream -- exhaustively proven via ~25 real-Acrobat
-       tests (all 8 phases swept for a 22-bit value; only phase 1 fails).
-       The trigger also requires a specific tie-like condition among the
-       array's OTHER entries that could not be reliably generalized to
-       arbitrary meshes (only one synthetic instance was ever confirmed),
-       so this guards the narrower, unconditionally-safe superset -- ANY
-       22-bit value landing at phase 1, regardless of what else is present
-       -- rather than trying to detect that other condition too. This
-       closes the exhaustively-proven case; it is not known to fix every
-       instance of whatever broader bug family this may belong to.
+       see mixed_chains_fan8_boundary_investigation-24July.md and the
+       memory writeup's "fresh bisection directly on UK_original.stl" /
+       "BREAKTHROUGH: phase-independent grow-in-place" sections): real
+       Adobe Acrobat blanks the model tree for a COMPRESSED tessellation
+       entry containing a point_array value that needs exactly 22 bits.
+       Confirmed real-Acrobat-causal on multiple independent cases (a
+       synthetic fan8 repro, and two real components extracted from
+       UK_original.stl) -- fixed in every case by growing that ONE
+       entry's own declared bit-length to 23, in place, leaving its VALUE,
+       its position, and everything else in the array untouched (lossless:
+       the reader just consumes however many bits the table declares).
 
-       A broadened variant was tried and real-Acrobat-tested (any bit-
-       length ending at a byte boundary, fixed by growing the FLAGGED
-       entry's own bit-length in place rather than shifting an earlier
-       entry): it regressed this exact fan8 case back to failing, while
-       still not resolving the real-world files it was meant to help.
-       That result is strong evidence the true trigger is tied to an
-       entry's START phase specifically (this fix's mechanism -- shifting
-       start phase via an earlier pad -- is what real Acrobat confirms
-       works; changing the flagged entry's own bit-length while leaving
-       its start phase at 1 does not), and that generalizing bit-length
-       beyond 22 is unproven. Reverted back to this narrow, proven form. */
-    saved_byte_pos = state->byte_pos;
-    saved_bit_accum = state->bit_accum;
-    saved_bit_fill = state->bit_fill;
+       An earlier version of this fix instead shifted the flagged entry's
+       START PHASE by padding an EARLIER entry, based on an initial
+       characterization (a single synthetic fan8 instance) that only
+       phase 1 was dangerous. Real-world testing on UK_original.stl later
+       found bit-length-22 entries failing at OTHER phases too (3, 7),
+       which that phase-1-only condition couldn't even detect -- and
+       separately, a broadened version of the phase-shift mechanism
+       regressed the original fan8 case, while THIS grow-in-place
+       mechanism (tested standalone, without any phase-shifting at all)
+       fixed fan8, a minimal 4-triangle real repro, AND two more real
+       components -- superseding the more complex phase-tracking
+       rewind/retry design entirely. Still does not resolve every instance
+       of whatever broader bug family this belongs to: one specific real
+       component (UK_original.stl's smallest failing part) survives this
+       fix too and remains an open, unresolved case -- see the
+       investigation writeup for its own bisection trail. */
+    for (k = 0; k < data_size; k++)
+    {
+        if (bit_lengths[k] == 22)
+            bit_lengths[k] = 23;
+    }
 
     /* matches: bit_lengths = prc_bitread_character_array(ctx, state, &size,
        6, true, 0); (prc_bit.c 1435) -- the bit-length table itself, written
@@ -1689,108 +1689,6 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
     {
         prc_free(ctx, bit_lengths);
         return result;
-    }
-
-    /* Bounded retry: the table's real on-disk size is only known once it's
-       actually been written (its compressed size depends on the values it
-       stores), so the phase of each subsequent value can only be checked
-       AFTER that write -- too late to retroactively edit an earlier
-       entry's already-flushed declaration. Instead: check: (still) flagged
-       -> rewind to before the table, pad one earlier entry by 1 bit, and
-       rewrite the table using a deterministic uncompressed encoding (whose
-       size doesn't depend on the values, so padding a value can't perturb
-       the very size just used to detect the problem) -- then re-check.
-       Each iteration's check re-verifies the PREVIOUS iteration's padding
-       (using the freshly-rewritten table's real position), so the loop is
-       self-confirming -- except for whichever padding is applied on the
-       very LAST allowed iteration, which never gets a subsequent check.
-       The bound must therefore be generous enough that real inputs never
-       reach it while still padding (a large real file with many flagged
-       entries in one array can legitimately need one round per entry);
-       if the bound is ever hit mid-padding, fall back to whatever was
-       last written rather than risk an unverified combination. */
-    for (attempt = 0; attempt < 64; attempt++)
-    {
-        uint64_t pos = (uint64_t)state->byte_pos * 8 + state->bit_fill;
-        uint32_t flagged = data_size; /* sentinel: data_size == "none flagged" */
-        uint32_t pad_j = data_size;   /* sentinel: data_size == "no candidate" */
-        uint32_t j;
-
-        for (k = 0; k < data_size; k++)
-        {
-            if (bit_lengths[k] == 22 && (pos % 8) == 1)
-            {
-                flagged = k;
-                break;
-            }
-            pos += bit_lengths[k];
-        }
-
-        if (flagged == data_size)
-            break; /* nothing flagged -- current table/bit_lengths[] are final */
-
-        /* Prefer padding the CLOSEST earlier entry that isn't already 21
-           bits (padding a 21-bit entry would itself create a new 22-bit
-           entry, right where we're trying to remove one) -- scanning
-           backward from the flagged entry, not forward from index 0.
-           Padding shifts the phase of every entry from pad_j onward, so
-           picking the entry nearest to the flagged one keeps that shift's
-           blast radius as small as possible. Scanning forward and picking
-           the smallest bit_lengths[] VALUE instead (an earlier version of
-           this fix) tended to land far from the flagged entry, since tiny
-           values (e.g. 2-bit zero components) are common and appear early
-           -- on a real 673,962-entry array (UK_original.stl) that shifted
-           nearly the WHOLE array on every fix, repeatedly cycling already
-           -verified-safe entries back into phase 1 and never converging
-           even at a 64-attempt bound. */
-        for (j = flagged; j > 0; j--)
-        {
-            if (bit_lengths[j - 1] != 21)
-            {
-                pad_j = j - 1;
-                break;
-            }
-        }
-        if (pad_j == data_size)
-            break; /* no safe earlier entry to pad -- ship the last-written encoding */
-        bit_lengths[pad_j]++;
-
-        /* DIAGNOSTIC (2026-07-25, PRC_DIAG_PHASE1_GUARD): reports when this
-           guard actually activates -- opt-in via getenv, zero behavior
-           change when unset. Added to check whether real-world files
-           (UK_original.stl, beetle_1000000.stl) ever exercise this path. */
-        if (getenv("PRC_DIAG_PHASE1_GUARD") != NULL)
-            fprintf(stderr, "PRC_DIAG_PHASE1_GUARD: activated, flagged_k=%u data_size=%u pad_j=%u attempt=%d\n",
-                flagged, data_size, pad_j, attempt);
-
-        state->byte_pos = saved_byte_pos;
-        state->bit_accum = saved_bit_accum;
-        state->bit_fill = saved_bit_fill;
-        state->error = 0;
-
-        /* Inlined uncompressed character-array write (mirrors
-           prc_bitwrite_character_array's own uncompressed branch,
-           prc_write_bit.c ~1472-1481): deterministic size (1 + 32 +
-           data_size*8 bits), independent of the bit_lengths[] VALUES, so
-           the next iteration's re-scan is exact, not another estimate. */
-        result = prc_bitwrite_bit(ctx, state, 0);
-        if (result == 0)
-            result = prc_bitwrite_uint32(ctx, state, data_size);
-        if (result == 0)
-        {
-            for (k = 0; k < data_size; k++)
-                if ((result = prc_bitwrite_uint8(ctx, state, bit_lengths[k])) != 0)
-                    break;
-        }
-        if (result != 0)
-        {
-            prc_free(ctx, bit_lengths);
-            return result;
-        }
-
-        if (attempt == 63 && getenv("PRC_DIAG_PHASE1_GUARD") != NULL)
-            fprintf(stderr, "PRC_DIAG_PHASE1_GUARD: WARNING bound exhausted, last padding unverified, data_size=%u\n",
-                data_size);
     }
 
     /* matches: for (k = 0; k < size; k++) data[k] =
