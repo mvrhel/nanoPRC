@@ -49,6 +49,12 @@ typedef struct prc_encode_mesh_s
     uint32_t  num_components;
     double    bbox[6];         /* xmin,ymin,zmin,xmax,ymax,zmax */
     double    tolerance_mm;    /* resolved tolerance actually used for dedup */
+    /* Number of deduplicated vertices touched by 2+ triangle "fans" that
+       don't share an edge with each other (see prc_encode_preprocess's own
+       split-handling comment) -- see prc_api_mesh_has_nonmanifold_fans's
+       doc comment (include/prc_api.h) for why callers may want to check
+       this before choosing COMPRESSED. */
+    uint32_t  nonmanifold_vertices;
 } prc_encode_mesh;
 
 int prc_encode_preprocess(prc_context *ctx,

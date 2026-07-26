@@ -1380,6 +1380,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
     uint32_t *touched_normals = NULL;
     uint32_t t, c;
     int ok = -1;
+    prc_context *nonmanifold_check_ctx = prc_api_new_context(NULL);
 
     memset(parts, 0, sizeof(*parts));
 
@@ -1569,6 +1570,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
 
         {
             prc_api_write_tessellation *tess = &parts->tess_entries[c];
+            prc_write_tolerance comp_tolerance = prc_write_tol_relative(weld_tolerance_fraction);
             /* COMPRESSED (not TRIANGLES): welding, degenerate-triangle
                removal, and EdgeBreaker-style traversal compression are all
                built in, giving meaningfully smaller output than TRIANGLES
@@ -1598,7 +1600,102 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                and keeps this entry's own encoder-side tolerance consistent
                with what actually produced its vertex data, in case a
                future caller inspects tess->tolerance. */
-            tess->tolerance = prc_write_tol_relative(weld_tolerance_fraction);
+            tess->tolerance = comp_tolerance;
+
+            /* WORKAROUND (2026-07-26, mixed_chains/UK_original.stl/beetle_
+               1000000.stl Acrobat blank-tree bug -- see the project memory
+               writeup): COMPRESSED's own non-manifold vertex-splitting has
+               an unresolved, real-Acrobat-confirmed compatibility issue
+               specifically for vertices touched by disconnected triangle
+               "fans" (a real, if uncommon, real-world artifact -- typically
+               a duplicated-vertex/T-junction quirk from the mesh's source
+               tool). Root cause not identified despite extensive
+               investigation (nanoPRC's own reader, and at least one
+               independent PRC reader, both decode the affected COMPRESSED
+               output correctly -- some real Acrobat builds still blank the
+               model tree). Falling back to TRIANGLES for just the affected
+               component keeps COMPRESSED's size win for the (overwhelming
+               majority of) components that don't hit this, at the cost of
+               larger output for the rare component that does. */
+            if (getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
+                nonmanifold_check_ctx != NULL && prc_api_mesh_has_nonmanifold_fans(nonmanifold_check_ctx,
+                    local_positions, local_vertex_count, local_tri_indices, tri_count, comp_tolerance) > 0)
+            {
+                uint32_t *one_face = (uint32_t *)malloc(sizeof(uint32_t));
+                if (one_face == NULL)
+                {
+                    fprintf(stderr, "Error: allocation failed building part %u\n", (unsigned)(c + 1));
+                    free(local_positions); free(local_tri_indices);
+                    if (local_normals) free(local_normals);
+                    if (local_norm_indices) free(local_norm_indices);
+                    goto cleanup;
+                }
+                one_face[0] = tri_count;
+                fprintf(stderr, "Note: part %u contains a non-manifold vertex (disconnected triangle fans) -- "
+                    "writing this component uncompressed to avoid a known Acrobat compatibility issue.\n",
+                    (unsigned)(c + 1));
+                tess->kind = PRC_API_WRITE_TESS_KIND_TRIANGLES;
+                tess->face_tri_counts = one_face;
+                tess->num_faces = 1;
+
+                /* DIAGNOSTIC (2026-07-26, mixed_chains investigation): also
+                   fully expand vertices (no index sharing AT ALL between
+                   any triangles, matching what a third-party PDF3D-SDK-
+                   based converter's own uncompressed output does for the
+                   same geometry -- see project memory) instead of using
+                   this component's normally-welded/shared buffer, gated by
+                   PRC_DIAG_EXPAND_TRIANGLES so the default behavior above
+                   (still deduplicated) is unaffected until this is proven
+                   causal. Zero behavior change when unset. */
+                if (getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
+                {
+                    uint32_t exp_count = tri_count * 3;
+                    double *exp_positions = (double *)malloc(sizeof(double) * 3 * exp_count);
+                    uint32_t *exp_indices = (uint32_t *)malloc(sizeof(uint32_t) * exp_count);
+                    uint32_t tt, cc;
+                    if (exp_positions == NULL || exp_indices == NULL)
+                    {
+                        fprintf(stderr, "Error: allocation failed expanding part %u\n", (unsigned)(c + 1));
+                        free(exp_positions); free(exp_indices);
+                        free(local_positions); free(local_tri_indices);
+                        if (local_normals) free(local_normals);
+                        if (local_norm_indices) free(local_norm_indices);
+                        goto cleanup;
+                    }
+                    for (tt = 0; tt < tri_count; tt++)
+                    {
+                        for (cc = 0; cc < 3; cc++)
+                        {
+                            uint32_t src = local_tri_indices[(size_t)tt * 3 + cc];
+                            uint32_t dst = tt * 3 + cc;
+                            memcpy(&exp_positions[(size_t)dst * 3], &local_positions[(size_t)src * 3], sizeof(double) * 3);
+                            exp_indices[dst] = dst;
+                        }
+                    }
+                    tess->positions = exp_positions;
+                    tess->num_positions = exp_count;
+                    tess->tri_indices = exp_indices;
+                }
+                if (original_normals)
+                {
+                    tess->normals = local_normals;
+                    tess->num_normals = local_normal_count;
+                    tess->norm_indices = local_norm_indices;
+                    tess->must_calculate_normals = 0;
+                }
+                else
+                {
+                    tess->normals = NULL;
+                    tess->num_normals = 0;
+                    tess->norm_indices = NULL;
+                    tess->must_calculate_normals = 1;
+                    tess->crease_angle_degrees = 30.0;
+                    if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
+                        tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
+                }
+                goto tess_entry_done;
+            }
+
             if (original_normals)
             {
                 tess->normals = local_normals;
@@ -1621,6 +1718,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                 if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
                     tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
             }
+tess_entry_done:;
         }
 
         parts->rep_items[c].kind = PRC_API_WRITE_RI_SURFACE;
@@ -1680,6 +1778,8 @@ cleanup:
     free(touched_vertices);
     free(local_normal_id);
     free(touched_normals);
+    if (nonmanifold_check_ctx != NULL)
+        prc_api_release_context(nonmanifold_check_ctx);
     if (ok != 0)
         stl_parts_free(parts);
     return ok;

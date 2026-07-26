@@ -1410,6 +1410,29 @@ cleanup:
    write facility's prc_bitwrite_int_variable_bit already implements that
    packing correctly; only the LENGTH this function computes (fed in as
    bit_lengths[k], i.e. uBitNumber) was wrong. */
+/* DIAGNOSTIC (2026-07-26, PRC_DIAG_NATURAL_BITWIDTH): SS9.8
+   "WriteCompressedIntegerArray" (point_array's own array type) computes its
+   per-entry bit length via `GetNumberOfBitsUsedToStoreInteger(piArray[u])`
+   applied directly to the signed value -- no visible extra +1 in the spec's
+   own pseudocode, unlike SS9.9 "WriteCompressedIndiceArray" (a DIFFERENT
+   array type, for delta-encoded indices), which explicitly computes
+   `GetNumberOfBitsUsedToStoreUnsignedInteger(abs(v))+1`. prc_int32_bit_
+   width_signed below implements SS9.9's formula (correct for indices, and
+   for max_code_length elsewhere in this file) but point_array
+   (prc_bitwrite_compressed_integer_array) also calls it -- possibly the
+   wrong spec section's formula for that specific array type, off by
+   exactly 1 bit whenever the magnitude isn't an exact power of two. This
+   diagnostic swaps point_array's bit-length computation to the "natural"
+   convention (1 sign bit + prc_bit_width_u32(magnitude), no extra +1) to
+   test that hypothesis without touching indices/max_code_length. Zero
+   behavior change when unset. */
+static uint32_t
+prc_int32_bit_width_signed_natural(int32_t v)
+{
+    uint32_t magnitude = (v < 0) ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
+    return 1 + prc_bit_width_u32(magnitude);
+}
+
 static uint32_t
 prc_int32_bit_width_signed(int32_t v)
 {
@@ -1630,8 +1653,16 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_bitwrite_compressed_integer_array\n");
         return -1;
     }
-    for (k = 0; k < data_size; k++)
-        bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
+    if (getenv("PRC_DIAG_NATURAL_BITWIDTH") != NULL)
+    {
+        for (k = 0; k < data_size; k++)
+            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed_natural(data[k]);
+    }
+    else
+    {
+        for (k = 0; k < data_size; k++)
+            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
+    }
 
     /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITLENGTHS): dumps each
        value alongside its computed bit length, added while checking whether

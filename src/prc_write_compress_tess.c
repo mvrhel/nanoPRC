@@ -205,6 +205,11 @@ prc_encode_preprocess(prc_context *ctx,
         (out->bbox[4] - out->bbox[1]) * (out->bbox[4] - out->bbox[1]) +
         (out->bbox[5] - out->bbox[2]) * (out->bbox[5] - out->bbox[2]));
     tol = prc_write_tol_resolve(ctx, tolerance, diagonal);
+    {
+        const char *ov = getenv("PRC_DIAG_FORCE_TOLERANCE_MM");
+        if (ov != NULL)
+            tol = atof(ov);
+    }
     out->tolerance_mm = tol;
 
     if (num_positions > 0)
@@ -710,7 +715,8 @@ prc_encode_preprocess(prc_context *ctx,
                 vedge_list[vedge_start[v1e] + vedge_count[v1e]] = ei2; vedge_count[v1e]++;
             }
 
-            if (vtri_count && vtri_start && vtri_list && vedge_count && vedge_start && vedge_list && vparent && vfan_new_vertex)
+            if (vtri_count && vtri_start && vtri_list && vedge_count && vedge_start && vedge_list && vparent && vfan_new_vertex
+                && getenv("PRC_DIAG_DISABLE_NONMANIFOLD_SPLIT") == NULL)
             {
                 for (vi = 0; vi < orig_num_positions; vi++)
                 {
@@ -796,6 +802,17 @@ prc_encode_preprocess(prc_context *ctx,
                             uint32_t newv;
                             double offset_mag2 = tol * 50.0;
                             uint32_t d2;
+                            /* DIAGNOSTIC (2026-07-26, mixed_chains investigation):
+                               override the non-manifold vertex split offset
+                               magnitude (as a multiple of tol) to test whether
+                               the split's SIZE matters to the Acrobat blank
+                               -tree bug, independent of the split MECHANISM
+                               itself. PRC_DIAG_SPLIT_OFFSET_MULT=N. */
+                            {
+                                const char *ov = getenv("PRC_DIAG_SPLIT_OFFSET_MULT");
+                                if (ov != NULL)
+                                    offset_mag2 = tol * strtod(ov, NULL);
+                            }
                             if (grown2 == NULL)
                             {
                                 prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_preprocess non-manifold vertex split\n");
@@ -849,6 +866,7 @@ prc_encode_preprocess(prc_context *ctx,
                     printf("PRC_DIAG_MESH_QUALITY: nonmanifold_vertices=%u vertex_splits=%u (out of %u positions before splitting)\n",
                         nonmanifold_vertices, splits_needed, orig_num_positions);
             }
+            out->nonmanifold_vertices = nonmanifold_vertices;
             if (vtri_count != NULL) prc_free(ctx, vtri_count);
             if (vtri_start != NULL) prc_free(ctx, vtri_start);
             if (vtri_list != NULL) prc_free(ctx, vtri_list);
@@ -1098,6 +1116,24 @@ prc_encode_emit_axis_point(prc_encode_state *st, uint32_t mesh_vtx, prc_vec3 bas
             mesh_vtx, base.x, base.y, base.z, p[0], p[1], p[2],
             p[0] - base.x, p[1] - base.y, p[2] - base.z, st->tol,
             dv[0], dv[1], dv[2], st->n_points);
+
+    /* DIAGNOSTIC (2026-07-26): precisely identify CHAIN-START axis points
+       (base is exactly the global origin, not a neighboring decoded point)
+       whose delta has 2+ exact-zero components -- the proven trigger
+       condition, but only for THIS specific kind of point (mixed_chains
+       investigation). Avoids the false-positive risk of scanning the whole
+       point_array indiscriminately (regular grow-point deltas routinely and
+       harmlessly share 2 coordinates for unrelated geometric reasons).
+       Opt-in via PRC_DIAG_CHAINSTART_ZERO, zero cost/behavior change when
+       unset. */
+    if (getenv("PRC_DIAG_CHAINSTART_ZERO") != NULL &&
+        base.x == st->origin.x && base.y == st->origin.y && base.z == st->origin.z)
+    {
+        int zeros = (dv[0] == 0) + (dv[1] == 0) + (dv[2] == 0);
+        if (zeros >= 2)
+            fprintf(stderr, "PRC_DIAG_CHAINSTART_ZERO: mesh_vtx=%u dv=(%d,%d,%d) n_points=%u zeros=%d\n",
+                mesh_vtx, dv[0], dv[1], dv[2], st->n_points, zeros);
+    }
 
     st->out->point_array[st->out->point_array_size + 0] = dv[0];
     st->out->point_array[st->out->point_array_size + 1] = dv[1];
@@ -1668,26 +1704,70 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         return PRC_ERROR_INTERNAL;
     }
 
-    /* One global origin (the decoder's origin_array): the bbox min corner,
-       used by every chain start and one/two-ref branch. Round-tripped
-       through float BEFORE any encoder math uses it, because
-       prc_write_compress_tess_to_stream writes this value as a 32-bit
-       float (prc_bitwrite_float) -- a real decoder can only ever recover
-       that float-precision value, never the full double. Using the
-       untruncated double here made every one of the encoder's own
-       "decoded_pos" predictions systematically wrong relative to what any
-       real decoder reconstructs, by exactly the float round-trip error on
-       whichever component doesn't happen to survive it exactly (confirmed:
-       2.2e-7 on one real repro's X component, 0 on components that do
-       round-trip exactly). Each chain restart re-anchors a fresh grow chain
-       to this same mismatched origin, so the error compounds further with
-       every additional chain a large/fragmented mesh needs -- this was
-       nanoPRC's real "shard corruption on large COMPRESSED meshes" bug
-       (see project memory), invisible on single-chain files because the
-       origin is only ever referenced once there. */
-    out->origin[0] = (double)(float)mesh->bbox[0];
-    out->origin[1] = (double)(float)mesh->bbox[1];
-    out->origin[2] = (double)(float)mesh->bbox[2];
+    /* One global origin (the decoder's origin_array): the centroid of the
+       mesh's own first triangle, used by every chain start and one/two-ref
+       branch. Round-tripped through float BEFORE any encoder math uses it,
+       because prc_write_compress_tess_to_stream writes this value as a
+       32-bit float (prc_bitwrite_float) -- a real decoder can only ever
+       recover that float-precision value, never the full double.
+
+       Previously the bbox min corner -- replaced (2026-07-26, mixed_chains
+       investigation's third trigger) after confirming real Adobe Acrobat
+       rejects a COMPRESSED entry whose axis-point delta has two or more
+       EXACT-ZERO components (real-Acrobat-causal on a minimal, single
+       -variable real-world repro: one isolated triangle from
+       UK_original.stl whose chain-start vertex happened to sit exactly at
+       the bbox min in X and Y). The bbox min is BY CONSTRUCTION always
+       exactly equal to some mesh vertex in at least one axis -- any
+       chain-start vertex that's also extremal in a second axis reproduces
+       the trigger, and a bbox corner can also be arbitrarily far from
+       whichever part of a large/fragmented mesh a given chain actually
+       lives in, which is nanoPRC's own already-documented "shard
+       corruption on large COMPRESSED meshes" bug (large deltas losing
+       precision through the float round-trip -- see project memory).
+
+       A triangle's centroid (the average of its 3 vertices) structurally
+       cannot exactly equal any of its own vertices unless the triangle is
+       degenerate (zero area, already excluded upstream by the mesh
+       preprocessing's degenerate-triangle removal), so this closes the
+       zero-delta trigger at its root rather than patching around it with a
+       small offset -- and keeps the origin well-conditioned/local in scale
+       (proportional to one triangle's own edge lengths, not a
+       potentially-mesh-spanning bbox diagonal), directly helping the
+       shard-corruption precision concern too. Uses mesh triangle 0
+       specifically (not necessarily traversal's own first-visited
+       triangle, which isn't known until traversal runs below) -- any real
+       triangle's centroid satisfies the same "can't coincide with a
+       vertex" property, so this doesn't need to be the exact first chain
+       start to be effective. */
+    if (mesh->num_triangles > 0)
+    {
+        const double *v0 = &mesh->positions[(size_t)mesh->tri_indices[0] * 3];
+        const double *v1 = &mesh->positions[(size_t)mesh->tri_indices[1] * 3];
+        const double *v2 = &mesh->positions[(size_t)mesh->tri_indices[2] * 3];
+        out->origin[0] = (double)(float)((v0[0] + v1[0] + v2[0]) / 3.0);
+        out->origin[1] = (double)(float)((v0[1] + v1[1] + v2[1]) / 3.0);
+        out->origin[2] = (double)(float)((v0[2] + v1[2] + v2[2]) / 3.0);
+    }
+    else
+    {
+        out->origin[0] = (double)(float)mesh->bbox[0];
+        out->origin[1] = (double)(float)mesh->bbox[1];
+        out->origin[2] = (double)(float)mesh->bbox[2];
+    }
+    {
+        const char *ov = getenv("PRC_DIAG_FORCE_ORIGIN");
+        if (ov != NULL)
+        {
+            double ox, oy, oz;
+            if (sscanf(ov, "%lf,%lf,%lf", &ox, &oy, &oz) == 3)
+            {
+                out->origin[0] = (double)(float)ox;
+                out->origin[1] = (double)(float)oy;
+                out->origin[2] = (double)(float)oz;
+            }
+        }
+    }
 
     num_tris = mesh->num_triangles;
     num_pos = mesh->num_positions;
@@ -1864,7 +1944,8 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
            then push, in one pass) is the whole point. */
         if (st.real_normals != NULL)
         {
-            st.tri_reversed[cur] = prc_encode_decide_reversed(&st, cur, idx, mv);
+            st.tri_reversed[cur] = getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL ? 0 :
+                prc_encode_decide_reversed(&st, cur, idx, mv);
             out->triangle_reversed[emitted] = st.tri_reversed[cur];
         }
 
@@ -2193,6 +2274,10 @@ prc_encode_normals_c1(prc_context *ctx, const prc_encode_mesh *mesh,
 
             if (component_size[mesh->tri_component[orig_tri]] == 1)
                 rev[k] = 1;
+            if (ctx->trace_reversed)
+                fprintf(stderr, "RC_DIAG_COMPSIZE k=%u tri=%u comp=%u compsize=%u rev=%u\n",
+                    k, orig_tri, mesh->tri_component[orig_tri],
+                    component_size[mesh->tri_component[orig_tri]], rev[k]);
         }
         prc_free(ctx, component_size);
     }
@@ -2314,6 +2399,10 @@ prc_encode_normals_c1(prc_context *ctx, const prc_encode_mesh *mesh,
                its decoded position/topology stays correct either way. */
             if (rev[k] && trav->edge_status_array[k] != 0)
                 rev[k] = 0;
+            if (ctx->trace_reversed)
+                fprintf(stderr, "RC_DIAG_REV k=%u tri=%u rev=%u edge_status=%u dot_val=%.9f comp=%u\n",
+                    k, trav->triangle_mesh_order[k], rev[k], trav->edge_status_array[k], dot_val,
+                    mesh->tri_component ? mesh->tri_component[trav->triangle_mesh_order[k]] : 0xFFFFFFFFu);
         }
     }
     *normal_is_reversed_out = rev;
@@ -2923,7 +3012,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
        stricter reader's array-cardinality validation depends on. */
     {
         uint32_t t_count = trav->edge_status_array_size;
-        uint32_t padded_count = t_count * 3;
+        uint32_t padded_count = (getenv("PRC_DIAG_NO_EDGE_STATUS_PADDING") != NULL) ? t_count : t_count * 3;
         uint8_t *padded = (uint8_t *)prc_calloc(ctx, padded_count > 0 ? padded_count : 1, sizeof(uint8_t));
 
         if (padded == NULL)
@@ -3084,6 +3173,24 @@ prc_encode_preprocess_free(prc_context *ctx, prc_encode_mesh *m)
     m->num_triangles = 0;
     m->num_edges = 0;
     m->num_components = 0;
+}
+
+int
+prc_api_mesh_has_nonmanifold_fans(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance)
+{
+    prc_encode_mesh mesh;
+    int code;
+    int has_fans;
+
+    code = prc_encode_preprocess(ctx, positions, num_positions, tri_indices, num_triangles, tolerance, &mesh);
+    if (code < 0)
+        return code;
+    has_fans = mesh.nonmanifold_vertices > 0;
+    prc_encode_preprocess_free(ctx, &mesh);
+    return has_fans;
 }
 
 int

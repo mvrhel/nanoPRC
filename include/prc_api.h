@@ -748,6 +748,37 @@ static PRC_INLINE prc_write_tolerance prc_write_tol_relative(double fraction)
 PRC_EXPORT double prc_write_tol_resolve(prc_context *ctx, prc_write_tolerance tol, double bbox_diagonal);
 
 /**
+ * @brief Checks whether a mesh has any vertex touched by multiple
+ * disconnected triangle "fans" (real but uncommon: usually a T-junction or
+ * duplicated-vertex artifact from the mesh's source tool, not a modeling
+ * error).
+ *
+ * PRC_API_WRITE_TESS_KIND_COMPRESSED's non-manifold-vertex handling for
+ * this specific case has an open, real-Adobe-Acrobat-confirmed
+ * compatibility issue in some Acrobat builds (root cause not yet
+ * identified as of this writing -- nanoPRC's own reader, and at least one
+ * independent PRC reader, both decode the affected output correctly).
+ * Callers building COMPRESSED entries from untrusted/arbitrary mesh
+ * sources should call this first and use PRC_API_WRITE_TESS_KIND_TRIANGLES
+ * instead whenever it returns 1, to avoid the risk. Uses the same welding
+ * tolerance and vertex-dedup logic COMPRESSED itself would use, so the
+ * check reflects what COMPRESSED would actually encode.
+ *
+ * @param ctx           Active context.
+ * @param positions     3 doubles per vertex.
+ * @param num_positions Number of vertices in @p positions.
+ * @param tri_indices   3 vertex indices per triangle (into @p positions).
+ * @param num_triangles Number of triangles in @p tri_indices.
+ * @param tolerance     Same tolerance the caller intends to pass to
+ *                      PRC_API_WRITE_TESS_KIND_COMPRESSED for this mesh.
+ * @return 1 if such a vertex exists, 0 if not, negative PRC_ERROR_* on failure.
+ */
+PRC_EXPORT int prc_api_mesh_has_nonmanifold_fans(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance);
+
+/**
  * @brief Representation-item kind for prc_api_write_rep_item.
  *
  * SURFACE writes a PRC_TYPE_RI_PolyBrepModel representation item (a
