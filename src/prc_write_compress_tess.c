@@ -68,6 +68,130 @@ prc_vtx_hash(int64_t kx, int64_t ky, int64_t kz)
     return h;
 }
 
+/* MITIGATION (2026-07-26, mixed_chains/UK_original.stl/beetle_1000000.stl Acrobat blank-tree
+   investigation): applies a tiny, deterministic per-vertex offset to every deduplicated position
+   before any encoding happens, to break a real, reproducible, but still-unidentified Acrobat
+   defect where two independent chains sharing one COMPRESSED entry can, for specific EXACT
+   real-world vertex values, blank the model tree -- confirmed causal via a minimal repro (nudging
+   the offending chain's own vertex by as little as 0.01 fixed it; nanoPRC's own decoder, and at
+   least one independent PRC reader, both already decode the un-nudged geometry correctly, so this
+   is Acrobat-side, not a correctness bug in this codebase) and confirmed as a working mitigation
+   on both real files that originally motivated this investigation. Root cause NOT identified --
+   see project notes -- this is an empirical mitigation, not a fix for a known mechanism.
+
+   Deterministic (same input position always produces the same offset) so re-encoding the same
+   mesh is reproducible, and offsets only depend on each vertex's OWN (already-deduplicated)
+   position -- never on the number of times it's referenced or on unrelated other vertices -- so
+   this cannot un-weld or split anything that was already correctly merged upstream. Magnitude is
+   tied to the encoder's own resolved tolerance rather than an absolute constant so it scales with
+   whatever precision the caller actually asked for. The exact magnitude needed to escape a given
+   real collision varies by mesh (confirmed empirically: 1e-4 sufficed for one real file, another
+   needed roughly 100x more) -- PRC_ENCODE_JITTER_TOLERANCE_FACTOR (prc_write_compress_tess.h,
+   shared with test code that needs to budget for it) is chosen generously given that uncertainty,
+   erring toward "definitely breaks the coincidence" over "minimal possible change". This is a real,
+   documented widening of this write facility's position-fidelity contract, not just quantization
+   noise -- see that constant's own comment. */
+
+/* Minimal, single-block-only MD5 (RFC 1321): the jitter's own input is always exactly 12 bytes
+   (3 packed float32 coordinates), which always fits in one 64-byte MD5 block after standard
+   padding, so this deliberately does not implement the general streaming/multi-block case.
+   Written to REPLICATE, byte-for-byte, an earlier externally-scripted (Python hashlib.md5)
+   version of this mitigation that was empirically confirmed working on a real file
+   (beetle_1000000.stl), after FIVE separate simpler-hash variants (mix64-based, in various
+   combinations of seed/magnitude/float-precision/pre-vs-post-weld application order) all failed
+   to reproduce that result -- see this function's own caller for the fuller story. Whatever
+   about MD5's specific output distribution happens to work for this mesh is not understood
+   mechanistically; this exists to get the PROVEN-working bit pattern, not because MD5 is
+   believed to be special. */
+static void
+prc_md5_12bytes(const uint8_t in[12], uint8_t out[16])
+{
+    static const uint32_t K[64] = {
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391 };
+    static const uint32_t S[64] = {
+        7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+        5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+        4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+        6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21 };
+    uint8_t block[64];
+    uint32_t M[16];
+    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    uint32_t a = a0, b = b0, c = c0, d = d0;
+    int i;
+
+    memset(block, 0, sizeof(block));
+    memcpy(block, in, 12);
+    block[12] = 0x80;
+    /* bit length (12*8=96) as 64-bit little-endian in the last 8 bytes */
+    block[56] = 96; /* fits in one byte; rest already zero */
+
+    for (i = 0; i < 16; i++)
+        M[i] = (uint32_t)block[i * 4] | ((uint32_t)block[i * 4 + 1] << 8) |
+               ((uint32_t)block[i * 4 + 2] << 16) | ((uint32_t)block[i * 4 + 3] << 24);
+
+    for (i = 0; i < 64; i++)
+    {
+        uint32_t f, g, tmp;
+        if (i < 16) { f = (b & c) | (~b & d); g = (uint32_t)i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (uint32_t)((5 * i + 1) % 16); }
+        else if (i < 48) { f = b ^ c ^ d; g = (uint32_t)((3 * i + 5) % 16); }
+        else { f = c ^ (b | ~d); g = (uint32_t)((7 * i) % 16); }
+        tmp = d;
+        d = c;
+        c = b;
+        f = a + f + K[i] + M[g];
+        b = b + ((f << S[i]) | (f >> (32 - S[i])));
+        a = tmp;
+    }
+    a0 += a; b0 += b; c0 += c; d0 += d;
+    out[0] = (uint8_t)a0; out[1] = (uint8_t)(a0 >> 8); out[2] = (uint8_t)(a0 >> 16); out[3] = (uint8_t)(a0 >> 24);
+    out[4] = (uint8_t)b0; out[5] = (uint8_t)(b0 >> 8); out[6] = (uint8_t)(b0 >> 16); out[7] = (uint8_t)(b0 >> 24);
+    out[8] = (uint8_t)c0; out[9] = (uint8_t)(c0 >> 8); out[10] = (uint8_t)(c0 >> 16); out[11] = (uint8_t)(c0 >> 24);
+    out[12] = (uint8_t)d0; out[13] = (uint8_t)(d0 >> 8); out[14] = (uint8_t)(d0 >> 16); out[15] = (uint8_t)(d0 >> 24);
+}
+
+static void
+prc_encode_position_jitter(double x, double y, double z, double magnitude, uint64_t seed,
+    double *jx, double *jy, double *jz)
+{
+    float fx, fy, fz;
+    uint8_t in[12];
+    uint8_t digest[16];
+    uint32_t hx, hy, hz;
+    (void)seed; /* the MD5 replication has no seed input; kept for call-site compatibility */
+
+    fx = (float)x;
+    fy = (float)y;
+    fz = (float)z;
+    memcpy(in + 0, &fx, 4);
+    memcpy(in + 4, &fy, 4);
+    memcpy(in + 8, &fz, 4);
+    prc_md5_12bytes(in, digest);
+
+    if (getenv("PRC_DIAG_MD5_SELFTEST") != NULL)
+    {
+        int di;
+        fprintf(stderr, "PRC_DIAG_MD5_SELFTEST digest=");
+        for (di = 0; di < 16; di++) fprintf(stderr, "%02x", digest[di]);
+        fprintf(stderr, "\n");
+    }
+
+    hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
+    hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
+    hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
+
+    *jx = (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * magnitude;
+    *jy = (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * magnitude;
+    *jz = (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * magnitude;
+}
+
 /* Path halving keeps find() strictly iterative, per the project rule that
    input-size-driven depth must never use C call-stack recursion. */
 static uint32_t
@@ -230,35 +354,90 @@ prc_encode_preprocess(prc_context *ctx,
             goto fail;
         }
 
-        for (i = 0; i < num_positions; i++)
         {
-            const double *p = positions + (size_t)i * 3;
-            int64_t kx = (int64_t)llround(p[0] / tol);
-            int64_t ky = (int64_t)llround(p[1] / tol);
-            int64_t kz = (int64_t)llround(p[2] / tol);
-            size_t slot = (size_t)(prc_vtx_hash(kx, ky, kz) & (uint64_t)(vcap - 1));
+            /* MITIGATION (2026-07-26/27), OPT-IN ONLY: jitter must be applied BEFORE this
+               dedup loop's own quantization/hashing, not after -- confirmed empirically via a
+               clean, isolated A/B test on beetle_1000000.stl. Applying it HERE (before this
+               function's own internal dedup) is a no-op for callers that already externally
+               welded their input before calling in (e.g. demos/stl_import, which does its own
+               separate weld pass first) -- confirmed empirically: this function's own dedup
+               found nothing further to merge in that case, so jittering before vs after it
+               produced byte-identical output either way, and did NOT reproduce the real fix
+               (which required jittering demos/stl_import's own RAW, pre-its-own-weld positions
+               instead -- see that file's PRC_DIAG_PREWELD_JITTER_MAG mitigation, the real
+               default for that pipeline). Left here, OPT-IN via PRC_DIAG_ENABLE_POSITION_JITTER,
+               as a possible mitigation for OTHER callers who do NOT externally pre-weld before
+               calling prc_write_compress_tess_entry (for whom this dedup pass is the ONLY
+               deduplication step, so jittering before it is the only point that COULD matter) --
+               this has not itself been verified to fix any such case, unlike demos/stl_import's
+               own mitigation. NOT a default: stacking with demos/stl_import's own mitigation
+               double-jitters and has been confirmed to produce a DIFFERENT (still-failing)
+               result than either mitigation alone. */
+            uint8_t do_jitter = (getenv("PRC_DIAG_ENABLE_POSITION_JITTER") != NULL);
+            double jitter_magnitude = tol * PRC_ENCODE_JITTER_TOLERANCE_FACTOR;
+            uint64_t jitter_seed = 0;
+            const char *seed_env = getenv("PRC_DIAG_JITTER_SEED");
+            const char *factor_env = getenv("PRC_DIAG_JITTER_TOLERANCE_FACTOR");
 
-            for (;;)
+            if (seed_env != NULL)
+                jitter_seed = (uint64_t)strtoull(seed_env, NULL, 10);
+            if (factor_env != NULL)
+                jitter_magnitude = tol * atof(factor_env);
+
+            for (i = 0; i < num_positions; i++)
             {
-                prc_vtx_slot *s = &vtable[slot];
-                if (!s->used)
+                const double *raw = positions + (size_t)i * 3;
+                double p[3];
+                int64_t kx, ky, kz;
+                size_t slot;
+
+                p[0] = raw[0]; p[1] = raw[1]; p[2] = raw[2];
+                if (do_jitter)
                 {
-                    s->used = 1;
-                    s->key[0] = kx;
-                    s->key[1] = ky;
-                    s->key[2] = kz;
-                    s->index = ndedup;
-                    memcpy(out->positions + (size_t)ndedup * 3, p, 3 * sizeof(double));
-                    remap[i] = ndedup;
-                    ndedup++;
-                    break;
+                    double jx, jy, jz;
+                    prc_encode_position_jitter(p[0], p[1], p[2], jitter_magnitude, jitter_seed, &jx, &jy, &jz);
+                    p[0] += jx; p[1] += jy; p[2] += jz;
+                    /* Truncate to float32: confirmed empirically necessary, not cosmetic -- an
+                       earlier, externally-scripted version of this mitigation wrote the
+                       jittered result into a binary STL file (float32-only storage) before
+                       nanoPRC ever read it back, so the value actually used was float32-
+                       rounded. Without this truncation, the exact same hash/magnitude/
+                       application-point combination (verified byte-identical to the working
+                       script's own pre-truncation computation) still failed on
+                       beetle_1000000.stl; adding just this truncation step, with nothing else
+                       changed, fixed it. */
+                    p[0] = (double)(float)p[0];
+                    p[1] = (double)(float)p[1];
+                    p[2] = (double)(float)p[2];
                 }
-                if (s->key[0] == kx && s->key[1] == ky && s->key[2] == kz)
+
+                kx = (int64_t)llround(p[0] / tol);
+                ky = (int64_t)llround(p[1] / tol);
+                kz = (int64_t)llround(p[2] / tol);
+                slot = (size_t)(prc_vtx_hash(kx, ky, kz) & (uint64_t)(vcap - 1));
+
+                for (;;)
                 {
-                    remap[i] = s->index;
-                    break;
+                    prc_vtx_slot *s = &vtable[slot];
+                    if (!s->used)
+                    {
+                        s->used = 1;
+                        s->key[0] = kx;
+                        s->key[1] = ky;
+                        s->key[2] = kz;
+                        s->index = ndedup;
+                        memcpy(out->positions + (size_t)ndedup * 3, p, 3 * sizeof(double));
+                        remap[i] = ndedup;
+                        ndedup++;
+                        break;
+                    }
+                    if (s->key[0] == kx && s->key[1] == ky && s->key[2] == kz)
+                    {
+                        remap[i] = s->index;
+                        break;
+                    }
+                    slot = (slot + 1) & (vcap - 1);
                 }
-                slot = (slot + 1) & (vcap - 1);
             }
         }
         out->num_positions = ndedup;
@@ -268,6 +447,7 @@ prc_encode_preprocess(prc_context *ctx,
             if (shrunk != NULL)
                 out->positions = shrunk;
         }
+
         prc_free(ctx, vtable);
         vtable = NULL;
     }
@@ -663,6 +843,19 @@ prc_encode_preprocess(prc_context *ctx,
             uint32_t *vedge_list = NULL;
             uint32_t *vparent = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
             uint32_t *vfan_new_vertex = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
+            /* Global-triangle-id -> local-fan-index lookup, reused across
+               every vertex via a generation stamp instead of being cleared
+               each time (clearing clean_tris entries per vertex would
+               itself be O(V*T)). Confirmed necessary (2026-07-27): without
+               this, the edge-to-local-index resolution below was a linear
+               scan over the vertex's own `deg` triangles per incident edge,
+               i.e. O(deg^2) per vertex -- fine for ordinary meshes but a
+               genuine multi-minute hang on a real-world file
+               (2368549.stream-147.stl) with heavily-duplicated geometry
+               giving some vertices a triangle degree over 5000. */
+            uint32_t *tri_local = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
+            uint32_t *tri_local_stamp = (uint32_t *)prc_calloc(ctx, clean_tris, sizeof(uint32_t));
+            uint32_t stamp = 0;
             uint32_t total = 0, etotal = 0, vi, ti2, ei2, nonmanifold_vertices = 0, splits_needed = 0;
             /* Captured BEFORE the per-vertex loop below, which grows
                out->num_positions in place as vertices get split -- the
@@ -716,6 +909,7 @@ prc_encode_preprocess(prc_context *ctx,
             }
 
             if (vtri_count && vtri_start && vtri_list && vedge_count && vedge_start && vedge_list && vparent && vfan_new_vertex
+                && tri_local && tri_local_stamp
                 && getenv("PRC_DIAG_DISABLE_NONMANIFOLD_SPLIT") == NULL)
             {
                 for (vi = 0; vi < orig_num_positions; vi++)
@@ -723,19 +917,20 @@ prc_encode_preprocess(prc_context *ctx,
                     uint32_t deg = vtri_start[vi + 1] - vtri_start[vi];
                     uint32_t k2, ncomp2, root0, m2;
                     if (deg < 2) continue;
+                    stamp++;
                     for (k2 = 0; k2 < deg; k2++)
+                    {
+                        uint32_t t = vtri_list[vtri_start[vi] + k2];
+                        tri_local[t] = k2;
+                        tri_local_stamp[t] = stamp;
                         vparent[k2] = k2; /* local indices 0..deg-1 into vtri_list[vtri_start[vi]+k2] */
+                    }
                     for (m2 = vedge_start[vi]; m2 < vedge_start[vi + 1]; m2++)
                     {
                         const prc_encode_edge *ed = &out->edges[vedge_list[m2]];
                         int32_t ta = ed->tri0, tb = ed->tri1;
-                        uint32_t la = UINT32_MAX, lb = UINT32_MAX, k3;
-                        for (k3 = 0; k3 < deg; k3++)
-                        {
-                            uint32_t t = vtri_list[vtri_start[vi] + k3];
-                            if ((int32_t)t == ta) la = k3;
-                            if ((int32_t)t == tb) lb = k3;
-                        }
+                        uint32_t la = (ta >= 0 && tri_local_stamp[ta] == stamp) ? tri_local[ta] : UINT32_MAX;
+                        uint32_t lb = (tb >= 0 && tri_local_stamp[tb] == stamp) ? tri_local[tb] : UINT32_MAX;
                         if (la != UINT32_MAX && lb != UINT32_MAX)
                         {
                             uint32_t ra = prc_uf_find(vparent, la);
@@ -875,6 +1070,8 @@ prc_encode_preprocess(prc_context *ctx,
             if (vedge_list != NULL) prc_free(ctx, vedge_list);
             if (vparent != NULL) prc_free(ctx, vparent);
             if (vfan_new_vertex != NULL) prc_free(ctx, vfan_new_vertex);
+            if (tri_local != NULL) prc_free(ctx, tri_local);
+            if (tri_local_stamp != NULL) prc_free(ctx, tri_local_stamp);
 
             if (nonmanifold_vertices > 0)
             {

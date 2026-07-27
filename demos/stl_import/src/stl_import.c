@@ -76,6 +76,64 @@
 #include <math.h>
 #include <ctype.h>
 
+/* Minimal, single-block-only MD5 (RFC 1321), duplicated from src/prc_write_compress_tess.c's
+   own (private/static) copy -- see that copy's comment for why this exists (replicating an
+   earlier externally-scripted, empirically-confirmed-working mitigation byte-for-byte, after
+   several simpler-hash variants failed to reproduce the same result). Input is always exactly
+   12 bytes (3 packed float32 coordinates), always fits one 64-byte MD5 block. */
+static void
+prc_md5_12bytes(const uint8_t in[12], uint8_t out[16])
+{
+    static const uint32_t K[64] = {
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391 };
+    static const uint32_t S[64] = {
+        7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+        5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+        4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+        6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21 };
+    uint8_t block[64];
+    uint32_t M[16];
+    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    uint32_t a = a0, b = b0, c = c0, d = d0;
+    int i;
+
+    memset(block, 0, sizeof(block));
+    memcpy(block, in, 12);
+    block[12] = 0x80;
+    block[56] = 96;
+
+    for (i = 0; i < 16; i++)
+        M[i] = (uint32_t)block[i * 4] | ((uint32_t)block[i * 4 + 1] << 8) |
+               ((uint32_t)block[i * 4 + 2] << 16) | ((uint32_t)block[i * 4 + 3] << 24);
+
+    for (i = 0; i < 64; i++)
+    {
+        uint32_t f, g, tmp;
+        if (i < 16) { f = (b & c) | (~b & d); g = (uint32_t)i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (uint32_t)((5 * i + 1) % 16); }
+        else if (i < 48) { f = b ^ c ^ d; g = (uint32_t)((3 * i + 5) % 16); }
+        else { f = c ^ (b | ~d); g = (uint32_t)((7 * i) % 16); }
+        tmp = d;
+        d = c;
+        c = b;
+        f = a + f + K[i] + M[g];
+        b = b + ((f << S[i]) | (f >> (32 - S[i])));
+        a = tmp;
+    }
+    a0 += a; b0 += b; c0 += c; d0 += d;
+    out[0] = (uint8_t)a0; out[1] = (uint8_t)(a0 >> 8); out[2] = (uint8_t)(a0 >> 16); out[3] = (uint8_t)(a0 >> 24);
+    out[4] = (uint8_t)b0; out[5] = (uint8_t)(b0 >> 8); out[6] = (uint8_t)(b0 >> 16); out[7] = (uint8_t)(b0 >> 24);
+    out[8] = (uint8_t)c0; out[9] = (uint8_t)(c0 >> 8); out[10] = (uint8_t)(c0 >> 16); out[11] = (uint8_t)(c0 >> 24);
+    out[12] = (uint8_t)d0; out[13] = (uint8_t)(d0 >> 8); out[14] = (uint8_t)(d0 >> 16); out[15] = (uint8_t)(d0 >> 24);
+}
+
 /* ====================================================================
  * STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD -- adjust this to change when
  * stl_import switches from one-model-per-part to a single lumped model.
@@ -1384,11 +1442,45 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
 
     memset(parts, 0, sizeof(*parts));
 
-    if (num_components > STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD)
     {
-        ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
-            original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, parts);
-        goto cleanup;
+        uint32_t lump_threshold = STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD;
+        const char *ov = getenv("PRC_DIAG_LUMP_THRESHOLD");
+        uint8_t force_lump = 0;
+        /* MITIGATION (2026-07-26, mixed_chains/UK_original.stl Acrobat blank-tree
+           investigation): a real, reproducible Acrobat defect blanks the model tree for specific
+           TOTAL tessellation-entry counts, independent of content -- confirmed on trivial synthetic
+           geometry at exactly these counts, with a dense sweep of ~25 other counts all working and
+           no formula found relating them. Root cause NOT identified -- see project notes. Since
+           there's no known way to predict other bad counts, this is a narrow, incomplete
+           empirical list of only the counts directly confirmed bad, not a general solution -- a
+           multi-part file whose count isn't in this list could still turn out to be bad; add to
+           this list if/when another one is found. Forcing every multi-part file through the
+           lumped-model path unconditionally (matching the existing 100+-part threshold's own
+           tree shape) would sidestep this class entirely, but a working file with real multi-part
+           semantics (separately selectable parts in a PDF3D viewer) would lose that structure --
+           deemed not worth the tradeoff for a bug this narrow (~3 of ~28 counts tested) until more
+           is known. */
+        static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
+        if (ov != NULL)
+            lump_threshold = (uint32_t)atoi(ov);
+        else
+        {
+            size_t bi;
+            for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
+            {
+                if (num_components == known_bad_tess_counts[bi])
+                {
+                    force_lump = 1;
+                    break;
+                }
+            }
+        }
+        if (num_components > lump_threshold || force_lump)
+        {
+            ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
+                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, parts);
+            goto cleanup;
+        }
     }
 
     component_of_triangle = (uint32_t *)malloc(sizeof(uint32_t) * mesh->num_triangles);
@@ -2073,6 +2165,80 @@ main(int argc, char *argv[])
         {
             fprintf(stderr, "Error: %s contains no non-degenerate triangles\n", input_path);
             goto cleanup;
+        }
+    }
+
+    /* MITIGATION (2026-07-26/27, mixed_chains/beetle_1000000.stl Acrobat blank-tree
+       investigation): jitters RAW, pre-weld positions by a small, deterministic,
+       bbox/tolerance-relative amount before this importer's own weld pass runs. Real,
+       reproducible, but still-unidentified Acrobat defect: two independent traversal chains
+       sharing one COMPRESSED entry can, for specific EXACT real-world vertex values, blank the
+       model tree (nanoPRC's own reader, and at least one independent PRC reader, both already
+       decode the un-jittered geometry correctly, so this is Acrobat-side, not a correctness bug
+       here). Root cause not identified -- this is an empirical, BEST-EFFORT mitigation, not a
+       guaranteed fix.
+
+       IMPORTANT, hard-won limitation: the magnitude that actually escapes a given file's own
+       coincidence appears to sit in a NARROW window, not a broad "big enough" range --
+       confirmed via a controlled A/B on beetle_1000000.stl where exactly 1e-2 (absolute) works
+       but 1.1548e-2 (only ~15% more, from an earlier, more "principled"-looking 10x-weld-
+       tolerance formula) does NOT. PRC_ENCODE_JITTER_TOLERANCE_FACTOR below is therefore NOT a
+       theoretically-derived safety margin -- it's reverse-engineered from the one value
+       confirmed (via real Acrobat testing, with the redundant downstream jitter in
+       prc_encode_preprocess correctly disabled to isolate this specific mechanism) to work,
+       expressed as a multiple of weld tolerance so it at least scales with the mesh's own size
+       rather than being a fixed mm constant. There is no guarantee this SAME multiple lands in
+       whatever narrow window a DIFFERENT file's own coincidence has; a file that still fails at
+       this default should be retried with a different PRC_DIAG_PREWELD_JITTER_MAG value (or
+       PRC_DIAG_JITTER_SEED on prc_encode_preprocess's own independent, downstream jitter
+       mechanism) rather than assumed unfixable.
+
+       Exact magnitude and float32-truncation-before-use (below) were both confirmed load-
+       bearing via the same controlled A/B: jittering AFTER this importer's own weld (inside
+       prc_encode_preprocess, downstream) does NOT reproduce this result, only jittering the RAW
+       pre-weld positions here does, because only here can jitter influence WHICH near-duplicate
+       (but not exactly coincident) raw corners end up welding together -- a real topological
+       effect no later-stage jitter can produce. PRC_DIAG_PREWELD_JITTER_MAG overrides the
+       automatic magnitude (absolute units) for testing; PRC_DIAG_DISABLE_PREWELD_JITTER
+       disables this mitigation entirely. */
+    {
+        uint8_t preweld_disabled = (getenv("PRC_DIAG_DISABLE_PREWELD_JITTER") != NULL);
+        const char *preweld_env = getenv("PRC_DIAG_PREWELD_JITTER_MAG");
+        if (!preweld_disabled)
+        {
+            double mag = (preweld_env != NULL) ? atof(preweld_env) : (weld_tolerance_fraction * diagonal * 8.65969267656085);
+            uint32_t vi;
+            for (vi = 0; vi < mesh.num_triangles * 3; vi++)
+            {
+                double *pv = &mesh.raw_positions[(size_t)vi * 3];
+                float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
+                uint8_t in[12], digest[16];
+                uint32_t hx, hy, hz;
+
+                memcpy(in + 0, &fx, 4);
+                memcpy(in + 4, &fy, 4);
+                memcpy(in + 8, &fz, 4);
+                prc_md5_12bytes(in, digest);
+                hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
+                hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
+                hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
+                pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                /* Truncate to float32: an earlier, externally-scripted version of this
+                   mitigation wrote the jittered result back into a binary STL file (float32-
+                   only storage) before nanoPRC ever read it, so the value actually used was
+                   float32-rounded, not full double precision. Confirmed empirically to matter:
+                   without this truncation, the exact same hash/magnitude/application-point
+                   combination (verified byte-identical to the working script's own computation
+                   before this rounding step) still failed on beetle_1000000.stl. */
+                pv[0] = (double)(float)pv[0];
+                pv[1] = (double)(float)pv[1];
+                pv[2] = (double)(float)pv[2];
+                if (vi == 0 && getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
+                    fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
+                        (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
+            }
         }
     }
 

@@ -343,7 +343,16 @@ main(void)
                     best_d = d;
                 }
             }
-            PRC_ASSERT(best_d <= 2.0 * mesh.tolerance_mm);
+            /* 2.0*tolerance budgets ordinary quantization noise; the additional
+               sqrt(3)*PRC_ENCODE_JITTER_TOLERANCE_FACTOR*tolerance term budgets the
+               deterministic position jitter prc_encode_preprocess now applies to
+               every vertex (see that constant's own comment, prc_write_compress_
+               tess.h) -- worst case is the jitter maxing out in all 3 axes at once.
+               This check compares against the ORIGINAL, pre-jitter local `positions`
+               array (unlike the check earlier in this file at line ~116, which
+               compares against mesh.positions -- already jittered by preprocessing --
+               and so does not need this extra budget). */
+            PRC_ASSERT(best_d <= (2.0 + sqrt(3.0) * PRC_ENCODE_JITTER_TOLERANCE_FACTOR) * mesh.tolerance_mm);
             masks[k] |= 1u << best;
         }
     }
