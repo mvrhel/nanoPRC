@@ -15,6 +15,7 @@
 */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "prc_write_model.h"
 #include "prc_data.h"
@@ -136,6 +137,40 @@ prc_write_main_header_compute_layout(uint32_t section_count, prc_write_main_head
     out->total_size = pos;
 }
 
+/* DIAGNOSTIC (2026-07-27): override the declared min_vers_for_read/auth_vers
+   pair, gated behind env vars, zero behavior change when unset. Added to
+   test a hypothesis raised while comparing nanoPRC's output against an
+   independent encoder on the same real-world files: that encoder declares
+   a single, self-consistent version (min_vers_for_read == auth_vers), while
+   nanoPRC declares a ~16-year gap (7094 / 23306) -- per this header's own
+   documented PRC_TYPE_GRAPH_DirectionalLight precedent, some fields are
+   gated purely on auth_vers crossing a threshold with "no secondary flag",
+   so a large declared gap seemed a plausible source of version-conditional
+   parsing mismatches in stricter readers.
+
+   DISPROVEN (2026-07-27, same day): matching the independent encoder's
+   exact self-consistent pair (8137/8137 via PRC_DIAG_MIN_VERS_FOR_READ=8137
+   PRC_DIAG_AUTH_VERS=8137) on three real files that reproducibly blank the
+   model tree in Acrobat (Y200-A-AC-B.stream-7, 2368573.stream-146,
+   2003002153310.stream-7) made no difference -- all three still blanked
+   the tree, byte-identical otherwise. Declared version is not the (sole)
+   cause of this bug family. Kept as a diagnostic in case a different
+   specific value or a narrower per-field investigation is worth trying
+   later, but this specific hypothesis is closed. */
+static uint32_t
+prc_write_diag_min_vers_for_read(void)
+{
+    const char *ov = getenv("PRC_DIAG_MIN_VERS_FOR_READ");
+    return ov != NULL ? (uint32_t)strtoul(ov, NULL, 10) : PRC_WRITE_MIN_VERS_FOR_READ;
+}
+
+static uint32_t
+prc_write_diag_auth_vers(void)
+{
+    const char *ov = getenv("PRC_DIAG_AUTH_VERS");
+    return ov != NULL ? (uint32_t)strtoul(ov, NULL, 10) : PRC_WRITE_AUTH_VERS;
+}
+
 static size_t
 prc_write_main_header_size(uint32_t section_count)
 {
@@ -154,8 +189,8 @@ prc_write_main_header_bytes(uint8_t *out, uint32_t section_count, const uint32_t
 
     p[0] = 'P'; p[1] = 'R'; p[2] = 'C';
     p += PRC_WRITE_SIGNATURE_BYTES;
-    p = prc_write_le_uint32(p, PRC_WRITE_MIN_VERS_FOR_READ);
-    p = prc_write_le_uint32(p, PRC_WRITE_AUTH_VERS);
+    p = prc_write_le_uint32(p, prc_write_diag_min_vers_for_read());
+    p = prc_write_le_uint32(p, prc_write_diag_auth_vers());
     p = prc_write_le_unique_id(p, PRC_WRITE_FILE_UID0);
     p = prc_write_le_unique_id(p, PRC_WRITE_APP_UID0);
     p = prc_write_le_uint32(p, 1); /* filestructure_count */
@@ -334,7 +369,7 @@ prc_write_prc_buffer(prc_context *ctx,
        direct-to-file writer that doesn't know trailing sizes until it
        has already written the header. */
     header_size = prc_write_main_header_size(section_count);
-    prc_write_file_struct_header_bytes(file_struct_header, PRC_WRITE_MIN_VERS_FOR_READ, PRC_WRITE_AUTH_VERS);
+    prc_write_file_struct_header_bytes(file_struct_header, prc_write_diag_min_vers_for_read(), prc_write_diag_auth_vers());
 
     section_offsets[0] = (uint32_t)header_size;
     section_offsets[1] = section_offsets[0] + (uint32_t)sizeof(file_struct_header);
