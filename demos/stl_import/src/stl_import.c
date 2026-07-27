@@ -1201,9 +1201,9 @@ stl_parts_free(stl_parts *parts)
         free((void *)parts->tess_entries[i].tri_indices);
         free((void *)parts->tess_entries[i].normals);
         free((void *)parts->tess_entries[i].norm_indices);
-        /* Neither build path (per-component or lumped single model) ever
-           sets face_tri_counts -- always NULL here, and free(NULL) is a
-           no-op, so this is just a defensive catch-all. */
+        /* Set only when the non-manifold-fan check downgrades an entry
+           (per-component or lumped) from COMPRESSED to TRIANGLES; NULL
+           otherwise, and free(NULL) is a no-op. */
         free((void *)parts->tess_entries[i].face_tri_counts);
     }
     free(parts->tess_entries);
@@ -1241,7 +1241,7 @@ stl_parts_free(stl_parts *parts)
 static int
 stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_positions, uint32_t num_welded,
     const uint32_t *weld_index, int original_normals, const uint32_t *global_normal_index,
-    const double *dedup_normals, double weld_tolerance_fraction, stl_parts *parts)
+    const double *dedup_normals, double weld_tolerance_fraction, int check_nonmanifold, stl_parts *parts)
 {
     uint32_t *combined_tri_indices = NULL;
     double *combined_positions = NULL;
@@ -1251,6 +1251,7 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
     uint32_t t;
     uint32_t max_normal_id = 0;
     int ok = -1;
+    prc_context *nonmanifold_check_ctx = prc_api_new_context(NULL);
 
     memset(parts, 0, sizeof(*parts));
 
@@ -1319,21 +1320,86 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
         tess->num_positions = num_welded;
         tess->tri_indices = combined_tri_indices;
         tess->num_triangles = mesh->num_triangles;
-        /* face_tri_counts/num_faces left at NULL/0: this is a plain merge,
-           not the abandoned face-groups approach -- see this function's
-           own doc comment. */
+        /* face_tri_counts/num_faces left at NULL/0 for the COMPRESSED case:
+           this is a plain merge, not the abandoned face-groups approach --
+           see this function's own doc comment. May be set below instead if
+           the non-manifold-fan check downgrades this entry to TRIANGLES. */
         tess->tolerance = prc_write_tol_relative(weld_tolerance_fraction);
+
+        /* MITIGATION (2026-07-27, narrowed same day): this lump path
+           (forced either by the >100-part threshold or by the {3,7,14}
+           known-bad-tessellation-count list above) used to skip the
+           non-manifold-fan check entirely -- it's only performed in
+           stl_import_build_parts' per-component loop below, which this
+           path bypasses via the early `goto cleanup` above. Confirmed via
+           a real prc-db file (2368549.stream-147.stl, whose 3 parts hit
+           the known-bad-count lump specifically): 2 of its 3 parts DO
+           contain non-manifold vertices and would have gotten the safe
+           TRIANGLES fallback on the normal per-part path, but the lumped
+           lookup order let a real Acrobat blank-tree defect back in
+           through this gap.
+
+           Only run this check when `check_nonmanifold` is set (i.e. only
+           for the {3,7,14} known-bad-count lump, never for the ordinary
+           >100-part threshold lump) -- confirmed the SAME day this was
+           first tried unconditionally: 3D-PDF-Sample-Carburetor.stream-
+           48.stl (759 real parts, lumped only by the >100 threshold, was
+           already real-Acrobat-confirmed working as a plain COMPRESSED
+           lump before this whole investigation) has its own non-manifold
+           vertices too -- but they're ordinary touching-part assembly
+           junctions (759 separate solids welded into one merge will
+           routinely touch at shared points), not the single-part
+           "disconnected fan" mesh-quality defect this check was designed
+           to catch. Forcing THAT case to TRIANGLES-with-recalculated-
+           normals produced a NEW, real Acrobat blank-tree/blank-canvas
+           failure of its own on this file -- i.e. the "fix" was a net
+           regression for the >100-threshold case, trading a theoretical
+           risk for a confirmed one. Restricting to check_nonmanifold
+           keeps the >100-threshold lump's previously-validated behavior
+           completely untouched. */
+        if (check_nonmanifold && getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
+            nonmanifold_check_ctx != NULL && prc_api_mesh_has_nonmanifold_fans(nonmanifold_check_ctx,
+                combined_positions, num_welded, combined_tri_indices, mesh->num_triangles, tess->tolerance) > 0)
+        {
+            uint32_t *one_face = (uint32_t *)malloc(sizeof(uint32_t));
+            if (one_face == NULL)
+            {
+                fprintf(stderr, "Error: allocation failed checking lumped model for non-manifold fans\n");
+                goto cleanup;
+            }
+            one_face[0] = mesh->num_triangles;
+            fprintf(stderr, "Note: lumped model contains a non-manifold vertex (disconnected triangle fans) -- "
+                "writing it uncompressed to avoid a known Acrobat compatibility issue.\n");
+            tess->kind = PRC_API_WRITE_TESS_KIND_TRIANGLES;
+            tess->face_tri_counts = one_face;
+            tess->num_faces = 1;
+        }
+
         if (original_normals)
         {
             tess->normals = combined_normals;
             tess->num_normals = max_normal_id;
             tess->norm_indices = combined_norm_indices;
+            if (tess->kind == PRC_API_WRITE_TESS_KIND_TRIANGLES)
+                tess->must_calculate_normals = 0;
         }
         else
         {
             tess->normals = NULL;
             tess->num_normals = 0;
             tess->norm_indices = NULL;
+            /* TRIANGLES (the non-manifold-fan-fallback branch above) only
+               recalculates normals from geometry/crease_angle_degrees when
+               must_calculate_normals is explicitly set (include/prc_api.h) --
+               unlike COMPRESSED, which always reconstructs from NULL
+               normals regardless of this flag. Missing this line left the
+               fallback entry with no usable normal data at all: confirmed
+               (2026-07-27) via real Acrobat testing on 2368549.stream-147.stl
+               and 3D-PDF-Sample-Carburetor.stream-48.stl -- both loaded and
+               displayed geometry, but with all shading/shape definition
+               gone flat. */
+            if (tess->kind == PRC_API_WRITE_TESS_KIND_TRIANGLES)
+                tess->must_calculate_normals = 1;
             tess->crease_angle_degrees = 30.0;
             if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
                 tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
@@ -1394,6 +1460,8 @@ cleanup:
     free(combined_positions);
     free(combined_normals);
     free(combined_norm_indices);
+    if (nonmanifold_check_ctx != NULL)
+        prc_api_release_context(nonmanifold_check_ctx);
     if (ok != 0)
         stl_parts_free(parts);
     return ok;
@@ -1478,7 +1546,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
         if (num_components > lump_threshold || force_lump)
         {
             ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
-                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, parts);
+                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, force_lump, parts);
             goto cleanup;
         }
     }
