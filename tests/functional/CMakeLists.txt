@@ -14,9 +14,11 @@ target_link_libraries(test_stl_roundtrip nano_prc)
 # Only link the math library if we aren't targeting Windows (MSVC's CRT
 # bundles sqrt() etc.; glibc requires linking libm explicitly) -- same
 # pattern as the root CMakeLists.txt's nano_prc/prc_static targets and
-# every demo's CMakeLists.txt.
+# every demo's CMakeLists.txt. Plain (no PUBLIC/PRIVATE keyword) signature,
+# matching the target_link_libraries call just above -- CMake forbids
+# mixing plain and keyword signatures for the same target.
 if(NOT WIN32)
-	target_link_libraries(test_stl_roundtrip PRIVATE m)
+	target_link_libraries(test_stl_roundtrip m)
 endif()
 target_include_directories(test_stl_roundtrip PRIVATE tests)
 target_compile_definitions(test_stl_roundtrip PRIVATE
