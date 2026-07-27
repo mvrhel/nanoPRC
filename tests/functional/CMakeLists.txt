@@ -11,6 +11,13 @@
 
 add_executable(test_stl_roundtrip tests/functional/test_stl_roundtrip.c)
 target_link_libraries(test_stl_roundtrip nano_prc)
+# Only link the math library if we aren't targeting Windows (MSVC's CRT
+# bundles sqrt() etc.; glibc requires linking libm explicitly) -- same
+# pattern as the root CMakeLists.txt's nano_prc/prc_static targets and
+# every demo's CMakeLists.txt.
+if(NOT WIN32)
+	target_link_libraries(test_stl_roundtrip PRIVATE m)
+endif()
 target_include_directories(test_stl_roundtrip PRIVATE tests)
 target_compile_definitions(test_stl_roundtrip PRIVATE
 	STL_EXPORT_EXE="$<TARGET_FILE:nano_prc_stl_export>"

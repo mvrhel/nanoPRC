@@ -29,6 +29,15 @@ add_executable(nano_prc_viewer
 target_link_libraries(nano_prc_viewer PRIVATE nano_prc)
 target_link_libraries(nano_prc_viewer PRIVATE SDL3::SDL3)
 
+# Only link the math library if we aren't targeting Windows (MSVC's CRT
+# bundles sqrt() etc.; glibc requires linking libm explicitly) -- camera.cpp/
+# scene.cpp call libm functions directly, and MatrixUtil is header-only (no
+# library target to pull this in transitively). Same pattern as every other
+# demo's CMakeLists.txt.
+if(NOT WIN32)
+	target_link_libraries(nano_prc_viewer PRIVATE m)
+endif()
+
 target_include_directories(nano_prc_viewer PRIVATE "${}/include")
 
 target_include_directories(nano_prc_viewer PRIVATE glad/include)
