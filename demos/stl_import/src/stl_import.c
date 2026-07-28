@@ -221,8 +221,18 @@ static int
 stl_read_file(const char *path, uint8_t **out_buf, size_t *out_size)
 {
     FILE *f;
-    long size;
+    /* long is only 32 bits on Windows even in 64-bit builds (MSVC's ABI
+       choice, unlike Linux/macOS where it's 64-bit) -- ftell()/fseek()
+       silently misbehave above 2GB there. A real file over 2GB
+       (48.8M-triangle binary STL, ~2.44GB) hit exactly this: reproducibly
+       failed with "could not determine size", confirmed 2026-07-28. */
+#if defined(_WIN32)
+    __int64 size;
+#else
+    off_t size;
+#endif
     uint8_t *buf;
+    size_t read_count;
 
     *out_buf = NULL;
     *out_size = 0;
@@ -233,7 +243,11 @@ stl_read_file(const char *path, uint8_t **out_buf, size_t *out_size)
         fprintf(stderr, "Error: could not open %s\n", path);
         return -1;
     }
-    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0)
+#if defined(_WIN32)
+    if (_fseeki64(f, 0, SEEK_END) != 0 || (size = _ftelli64(f)) < 0 || _fseeki64(f, 0, SEEK_SET) != 0)
+#else
+    if (fseeko(f, 0, SEEK_END) != 0 || (size = ftello(f)) < 0 || fseeko(f, 0, SEEK_SET) != 0)
+#endif
     {
         fprintf(stderr, "Error: could not determine size of %s\n", path);
         fclose(f);
@@ -247,7 +261,8 @@ stl_read_file(const char *path, uint8_t **out_buf, size_t *out_size)
         fclose(f);
         return -1;
     }
-    if ((long)fread(buf, 1, (size_t)size, f) != size)
+    read_count = fread(buf, 1, (size_t)size, f);
+    if (read_count != (size_t)size)
     {
         fprintf(stderr, "Error: short read on %s\n", path);
         free(buf);
@@ -1324,7 +1339,31 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
            this is a plain merge, not the abandoned face-groups approach --
            see this function's own doc comment. May be set below instead if
            the non-manifold-fan check downgrades this entry to TRIANGLES. */
-        tess->tolerance = prc_write_tol_relative(weld_tolerance_fraction);
+        {
+            /* EXPERIMENT (2026-07-28), DISPROVEN same day: reference
+               pseudocode (sample_compressed_mesh_write_pseudocode.md) halves
+               the encoding tolerance outright "if the mesh lacks
+               connectivity" -- this function is only ever reached when
+               merging multiple originally-disjoint connected components
+               into one entry (forced either by the >100-part threshold or
+               the {3,7,14} known-bad-count list), i.e. exactly that case,
+               unconditionally, every time. Tested against three real files
+               that reproducibly blank the Acrobat model tree via this exact
+               path (davidgbarnes-submitted-version.stream-90,
+               Walnut_Viewport3_PDF3D.stream-64, QCD_Leinweber_
+               ActionXs24t36black_Anim_r9796.stream-219) -- all three still
+               blanked the tree identically, alone and combined with the
+               Cramer's-rule basis experiment above. Tolerance margin is not
+               the cause of this bug family. Gated behind
+               PRC_DIAG_HALVE_LUMPED_TOLERANCE so default behavior (years of
+               validated real-file output at the unhalved tolerance) is
+               unaffected; kept as a diagnostic in case a narrower
+               investigation wants it later. */
+            double effective_fraction = weld_tolerance_fraction;
+            if (getenv("PRC_DIAG_HALVE_LUMPED_TOLERANCE") != NULL)
+                effective_fraction *= 0.5;
+            tess->tolerance = prc_write_tol_relative(effective_fraction);
+        }
 
         /* MITIGATION (2026-07-27, narrowed same day): this lump path
            (forced either by the >100-part threshold or by the {3,7,14}

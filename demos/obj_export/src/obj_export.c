@@ -112,6 +112,7 @@ typedef struct {
         int rc_ = (expr); \
         if (rc_ < 0) { \
             fprintf(stderr, "Error: %s (code: %d)\n", (msg), rc_); \
+            ret = 1; \
             goto cleanup; \
         } \
     } while (0)
@@ -261,6 +262,7 @@ int main(int argc, char *argv[])
     prc_api_tess *tesses = NULL;
     FILE *obj_file = NULL;
     FILE *mtl_file = NULL;
+    int ret = 0;
 
     /* Deduplication Tracking Registry */
     TrackedTexture *tracked_textures = NULL;
@@ -315,6 +317,7 @@ int main(int argc, char *argv[])
         if (!tesses)
         {
             fprintf(stderr, "Error: Calloc memory allocation space failure for tessellation elements registry.\n");
+            ret = 1;
             goto cleanup;
         }
     }
@@ -329,6 +332,7 @@ int main(int argc, char *argv[])
         if (!tess->tess_faces)
         {
             fprintf(stderr, "Error: Face array cache segment allocation failure.\n");
+            ret = 1;
             goto cleanup;
         }
 
@@ -352,6 +356,7 @@ int main(int argc, char *argv[])
     if (!obj_file)
     {
         fprintf(stderr, "Error: Could not open file destination OBJ stream layout path: %s\n", output_path);
+        ret = 1;
         goto cleanup;
     }
 
@@ -359,6 +364,7 @@ int main(int argc, char *argv[])
     if (!mtl_file)
     {
         fprintf(stderr, "Error: Could not open material destination MTL stream layout path: %s\n", mtl_full_path);
+        ret = 1;
         goto cleanup;
     }
 
@@ -448,6 +454,7 @@ int main(int argc, char *argv[])
                             if (!new_arr)
                             {
                                 fprintf(stderr, "Error: Out of memory growing texture tracking array.\n");
+                                ret = 1;
                                 goto cleanup;
                             }
                             tracked_textures = new_arr;
@@ -605,5 +612,5 @@ cleanup:
         prc_api_release_context(ctx);
     }
 
-    return 0;
+    return ret;
 }

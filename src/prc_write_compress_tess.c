@@ -1350,6 +1350,64 @@ prc_encode_emit_axis_point(prc_encode_state *st, uint32_t mesh_vtx, prc_vec3 bas
     return 0;
 }
 
+/* EXPERIMENT (2026-07-28), DISPROVEN same day: reference pseudocode (sample_
+   compressed_mesh_write_pseudocode.md) decomposes the target point into the
+   edge basis by solving the 3x3 linear system [X Y Z] * v = diff via
+   Cramer's rule (determinant ratios), not by assuming X/Y/Z form a
+   perfectly orthonormal frame and projecting via dot products. For a
+   genuinely orthonormal basis the two are mathematically identical (the
+   inverse of an orthonormal matrix is its transpose); they diverge only to
+   the extent floating-point error has left the basis very slightly
+   non-orthonormal. Tested against three real files that reproducibly blank
+   the Acrobat model tree via the >100-part lumped-COMPRESSED path
+   (davidgbarnes-submitted-version.stream-90, Walnut_Viewport3_PDF3D.
+   stream-64, QCD_Leinweber_ActionXs24t36black_Anim_r9796.stream-219) --
+   all three still blanked the tree identically, alone and combined with
+   the halved-tolerance experiment below. Basis decomposition method is not
+   the cause of this bug family. Gated behind PRC_DIAG_USE_CRAMER_BASIS so
+   default behavior (dot-product projection, unchanged for years of
+   validated real-file output) is completely unaffected; kept as a
+   diagnostic in case a narrower investigation wants it later. */
+static int
+prc_encode_use_cramer_basis(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = (getenv("PRC_DIAG_USE_CRAMER_BASIS") != NULL) ? 1 : 0;
+    return cached;
+}
+
+static void
+prc_encode_cramer_decompose(prc_vec3 diff, prc_vec3 x, prc_vec3 y, prc_vec3 z,
+    double *out_x, double *out_y, double *out_z)
+{
+    prc_vec3 yz, xdiffz_cross, ydiff_cross;
+    double det;
+
+    prc_vec_cross(y, z, &yz);
+    det = prc_vec_dot_product(x, yz);
+
+    if (det > -1.0e-300 && det < 1.0e-300)
+    {
+        /* Degenerate (should not happen for a basis that already survived
+           prc_encode_edge_basis's own normalization/fallback) -- fall back
+           to the ordinary dot-product projection rather than divide by
+           (near-)zero. */
+        *out_x = prc_vec_dot_product(diff, x);
+        *out_y = prc_vec_dot_product(diff, y);
+        *out_z = prc_vec_dot_product(diff, z);
+        return;
+    }
+
+    *out_x = prc_vec_dot_product(diff, yz) / det;
+
+    prc_vec_cross(diff, z, &xdiffz_cross);
+    *out_y = prc_vec_dot_product(x, xdiffz_cross) / det;
+
+    prc_vec_cross(y, diff, &ydiff_cross);
+    *out_z = prc_vec_dot_product(x, ydiff_cross) / det;
+}
+
 /* Emit a new point predicted in a grow op's orthonormal edge basis; the
    reconstruction mirrors prc_decode_next_point_post_scale exactly. */
 static int
@@ -1360,18 +1418,29 @@ prc_encode_emit_basis_point(prc_encode_state *st, uint32_t mesh_vtx,
     prc_vec3 diff, x, y, z, temp, temp2, rec;
     int32_t dv[3];
     int code;
+    double proj_x, proj_y, proj_z;
 
     diff.x = p[0] - op->origin.x;
     diff.y = p[1] - op->origin.y;
     diff.z = p[2] - op->origin.z;
 
-    code = prc_encode_quantize(st->ctx, prc_vec_dot_product(diff, op->x_basis), st->tol, &dv[0]);
+    if (prc_encode_use_cramer_basis())
+        prc_encode_cramer_decompose(diff, op->x_basis, op->y_basis, op->z_basis,
+            &proj_x, &proj_y, &proj_z);
+    else
+    {
+        proj_x = prc_vec_dot_product(diff, op->x_basis);
+        proj_y = prc_vec_dot_product(diff, op->y_basis);
+        proj_z = prc_vec_dot_product(diff, op->z_basis);
+    }
+
+    code = prc_encode_quantize(st->ctx, proj_x, st->tol, &dv[0]);
     if (code < 0)
         return code;
-    code = prc_encode_quantize(st->ctx, prc_vec_dot_product(diff, op->y_basis), st->tol, &dv[1]);
+    code = prc_encode_quantize(st->ctx, proj_y, st->tol, &dv[1]);
     if (code < 0)
         return code;
-    code = prc_encode_quantize(st->ctx, prc_vec_dot_product(diff, op->z_basis), st->tol, &dv[2]);
+    code = prc_encode_quantize(st->ctx, proj_z, st->tol, &dv[2]);
     if (code < 0)
         return code;
 

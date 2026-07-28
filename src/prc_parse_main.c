@@ -697,9 +697,18 @@ prc_open_contents(prc_context *ctx, const char* infile)
         return NULL;
     }
 
-    fseek(fid, 0L, SEEK_END);
-    size = ftell(fid);
-    fseek(fid, 0L, SEEK_SET);
+    /* ftell()/fseek() use `long`, only 32 bits on Windows even in 64-bit
+       builds (unlike Linux/macOS where it's 64-bit) -- silently misbehaves
+       above 2GB there. A real 2.44GB PRC/PDF input reproducibly hit this. */
+#if defined(_WIN32)
+    _fseeki64(fid, 0, SEEK_END);
+    size = (size_t)_ftelli64(fid);
+    _fseeki64(fid, 0, SEEK_SET);
+#else
+    fseeko(fid, 0, SEEK_END);
+    size = (size_t)ftello(fid);
+    fseeko(fid, 0, SEEK_SET);
+#endif
 
     /* +1 and NUL-terminate: the PDF-parsing path (prc_pdf*.c) runs sscanf()
        directly on pointers into this buffer, which assumes a NUL-terminated

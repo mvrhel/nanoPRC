@@ -412,6 +412,29 @@ prc_derive_normal(prc_context *ctx, const prc_tess_3d_compressed *data,
         *normal = basis.Z;
     }
 
+    if (code < 0)
+    {
+        /* ROBUSTNESS (2026-07-28): prc_vec_make_orth_basis_normals only
+           fails here if v1 itself is a zero-length vector, i.e. this
+           triangle's first two points are exactly coincident -- a
+           genuinely degenerate triangle with no well-defined normal
+           direction at all, not a recoverable precision issue. Previously
+           this propagated as a fatal error and aborted the ENTIRE
+           COMPRESSED tessellation parse over one bad triangle: confirmed
+           on a real prc-db file (unolinea-house-dwg.stream-79) that an
+           independent PRC reader parses without complaint (317K other
+           triangles, unaffected). A degenerate triangle has zero visible
+           area regardless of which way its normal points, so falling back
+           to an arbitrary fixed unit normal and continuing the parse loses
+           nothing perceptible while preserving every other triangle in the
+           file -- strictly better than discarding the whole mesh. Note:
+           this is a last-resort fallback for a case both existing recovery
+           mechanisms already gave up on, not a change to the degeneracy
+           detection/epsilon logic itself. */
+        prc_vec_set(normal, 0.0, 0.0, 1.0);
+        code = 0;
+    }
+
     treated_tri->triangle_index = triangle_index;
     treated_tri->normal_was_reversed = data->normal_is_reversed[triangle_index];
 
@@ -1943,21 +1966,41 @@ prc_add_edge_to_list(prc_context *ctx, treated_edge_list *edge_list,
 			edge_list->edge[k].indice1 = NULL;
 		}
 	}
+    /* ROBUSTNESS/PERFORMANCE (2026-07-28): indice1[] is an open-addressing
+       hash table (linear probing, UINT32_MAX = empty slot sentinel -- an
+       established idiom already used elsewhere in this codebase for
+       "unassigned" uint32_t indices), not the append-only array it used to
+       be. That original version made prc_check_for_treated_edge's lookup
+       an O(degree) linear scan per call, O(degree^2) total for any vertex
+       with many incident edges -- confirmed via a real prc-db file with
+       vertices touched by 5000+ triangles that this turned a sub-second
+       read-side decode of a modest 3.5MB COMPRESSED tessellation into a
+       multi-minute 100%-CPU stall, the read-side twin of an O(degree^2)
+       write-side bug found and fixed earlier in the same investigation.
+       Insert deliberately does not check for an existing duplicate before
+       probing to an empty slot -- prc_check_for_treated_edge only cares
+       whether a value is present anywhere in the bucket, never how many
+       times, matching the original array's own behavior (it never
+       deduplicated on insert either). */
     if (edge_list->edge[min_index].capacity == 0)
     {
-        edge_list->edge[min_index].indice1 = (uint32_t *)prc_calloc(ctx,
-            PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY, sizeof(uint32_t));
+        edge_list->edge[min_index].indice1 = (uint32_t *)prc_malloc(ctx,
+            (size_t)PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY * sizeof(uint32_t));
         if (edge_list->edge[min_index].indice1 == NULL)
         {
             return PRC_ERROR_MEMORY;
         }
+        memset(edge_list->edge[min_index].indice1, 0xFF,
+            (size_t)PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY * sizeof(uint32_t));
         edge_list->edge[min_index].capacity = PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY;
     }
 	else if (edge_list->edge[min_index].num_second_indices >= edge_list->edge[min_index].capacity)
 	{
         uint32_t old_capacity = edge_list->edge[min_index].capacity;
         uint32_t new_capacity;
+        uint32_t *old_indices = edge_list->edge[min_index].indice1;
         uint32_t *new_indices;
+        uint32_t r;
 
         if (old_capacity > UINT32_MAX / 2)
         {
@@ -1965,21 +2008,39 @@ prc_add_edge_to_list(prc_context *ctx, treated_edge_list *edge_list,
         }
 
         new_capacity = old_capacity * 2;
-        new_indices = (uint32_t *)prc_calloc(ctx, new_capacity, sizeof(uint32_t));
+        new_indices = (uint32_t *)prc_malloc(ctx, (size_t)new_capacity * sizeof(uint32_t));
 		if (new_indices == NULL)
 		{
 			return PRC_ERROR_MEMORY;
 		}
+        memset(new_indices, 0xFF, (size_t)new_capacity * sizeof(uint32_t));
 
-        memcpy(new_indices,
-            edge_list->edge[min_index].indice1,
-            old_capacity * sizeof(uint32_t));
-        prc_free(ctx, edge_list->edge[min_index].indice1);
+        /* Rehash every existing entry into the larger table -- slot
+           position depends on capacity, so a straight memcpy (as the old
+           append-only-array version did) is no longer valid here. */
+        for (r = 0; r < old_capacity; r++)
+        {
+            if (old_indices[r] != UINT32_MAX)
+            {
+                uint32_t v = old_indices[r];
+                uint32_t s = v % new_capacity;
+                while (new_indices[s] != UINT32_MAX)
+                    s = (s + 1) % new_capacity;
+                new_indices[s] = v;
+            }
+        }
+        prc_free(ctx, old_indices);
 
 		edge_list->edge[min_index].indice1 = new_indices;
         edge_list->edge[min_index].capacity = new_capacity;
 	}
-	edge_list->edge[min_index].indice1[edge_list->edge[min_index].num_second_indices] = max_index;
+
+    {
+        uint32_t slot = max_index % edge_list->edge[min_index].capacity;
+        while (edge_list->edge[min_index].indice1[slot] != UINT32_MAX)
+            slot = (slot + 1) % edge_list->edge[min_index].capacity;
+        edge_list->edge[min_index].indice1[slot] = max_index;
+    }
 	edge_list->edge[min_index].num_second_indices += 1;
 	edge_list->edge[min_index].indice0 = min_index;  /* Not really needed but here for debug help */
 
@@ -2039,15 +2100,27 @@ prc_check_for_treated_edge(prc_context *ctx, treated_edge_list *edge_list,
 		return;
 	}
 
-	for (int k = 0; k < edge_list->edge[min_index].num_second_indices; k++)
-	{
-		if (edge_list->edge[min_index].indice1[k] == max_index)
-		{
-			*edge_found = 1;
-			return;
-		}
-	}
-	*edge_found = 0;
+    /* O(1) average lookup via linear-probed open addressing -- see
+       prc_add_edge_to_list's own comment for why (was an O(degree) scan
+       per call here, O(degree^2) total per high-degree vertex). */
+    {
+        uint32_t slot = max_index % edge_list->edge[min_index].capacity;
+        for (;;)
+        {
+            uint32_t v = edge_list->edge[min_index].indice1[slot];
+            if (v == max_index)
+            {
+                *edge_found = 1;
+                return;
+            }
+            if (v == UINT32_MAX)
+            {
+                *edge_found = 0;
+                return;
+            }
+            slot = (slot + 1) % edge_list->edge[min_index].capacity;
+        }
+    }
 }
 
 static void
@@ -3198,11 +3271,46 @@ prc_compressed_tess_hash_edge_key(uint32_t index1, uint32_t index2, uint32_t mas
 
 static void
 prc_compressed_tess_hash_insert_edge(uint32_t *hash_heads, uint32_t *hash_next,
-    uint32_t hash_mask, uint32_t index1, uint32_t index2, uint32_t edge_index)
+    uint32_t *hash_prev, uint32_t hash_mask, uint32_t index1, uint32_t index2, uint32_t edge_index)
 {
     uint32_t bucket = prc_compressed_tess_hash_edge_key(index1, index2, hash_mask);
-    hash_next[edge_index] = hash_heads[bucket];
+    uint32_t old_head = hash_heads[bucket];
+
+    hash_next[edge_index] = old_head;
+    hash_prev[edge_index] = UINT32_MAX;
+    if (old_head != UINT32_MAX)
+        hash_prev[old_head] = edge_index;
     hash_heads[bucket] = edge_index;
+}
+
+/* PERFORMANCE (2026-07-28): unlink a now-closed (num_triangles==2) edge from
+   its bucket's search chain. Without this, a real-world non-manifold edge
+   shared by hundreds of triangles (confirmed on a real prc-db file) leaves
+   hundreds of permanently-dead entries in one bucket -- prc_compressed_tess_
+   find_open_edge_hashed only ever matches num_triangles==1 entries, so every
+   later triangle referencing that same vertex pair still has to walk past
+   all of them before concluding "not open, make a new one", making the hash
+   table's nominal O(1) lookup effectively O(k) per call for an edge shared
+   k times, O(k^2) total -- the same class of bug as prc_add_edge_to_list's
+   read-side fix earlier in this file, hiding inside a second, separately-
+   maintained edge-adjacency structure. Closed edges are never looked up
+   again (their only purpose was pairing), so removing them from the chain
+   loses nothing. */
+static void
+prc_compressed_tess_hash_unlink_edge(uint32_t *hash_heads, uint32_t *hash_next,
+    uint32_t *hash_prev, uint32_t hash_mask, uint32_t index1, uint32_t index2, uint32_t edge_index)
+{
+    uint32_t bucket = prc_compressed_tess_hash_edge_key(index1, index2, hash_mask);
+    uint32_t prev = hash_prev[edge_index];
+    uint32_t next = hash_next[edge_index];
+
+    if (prev != UINT32_MAX)
+        hash_next[prev] = next;
+    else
+        hash_heads[bucket] = next;
+
+    if (next != UINT32_MAX)
+        hash_prev[next] = prev;
 }
 
 /* Find an unmatched edge candidate in the hashed edge buckets. */
@@ -3252,6 +3360,7 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
     uint32_t num_triangles = data->triangle_face_array_size;
     uint32_t *hash_heads = NULL;
     uint32_t *hash_next = NULL;
+    uint32_t *hash_prev = NULL;
     uint32_t hash_capacity = 1;
     uint32_t hash_mask;
 
@@ -3278,10 +3387,12 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
 
     hash_heads = (uint32_t *)prc_calloc(ctx, hash_capacity, sizeof(uint32_t));
     hash_next = (uint32_t *)prc_calloc(ctx, edge_list->capacity, sizeof(uint32_t));
-    if (hash_heads == NULL || hash_next == NULL)
+    hash_prev = (uint32_t *)prc_calloc(ctx, edge_list->capacity, sizeof(uint32_t));
+    if (hash_heads == NULL || hash_next == NULL || hash_prev == NULL)
     {
         prc_free(ctx, hash_heads);
         prc_free(ctx, hash_next);
+        prc_free(ctx, hash_prev);
         prc_free(ctx, edge_list->edge);
         edge_list->edge = NULL;
         edge_list->capacity = 0;
@@ -3316,6 +3427,7 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             {
                 prc_free(ctx, hash_heads);
                 prc_free(ctx, hash_next);
+                prc_free(ctx, hash_prev);
                 prc_free(ctx, edge_list->edge);
                 edge_list->edge = NULL;
                 edge_list->capacity = 0;
@@ -3324,13 +3436,15 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             }
             prc_compressed_tess_set_edge(edge_list, NULL, indices,
                 PRC_COMPRESSED_TESS_EDGE_01, indices_offset);
-            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_mask,
+            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_prev, hash_mask,
                 indices[0], indices[1], new_edge_index);
         }
         else
         {
             prc_compressed_tess_set_edge(edge_list, edge, indices,
                 PRC_COMPRESSED_TESS_EDGE_01, indices_offset);
+            prc_compressed_tess_hash_unlink_edge(hash_heads, hash_next, hash_prev, hash_mask,
+                indices[0], indices[1], (uint32_t)(edge - edge_list->edge));
         }
 
         /* Edge 0-2 */
@@ -3343,6 +3457,7 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             {
                 prc_free(ctx, hash_heads);
                 prc_free(ctx, hash_next);
+                prc_free(ctx, hash_prev);
                 prc_free(ctx, edge_list->edge);
                 edge_list->edge = NULL;
                 edge_list->capacity = 0;
@@ -3351,13 +3466,15 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             }
             prc_compressed_tess_set_edge(edge_list, NULL, indices,
                 PRC_COMPRESSED_TESS_EDGE_02, indices_offset);
-            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_mask,
+            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_prev, hash_mask,
                 indices[0], indices[2], new_edge_index);
         }
         else
         {
             prc_compressed_tess_set_edge(edge_list, edge, indices,
                 PRC_COMPRESSED_TESS_EDGE_02, indices_offset);
+            prc_compressed_tess_hash_unlink_edge(hash_heads, hash_next, hash_prev, hash_mask,
+                indices[0], indices[2], (uint32_t)(edge - edge_list->edge));
         }
 
         /* Edge 1-2 */
@@ -3370,6 +3487,7 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             {
                 prc_free(ctx, hash_heads);
                 prc_free(ctx, hash_next);
+                prc_free(ctx, hash_prev);
                 prc_free(ctx, edge_list->edge);
                 edge_list->edge = NULL;
                 edge_list->capacity = 0;
@@ -3378,18 +3496,21 @@ prc_compressed_tess_build_edge_list(prc_context *ctx,  prc_tess_3d_compressed *d
             }
             prc_compressed_tess_set_edge(edge_list, NULL, indices,
                 PRC_COMPRESSED_TESS_EDGE_12, indices_offset);
-            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_mask,
+            prc_compressed_tess_hash_insert_edge(hash_heads, hash_next, hash_prev, hash_mask,
                 indices[1], indices[2], new_edge_index);
         }
         else
         {
             prc_compressed_tess_set_edge(edge_list, edge, indices,
                 PRC_COMPRESSED_TESS_EDGE_12, indices_offset);
+            prc_compressed_tess_hash_unlink_edge(hash_heads, hash_next, hash_prev, hash_mask,
+                indices[1], indices[2], (uint32_t)(edge - edge_list->edge));
         }
     }
 
     prc_free(ctx, hash_heads);
     prc_free(ctx, hash_next);
+    prc_free(ctx, hash_prev);
 
     return 0;
 }
