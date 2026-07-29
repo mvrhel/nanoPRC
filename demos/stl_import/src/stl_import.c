@@ -1585,8 +1585,17 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
         }
         if (num_components > lump_threshold || force_lump)
         {
+            /* DIAGNOSTIC (2026-07-28): allow forcing the non-manifold-fan
+               check even when lumping was triggered by PRC_DIAG_LUMP_THRESHOLD
+               rather than the {3,7,14} count bug, so a manually-forced-small
+               threshold test isolates "does lumping alone help" from "did
+               this also lose non-manifold protection". Zero effect unless
+               PRC_DIAG_LUMP_THRESHOLD is also set (this env var alone does
+               nothing since force_lump already covers the real, non-diagnostic
+               path). */
+            uint8_t check_nm = (uint8_t)(force_lump || getenv("PRC_DIAG_FORCE_LUMP_NONMANIFOLD_CHECK") != NULL);
             ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
-                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, force_lump, parts);
+                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, check_nm, parts);
             goto cleanup;
         }
     }
@@ -2315,38 +2324,76 @@ main(int argc, char *argv[])
         const char *preweld_env = prc_diag_getenv("PRC_DIAG_PREWELD_JITTER_MAG");
         if (!preweld_disabled)
         {
-            double mag = (preweld_env != NULL) ? atof(preweld_env) : (weld_tolerance_fraction * diagonal * 8.65969267656085);
-            uint32_t vi;
-            for (vi = 0; vi < mesh.num_triangles * 3; vi++)
+            uint32_t ti;
+            for (ti = 0; ti < mesh.num_triangles; ti++)
             {
-                double *pv = &mesh.raw_positions[(size_t)vi * 3];
-                float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
-                uint8_t in[12], digest[16];
-                uint32_t hx, hy, hz;
+                /* FIX (2026-07-29, mixed-kind-tree Acrobat blank-tree investigation): magnitude
+                   is now PER-TRIANGLE, not the whole mesh's bbox diagonal. A single global
+                   magnitude over-jitters any part that's spatially small relative to the file as
+                   a whole -- confirmed real-Acrobat-causal for a blank tree via a minimal, direct
+                   A/B/A/B repro (a small COMPRESSED part sharing a tree with a spatially distant
+                   TRIANGLES-fallback sibling; same-kind trees tolerated the same distortion, so
+                   this is a magnitude bug, not a kind-mixing one -- see project memory). Each
+                   triangle's own 3-vertex bbox diagonal is a cheap, purely local scale proxy that
+                   needs no connectivity pre-pass (component membership isn't known until AFTER
+                   welding, which must run AFTER jitter -- see this block's own header comment on
+                   why jitter has to see raw, pre-weld positions). This errs toward UNDER-scaling
+                   for a part made of many triangles spanning more area than any one of them,
+                   which is the safe direction: nothing in this investigation ever found
+                   insufficient jitter to cause new breakage, only to occasionally fail to escape
+                   an existing collision. */
+                double mag;
+                if (preweld_env != NULL)
+                {
+                    mag = atof(preweld_env);
+                }
+                else
+                {
+                    double tri_bbox_min[3], tri_bbox_max[3], tri_ext[3], tri_diag;
+                    int c, a;
+                    bbox_reset(tri_bbox_min, tri_bbox_max);
+                    for (c = 0; c < 3; c++)
+                        bbox_expand(tri_bbox_min, tri_bbox_max, &mesh.raw_positions[(size_t)(ti * 3 + c) * 3]);
+                    for (a = 0; a < 3; a++) tri_ext[a] = tri_bbox_max[a] - tri_bbox_min[a];
+                    tri_diag = sqrt(tri_ext[0] * tri_ext[0] + tri_ext[1] * tri_ext[1] + tri_ext[2] * tri_ext[2]);
+                    if (tri_diag < 1e-9) tri_diag = diagonal; /* degenerate guard: fall back to whole-mesh scale */
+                    mag = weld_tolerance_fraction * tri_diag * 8.65969267656085;
+                }
+                {
+                    int c;
+                    for (c = 0; c < 3; c++)
+                    {
+                        uint32_t vi = ti * 3 + (uint32_t)c;
+                        double *pv = &mesh.raw_positions[(size_t)vi * 3];
+                        float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
+                        uint8_t in[12], digest[16];
+                        uint32_t hx, hy, hz;
 
-                memcpy(in + 0, &fx, 4);
-                memcpy(in + 4, &fy, 4);
-                memcpy(in + 8, &fz, 4);
-                prc_md5_12bytes(in, digest);
-                hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
-                hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
-                hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
-                pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                /* Truncate to float32: an earlier, externally-scripted version of this
-                   mitigation wrote the jittered result back into a binary STL file (float32-
-                   only storage) before nanoPRC ever read it, so the value actually used was
-                   float32-rounded, not full double precision. Confirmed empirically to matter:
-                   without this truncation, the exact same hash/magnitude/application-point
-                   combination (verified byte-identical to the working script's own computation
-                   before this rounding step) still failed on beetle_1000000.stl. */
-                pv[0] = (double)(float)pv[0];
-                pv[1] = (double)(float)pv[1];
-                pv[2] = (double)(float)pv[2];
-                if (vi == 0 && prc_diag_getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
-                    fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
-                        (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
+                        memcpy(in + 0, &fx, 4);
+                        memcpy(in + 4, &fy, 4);
+                        memcpy(in + 8, &fz, 4);
+                        prc_md5_12bytes(in, digest);
+                        hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
+                        hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
+                        hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
+                        pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        /* Truncate to float32: an earlier, externally-scripted version of this
+                           mitigation wrote the jittered result back into a binary STL file (float32-
+                           only storage) before nanoPRC ever read it, so the value actually used was
+                           float32-rounded, not full double precision. Confirmed empirically to matter:
+                           without this truncation, the exact same hash/magnitude/application-point
+                           combination (verified byte-identical to the working script's own computation
+                           before this rounding step) still failed on beetle_1000000.stl. */
+                        pv[0] = (double)(float)pv[0];
+                        pv[1] = (double)(float)pv[1];
+                        pv[2] = (double)(float)pv[2];
+                        if (vi == 0 && prc_diag_getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
+                            fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
+                                (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
+                    }
+                }
             }
         }
     }

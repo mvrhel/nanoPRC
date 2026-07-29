@@ -2035,6 +2035,13 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             }
         }
     }
+    if (getenv("PRC_DIAG_PRINT_BBOX_ORIGIN") != NULL)
+    {
+        fprintf(stderr, "PRC_DIAG_PRINT_BBOX_ORIGIN: bbox=[%.6f,%.6f,%.6f .. %.6f,%.6f,%.6f] origin=[%.6f,%.6f,%.6f]\n",
+            mesh->bbox[0], mesh->bbox[1], mesh->bbox[2],
+            mesh->bbox[3], mesh->bbox[4], mesh->bbox[5],
+            out->origin[0], out->origin[1], out->origin[2]);
+    }
 
     num_tris = mesh->num_triangles;
     num_pos = mesh->num_positions;
