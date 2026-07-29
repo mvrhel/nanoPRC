@@ -845,6 +845,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_tess_3d_compressed\n");
         return PRC_ERROR_MEMORY;
     }
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after point_array bit_position=%lld\n", (long long)bit_state->bit_position);
 
     /* edge_status_array (0 - no neighbour, 1 - has right neighbour, 2 - has left neighbour, 3 - has both) */
     data->edge_status_array = prc_bitread_character_array(ctx, bit_state, &data->edge_status_array_size,
@@ -854,6 +856,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_tess_3d_compressed\n");
         return PRC_ERROR_MEMORY;
     }
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after edge_status_array bit_position=%lld\n", (long long)bit_state->bit_position);
 
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("\nEdge status array\n");
@@ -894,6 +898,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_tess_3d_compressed\n");
         return PRC_ERROR_MEMORY;
     }
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after triangle_face_array bit_position=%lld\n", (long long)bit_state->bit_position);
 
     data->reference_array_size = prc_bitread_uint32(ctx, bit_state);
 
@@ -923,6 +929,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
 #endif
         }
     }
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after points_is_reference_array bit_position=%lld\n", (long long)bit_state->bit_position);
 
     /* This is just goofy to do this with this one particular data type. They refer to number_of_reference_points which
        seems to not be defined. */
@@ -935,6 +943,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_tess_3d_compressed\n");
         return PRC_ERROR_MEMORY;
     }
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after point_reference_array bit_position=%lld\n", (long long)bit_state->bit_position);
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("Point reference array\n");
     for (k = 0; k < data->point_reference_array_size; k++)
@@ -965,6 +975,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
                 data->normal_is_reversed[k] = prc_bitread_bit(ctx, bit_state);
             }
         }
+        if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+            fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after normal_is_reversed bit_position=%lld\n", (long long)bit_state->bit_position);
 
 #if DEBUG_COMPRESSED_TESS
         DEBUG_LOG("\nNormal is reversed array\n");
@@ -982,7 +994,11 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
 
         /* Put into radians */
         data->crease_angle = data->crease_angle * PRC_PI / 180.0;
+        if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+            fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after crease_angle bit_position=%lld\n", (long long)bit_state->bit_position);
         data->normal_recalculation_flags = prc_bitread_uint8(ctx, bit_state);
+        if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+            fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after normal_recalculation_flags bit_position=%lld\n", (long long)bit_state->bit_position);
     }
     else
     {   /* must_recalculate_normals false */
@@ -1058,6 +1074,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
     }
 
     data->is_point_color = prc_bitread_bit(ctx, bit_state);
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after is_point_color bit_position=%lld\n", (long long)bit_state->bit_position);
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("data->is_point_color = %d\n", data->is_point_color);
 #endif
@@ -1135,6 +1153,9 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
         }
     }
 
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after is_multiple_line_attribute bit_position=%lld\n", (long long)bit_state->bit_position);
+
     data->line_attribute_array = prc_bitread_short_array(ctx, bit_state, &data->line_attribute_array_size, true, 16);
     if (data->line_attribute_array == NULL && data->line_attribute_array_size != 0)
     {
@@ -1144,8 +1165,12 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("data->line_attribute_array_size = %u\n", data->line_attribute_array_size);
 #endif
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after line_attribute_array bit_position=%lld\n", (long long)bit_state->bit_position);
 
     data->no_texture = prc_bitread_bit(ctx, bit_state);
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after no_texture bit_position=%lld\n", (long long)bit_state->bit_position);
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("data->no_texture = %d\n", data->no_texture);
 #endif
@@ -1178,6 +1203,8 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
     }
 
     data->has_behaviors = prc_bitread_bit(ctx, bit_state);
+    if (getenv("PRC_DIAG_TESS_FIELD_BITPOS") != NULL)
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_BITPOS: after has_behaviors bit_position=%lld\n", (long long)bit_state->bit_position);
 #if DEBUG_COMPRESSED_TESS
     DEBUG_LOG("data->has_behaviors = %d\n", data->has_behaviors);
 #endif

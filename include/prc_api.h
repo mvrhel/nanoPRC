@@ -748,6 +748,37 @@ static PRC_INLINE prc_write_tolerance prc_write_tol_relative(double fraction)
 PRC_EXPORT double prc_write_tol_resolve(prc_context *ctx, prc_write_tolerance tol, double bbox_diagonal);
 
 /**
+ * @brief Checks whether a mesh has any vertex touched by multiple
+ * disconnected triangle "fans" (real but uncommon: usually a T-junction or
+ * duplicated-vertex artifact from the mesh's source tool, not a modeling
+ * error).
+ *
+ * PRC_API_WRITE_TESS_KIND_COMPRESSED's non-manifold-vertex handling for
+ * this specific case has an open, real-Adobe-Acrobat-confirmed
+ * compatibility issue in some Acrobat builds (root cause not yet
+ * identified as of this writing -- nanoPRC's own reader, and at least one
+ * independent PRC reader, both decode the affected output correctly).
+ * Callers building COMPRESSED entries from untrusted/arbitrary mesh
+ * sources should call this first and use PRC_API_WRITE_TESS_KIND_TRIANGLES
+ * instead whenever it returns 1, to avoid the risk. Uses the same welding
+ * tolerance and vertex-dedup logic COMPRESSED itself would use, so the
+ * check reflects what COMPRESSED would actually encode.
+ *
+ * @param ctx           Active context.
+ * @param positions     3 doubles per vertex.
+ * @param num_positions Number of vertices in @p positions.
+ * @param tri_indices   3 vertex indices per triangle (into @p positions).
+ * @param num_triangles Number of triangles in @p tri_indices.
+ * @param tolerance     Same tolerance the caller intends to pass to
+ *                      PRC_API_WRITE_TESS_KIND_COMPRESSED for this mesh.
+ * @return 1 if such a vertex exists, 0 if not, negative PRC_ERROR_* on failure.
+ */
+PRC_EXPORT int prc_api_mesh_has_nonmanifold_fans(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance);
+
+/**
  * @brief Representation-item kind for prc_api_write_rep_item.
  *
  * SURFACE writes a PRC_TYPE_RI_PolyBrepModel representation item (a
@@ -811,30 +842,30 @@ typedef struct prc_api_write_wire_element_s
 typedef enum
 {
     /** Triangulated surface, PRC_TYPE_TESS_3D (uncompressed): positions
-        stored verbatim, no welding/quantization. Currently the recommended
-        choice: an independent, non-nanoPRC PRC reader used for ground-truth
-        verification reads real, exact-match geometry back from files using
-        this kind (confirmed on a 4096-triangle test mesh). COMPRESSED below
-        is a real, unresolved bug as of this writing -- the same independent
-        reader reports null/empty geometry for it despite nanoPRC's own
-        parser round-tripping it correctly, so the earlier assumption that
-        real-world PRC producers/readers require compressed tessellation
-        (and that TRIANGLES is unsupported by mainstream viewers) was wrong;
-        do not rely on that assumption until COMPRESSED's bug is found. */
+        stored verbatim, no welding/quantization. An independent, non-nanoPRC
+        PRC reader used for ground-truth verification reads real, exact-match
+        geometry back from files using this kind (confirmed on a
+        4096-triangle test mesh). Simpler than COMPRESSED (no welding/
+        traversal encoding to reason about) but produces larger files with no
+        vertex deduplication -- prefer COMPRESSED below for dense meshes
+        where file size/memory matter, or when you want the encoder's own
+        tolerance-based weld instead of doing it yourself. */
     PRC_API_WRITE_TESS_KIND_TRIANGLES = 0,
     /** Line/polyline geometry: wire_elements below. */
     PRC_API_WRITE_TESS_KIND_WIRE = 1,
     /** Triangulated surface, PRC_TYPE_TESS_3D_Compressed: vertex welding
         (tolerance-based dedup), degenerate-triangle removal, and an
-        EdgeBreaker-style traversal encoding. Round-trips correctly through
-        nanoPRC's own parser (including large-scale stress tests), but as of
-        this writing, an independent, non-nanoPRC PRC reader used for
-        ground-truth verification returns null/empty geometry for every file
-        produced with this kind -- a real, unresolved conformance bug
-        somewhere in the encoder (or a shared misunderstanding with the
-        paired decoder), not yet isolated. Prefer TRIANGLES until this is
-        fixed. Reads the same position/normal/index/face-group fields as
-        TRIANGLES, below, plus `tolerance`/`crease_angle_degrees`. */
+        EdgeBreaker-style traversal encoding -- smaller files than TRIANGLES
+        for the same geometry, and the recommended choice for large/dense
+        meshes. Round-trips correctly through nanoPRC's own parser (including
+        large-scale stress tests). An earlier version of this comment warned
+        of a real, then-unresolved bug where an independent, non-nanoPRC PRC
+        reader returned null/empty geometry for every COMPRESSED-written
+        file; that was fixed (root cause: a large-mesh shard-corruption bug
+        in the encoder) and independently confirmed rendering correctly in
+        both Adobe Acrobat and PDF-XChange. Reads the same position/normal/
+        index/face-group fields as TRIANGLES, below, plus
+        `tolerance`/`crease_angle_degrees`. */
     PRC_API_WRITE_TESS_KIND_COMPRESSED = 2
 } prc_api_write_tess_kind_t;
 

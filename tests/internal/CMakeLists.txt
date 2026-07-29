@@ -17,6 +17,10 @@ add_executable(scan_prc tests/internal/scan_prc.c)
 target_link_libraries(scan_prc prc_static)
 target_include_directories(scan_prc PRIVATE tests)
 
+add_executable(reprc_test tests/internal/reprc_test.c)
+target_link_libraries(reprc_test prc_static)
+target_include_directories(reprc_test PRIVATE tests)
+
 add_executable(embed_real_prc tests/internal/embed_real_prc.c)
 target_link_libraries(embed_real_prc prc_static)
 target_include_directories(embed_real_prc PRIVATE tests)
@@ -63,6 +67,10 @@ target_include_directories(verify_tess_positions PRIVATE tests)
 add_executable(splice_tess_field tests/internal/splice_tess_field.c)
 target_link_libraries(splice_tess_field prc_static)
 target_include_directories(splice_tess_field PRIVATE tests)
+
+add_executable(splice_tess_field_c1 tests/internal/splice_tess_field_c1.c)
+target_link_libraries(splice_tess_field_c1 prc_static)
+target_include_directories(splice_tess_field_c1 PRIVATE tests)
 
 add_executable(verify_manifold_real tests/internal/verify_manifold_real.c)
 target_link_libraries(verify_manifold_real prc_static)
@@ -119,6 +127,18 @@ target_include_directories(matrix_blank_tree PRIVATE tests)
 add_executable(standalone_tetrahedron_triangles tests/internal/standalone_tetrahedron_triangles.c)
 target_link_libraries(standalone_tetrahedron_triangles prc_static)
 target_include_directories(standalone_tetrahedron_triangles PRIVATE tests)
+
+add_executable(standalone_nonmanifold_fan tests/internal/standalone_nonmanifold_fan.c)
+target_link_libraries(standalone_nonmanifold_fan prc_static)
+target_include_directories(standalone_nonmanifold_fan PRIVATE tests)
+
+add_executable(standalone_multichain tests/internal/standalone_multichain.c)
+target_link_libraries(standalone_multichain prc_static)
+target_include_directories(standalone_multichain PRIVATE tests)
+
+add_executable(standalone_mixed_chains tests/internal/standalone_mixed_chains.c)
+target_link_libraries(standalone_mixed_chains prc_static)
+target_include_directories(standalone_mixed_chains PRIVATE tests)
 
 add_executable(standalone_grid_triangles tests/internal/standalone_grid_triangles.c)
 target_link_libraries(standalone_grid_triangles prc_static)

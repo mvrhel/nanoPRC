@@ -48,11 +48,12 @@
                                                          not one or the other
      Annot       <</Type/Annot /Subtype/3D /Rect[x0 y0 x1 y1] /P <Page ref>
                    /3DD <3D stream ref> /3DV <default View ref> /3DI true
-                   /3DA<</A/PV/AIS/L/D/PI/DIS/L/NP false/TB true>>
+                   /3DA<</A/XA/AIS/L/D/XD/DIS/L/NP false/TB true>>
                    /AP<</N <Appearance ref>>> /BS <BorderStyle ref>
                    /Border[0 0 0] /Contents(...) /NM(...) /UID(1)>>
-                                                      -- /3DA copied verbatim
-                                                         from five real,
+                                                      -- /3DA's AIS/DIS/NP/TB
+                                                         copied verbatim from
+                                                         five real,
                                                          independently-
                                                          produced, Acrobat-
                                                          confirmed-working
@@ -73,9 +74,19 @@
                                                          declare too); the five
                                                          real files' /3DA has no
                                                          /Transparent key at
-                                                         all. /UID is a fixed
-                                                         placeholder, cube.pdf
-                                                         has one too
+                                                         all. /A and /D shown
+                                                         here are this writer's
+                                                         own default -- no
+                                                         auto-open, see
+                                                         PRC_PDF_AUTO_ACTIVATE_3D
+                                                         below -- all five real
+                                                         references actually
+                                                         use /A/PV /D/PI
+                                                         (auto-open), still
+                                                         available by flipping
+                                                         that define. /UID is a
+                                                         fixed placeholder,
+                                                         cube.pdf has one too
      Appearance  <</Type/XObject /Subtype/Form /BBox[0 0 w h]
                    /Matrix[1 0 0 1 0 0]
                    /Resources<</Font<</F1<</Type/Font/Subtype/Type1
@@ -133,6 +144,21 @@
    used only to horizontally center the fixed title string above -- close
    enough for a placeholder without pulling in real AFM metrics. */
 #define PRC_PDF_TITLE_AVG_CHAR_WIDTH_EM 0.6
+
+/* 1 = auto-activate the 3D view as soon as its page becomes visible (the
+   original behavior: /A/PV /D/PI, confirmed against 5 real, independently-
+   produced %PDF-1.7 files -- see the /3DA comment above prc_write_pdf_3d_
+   annotation).
+   0 (default) = require explicit user activation ("click to play"):
+   /A/XA /D/XD. XA is the PDF-spec DEFAULT value for /A when the key is
+   omitted entirely (verified against Adobe's Acrobat SDK "Working with 3D
+   Annotations" documentation); XD is inferred by naming symmetry with the
+   PV/PI pairing above (explicit-activate pairs with explicit-deactivate,
+   the same way page-visible pairs with page-invisible) and has not been
+   independently spec-verified to the same standard as XA. Either way,
+   AIS/DIS/NP/TB are unaffected -- only the activation/deactivation
+   *trigger* changes, not what state is reached once triggered. */
+#define PRC_PDF_AUTO_ACTIVATE_3D 0
 
 typedef struct { double x, y, z; } prc_pdf_vec3;
 
@@ -436,11 +462,15 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     if (fprintf(fid, "<</S/S/Type/Border/W 0>>") < 0) goto io_fail;
     if (prc_pdf_end_obj(ctx, &w) != 0) goto io_fail;
 
-    /* Annotation. /3DA activation values based on five real, independently-
-       produced, Acrobat-confirmed-working %PDF-1.7 files (ElevationMeshIS_
-       ePRC.pdf, xml-sample-{wrl,iv,3ds}_ePRC.pdf, Teapot_ePRC.pdf): activate
-       on page visible, deactivate on page invisible, both instantiation
-       states "live", hide the navigation panel, show the toolbar. No
+    /* Annotation. /3DA's AIS/DIS/NP/TB values based on five real,
+       independently-produced, Acrobat-confirmed-working %PDF-1.7 files
+       (ElevationMeshIS_ePRC.pdf, xml-sample-{wrl,iv,3ds}_ePRC.pdf,
+       Teapot_ePRC.pdf): both instantiation states "live", hide the
+       navigation panel, show the toolbar. /A and /D (the activation/
+       deactivation triggers) are this writer's own choice, gated by
+       PRC_PDF_AUTO_ACTIVATE_3D above -- all five real references use
+       /A/PV /D/PI (auto-activate/deactivate on page visibility), but that
+       is not the default here; see the define's own comment. No
        /Transparent key -- an earlier version of this code included it,
        reasoning that examples/cube.pdf (a %PDF-1.6 file) has it too so it
        must be safe; that reasoning doesn't hold once actually compared
@@ -458,7 +488,11 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     if (fprintf(fid, "/3DD %u 0 R", stream_num) < 0) goto io_fail;
     if (options->num_views > 0)
         if (fprintf(fid, "/3DV %u 0 R", view_nums[default_view_index]) < 0) goto io_fail;
+#if PRC_PDF_AUTO_ACTIVATE_3D
     if (fprintf(fid, "/3DI true/3DA<</A/PV/AIS/L/D/PI/DIS/L/NP false/TB true>>") < 0) goto io_fail;
+#else
+    if (fprintf(fid, "/3DI true/3DA<</A/XA/AIS/L/D/XD/DIS/L/NP false/TB true>>") < 0) goto io_fail;
+#endif
     if (fprintf(fid, "/AP<</N %u 0 R>>/BS %u 0 R/Border[0 0 0]/Contents", appearance_num, border_style_num) < 0) goto io_fail;
     prc_pdf_write_escaped_string(&w, "3D Model");
     if (fprintf(fid, "/NM") < 0) goto io_fail;

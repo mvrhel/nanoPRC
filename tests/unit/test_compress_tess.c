@@ -185,8 +185,25 @@ test_half_tolerance_weld(prc_context *ctx)
 
     printf("  sub-case: half-tolerance boundary weld\n");
 
+    /* This test is deliberately about the dedup pass's own quantization-key boundary
+       arithmetic, not the position jitter mitigation (prc_write_compress_tess.h's
+       PRC_ENCODE_JITTER_TOLERANCE_FACTOR) -- jitter is now applied BEFORE this same
+       quantization step (by design: it needs to influence dedup decisions, not just move
+       already-decided positions), which would otherwise perturb this test's carefully
+       exact-arithmetic offsets and make the weld outcome depend on jitter's own hash rather
+       than the boundary logic under test. Disable it for just this sub-case. */
+#ifdef _WIN32
+    _putenv_s("PRC_DIAG_DISABLE_POSITION_JITTER", "1");
+#else
+    setenv("PRC_DIAG_DISABLE_POSITION_JITTER", "1", 1);
+#endif
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 3, tris, 1,
         prc_write_tol_absolute(1e-3), &mesh), 0);
+#ifdef _WIN32
+    _putenv_s("PRC_DIAG_DISABLE_POSITION_JITTER", "");
+#else
+    unsetenv("PRC_DIAG_DISABLE_POSITION_JITTER");
+#endif
     PRC_ASSERT(positions[6] - positions[3] == 0.5 * mesh.tolerance_mm);
     PRC_ASSERT_EQ(mesh.num_positions, 2);
     PRC_ASSERT_EQ(mesh.num_triangles, 0);
@@ -282,7 +299,12 @@ nearest_input_vertex(const double *p, const double *positions, uint32_t npos,
             best_d = d;
         }
     }
-    PRC_ASSERT(best_d <= 2.0 * tolerance);
+    /* 2.0*tolerance budgets ordinary quantization noise; the additional
+       sqrt(3)*PRC_ENCODE_JITTER_TOLERANCE_FACTOR*tolerance term budgets the
+       deterministic position jitter prc_encode_preprocess now applies to
+       every vertex (see that constant's own comment, prc_write_compress_
+       tess.h) -- worst case is the jitter maxing out in all 3 axes at once. */
+    PRC_ASSERT(best_d <= (2.0 + sqrt(3.0) * PRC_ENCODE_JITTER_TOLERANCE_FACTOR) * tolerance);
     return best;
 }
 
@@ -638,7 +660,11 @@ test_cube_c1_roundtrip(prc_context *ctx)
                 if (i == 0 || d < best_d)
                     best_d = d;
             }
-            PRC_ASSERT(best_d <= 2.0 * mesh.tolerance_mm);
+            /* See nearest_input_vertex's own comment above for why this budgets
+               the position jitter prc_encode_preprocess now applies, on top of
+               ordinary quantization noise -- this check compares against the
+               ORIGINAL, pre-jitter local `positions` array. */
+            PRC_ASSERT(best_d <= (2.0 + sqrt(3.0) * PRC_ENCODE_JITTER_TOLERANCE_FACTOR) * mesh.tolerance_mm);
         }
     }
 

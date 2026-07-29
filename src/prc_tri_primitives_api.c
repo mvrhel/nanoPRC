@@ -3085,6 +3085,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 PRC_API_FAIL(PRC_API_ERROR_MEMORY,
                     "Memory allocation failed for face_out_reserved->style in prc_api_get_tessellation_vertices\n");
             }
+            face_out_reserved->owns_style = 1; /* this face's own allocation, not a shared cache */
 
             /* Lets get the style information for this face. We will traverse
                backwards from the leaf (which is the RI) and forward from the product.
@@ -3126,6 +3127,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                even by the vertex color. Question what do you do when you
                have both. */
             prc_tess_3d_compressed *tess_compressed = tess->tess_3d_compressed;
+            prc_internal_api_position_normal_lookup *style_cache;
             if (tess_compressed == NULL)
                 PRC_API_FAIL(PRC_API_ERROR_PARSER,
                     "Compressed tessellation payload is NULL in prc_api_get_tessellation_vertices\n");
@@ -3145,24 +3147,111 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 return 0;
             }
 
-            face_out_reserved->style = (prc_internal_graph_style *)prc_calloc(ctx,
-                tess_compressed->face_number, sizeof(prc_internal_graph_style));
-            if (face_out_reserved->style == NULL)
+            /* This table (and has_more_than_one_ref_style, below) is
+               identical across every face_index call for this SAME
+               api_tess instance -- cache it on api_tess->reserved (a
+               per-instance extension slot; see the vertex/normal cache
+               built further down this function for the established
+               pattern and why it must be per-instance, not shared across
+               instances of the same underlying tess_index) instead of
+               rebuilding it from scratch on every single call. Before
+               this cache existed, an O(face_number) table was rebuilt on
+               every one of the face_number calls the standard one-call-
+               per-face walk (demos/quick_start's pattern, used by every
+               demo/binding) makes, costing O(face_number^2) time and,
+               since nothing freed a face's own copy until the whole walk
+               finished, O(face_number^2) peak memory too -- confirmed
+               against a real ~26000-face compressed tessellation, where
+               the uncached version reached tens of GB before being
+               killed. face_out_reserved->style below is a BORROWED
+               pointer into this cache (owns_style left at its calloc'd
+               default of 0), not its own allocation -- freed once, with
+               the cache, in prc_api_release_data, not per-face. */
+            style_cache = (prc_internal_api_position_normal_lookup *)api_tess->reserved;
+            if (style_cache == NULL)
             {
-                PRC_API_FAIL(PRC_API_ERROR_MEMORY,
-                    "Memory allocation failed for compressed style table in prc_api_get_tessellation_vertices\n");
+                style_cache = (prc_internal_api_position_normal_lookup *)prc_calloc(ctx,
+                    1, sizeof(prc_internal_api_position_normal_lookup));
+                if (style_cache == NULL)
+                    PRC_API_FAIL(PRC_API_ERROR_MEMORY,
+                        "Memory allocation failed for style cache in prc_api_get_tessellation_vertices\n");
+                api_tess->reserved = style_cache;
             }
-            face_out_reserved->number_of_styles = tess_compressed->face_number;
-            uint32_t leaf_style_face_0;
-            /* We also want to know if all the faces have the same style */
-            for (k = 0; k < tess_compressed->face_number; k++)
+
+            if (!style_cache->face_style_cache_valid)
             {
-                /* Get the face style index for each face in the compressed tessellation.
-                   We have to go from the leaf again, checking for each face in
-                   this compressed case, as we deal with all the faces now when
-                   working with compressed data */
-                /* Face index is k here */
-                code = prc_api_helper_get_style_index_from_leaf(ctx, data, k,
+                uint32_t leaf_style_face_0 = 0;
+
+                style_cache->face_style_cache = (prc_internal_graph_style *)prc_calloc(ctx,
+                    tess_compressed->face_number, sizeof(prc_internal_graph_style));
+                if (style_cache->face_style_cache == NULL)
+                {
+                    PRC_API_FAIL(PRC_API_ERROR_MEMORY,
+                        "Memory allocation failed for compressed style table in prc_api_get_tessellation_vertices\n");
+                }
+                style_cache->face_style_cache_count = tess_compressed->face_number;
+
+                /* We also want to know if all the faces have the same style */
+                for (k = 0; k < tess_compressed->face_number; k++)
+                {
+                    /* Get the face style index for each face in the compressed tessellation.
+                       We have to go from the leaf again, checking for each face in
+                       this compressed case, as we deal with all the faces now when
+                       working with compressed data */
+                    /* Face index is k here */
+                    code = prc_api_helper_get_style_index_from_leaf(ctx, data, k,
+                        (prc_api_object_style *)api_tess->style_leaf,
+                        &leaf_style_unbiased_index, &leaf_style_file_index);
+                    if (code < 0)
+                    {
+                        PRC_API_FAIL(code,
+                            "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
+                    }
+
+                    if (k == 0)
+                    {
+                        leaf_style_face_0 = leaf_style_unbiased_index;
+                    }
+                    else
+                    {
+                        if (leaf_style_unbiased_index != leaf_style_face_0)
+                        {
+                            /* We have different styles for different faces. We won't
+                               be able to use the optimization of just looking at the
+                               first face's style and applying it to all the faces. */
+                            has_more_than_one_ref_style = true;
+                        }
+                    }
+                    code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
+                        leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
+                        &api_tess->is_material, &has_texture, &is_pure_color, &api_tess->tess_material,
+                        &style_cache->face_style_cache[k], face_color, api_tess, face_out, k,
+                        tess_index_in, &has_ref_style_defined);
+                    if (code < 0)
+                    {
+                        PRC_API_FAIL(code,
+                            "Failed to get face style in prc_api_get_tessellation_vertices\n");
+                    }
+                }
+                style_cache->face_style_has_more_than_one_ref_style = has_more_than_one_ref_style;
+                style_cache->face_style_cache_valid = 1;
+            }
+            else
+            {
+                uint32_t last_k = style_cache->face_style_cache_count - 1;
+
+                has_more_than_one_ref_style = style_cache->face_style_has_more_than_one_ref_style;
+
+                /* The loop above leaves face_out/api_tess mutated from its
+                   LAST iteration (face_style_cache_count - 1), regardless
+                   of which face_index the outer call actually asked for
+                   (prc_api_helper_get_face_style's side effects on
+                   face_out->is_texture/material and api_tess->is_material
+                   aren't face_index-specific). Reproduce just that one
+                   iteration's side effects here on a cache hit, instead of
+                   the full O(face_number) loop -- this is why the cache
+                   still costs O(1), not O(0), per call. */
+                code = prc_api_helper_get_style_index_from_leaf(ctx, data, last_k,
                     (prc_api_object_style *)api_tess->style_leaf,
                     &leaf_style_unbiased_index, &leaf_style_file_index);
                 if (code < 0)
@@ -3170,25 +3259,10 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     PRC_API_FAIL(code,
                         "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
                 }
-
-                if (k == 0)
-                {
-                    leaf_style_face_0 = leaf_style_unbiased_index;
-                }
-                else
-                {
-                    if (leaf_style_unbiased_index != leaf_style_face_0)
-                    {
-                        /* We have different styles for different faces. We won't
-                           be able to use the optimization of just looking at the
-                           first face's style and applying it to all the faces. */
-                        has_more_than_one_ref_style = true;
-                    }
-                }
                 code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
                     leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
                     &api_tess->is_material, &has_texture, &is_pure_color, &api_tess->tess_material,
-                    &face_out_reserved->style[k], face_color, api_tess, face_out, k,
+                    &style_cache->face_style_cache[last_k], face_color, api_tess, face_out, last_k,
                     tess_index_in, &has_ref_style_defined);
                 if (code < 0)
                 {
@@ -3196,6 +3270,9 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                         "Failed to get face style in prc_api_get_tessellation_vertices\n");
                 }
             }
+
+            face_out_reserved->style = style_cache->face_style_cache;
+            face_out_reserved->number_of_styles = style_cache->face_style_cache_count;
         }
     }
 
@@ -4392,17 +4469,34 @@ uncompressed_done:
            or not at all on assemblies with reused/instanced hardware
            (e.g. bolts/washers shared across many positions); see project
            history (branch disc-brake-rendering-regression). */
+        /* api_tess->reserved may already be allocated (by the style-table
+           cache earlier in this same function, on this same instance's
+           first call) without the position/normal portion having been
+           built yet -- position_normal_cache_valid (not merely `cache ==
+           NULL`) is what actually signals that. See prc_internal_api_
+           position_normal_lookup's own comment on that field for why. */
         cache = (prc_internal_api_position_normal_lookup *)api_tess->reserved;
-        if (cache == NULL)
+        if (cache == NULL || !cache->position_normal_cache_valid)
         {
-            cache = (prc_internal_api_position_normal_lookup *)prc_calloc(ctx, 1,
-                                        sizeof(prc_internal_api_position_normal_lookup));
+            /* Only free `cache` itself on a failure below if THIS block is
+               the one that allocated it -- if it already existed (the
+               style-table cache built it first, on this same instance's
+               earlier/this call), it's still reachable from api_tess->
+               reserved and owned by that cache's own lifetime, not this
+               block's. */
+            uint8_t cache_allocated_here = (cache == NULL);
+
             if (cache == NULL)
             {
-                prc_error(ctx, PRC_API_ERROR_MEMORY,
-                    "Memory allocation failed for position_normal_lut cache in compressed branch\n");
-                code = PRC_API_ERROR_MEMORY;
-                goto compressed_failure;
+                cache = (prc_internal_api_position_normal_lookup *)prc_calloc(ctx, 1,
+                                            sizeof(prc_internal_api_position_normal_lookup));
+                if (cache == NULL)
+                {
+                    prc_error(ctx, PRC_API_ERROR_MEMORY,
+                        "Memory allocation failed for position_normal_lut cache in compressed branch\n");
+                    code = PRC_API_ERROR_MEMORY;
+                    goto compressed_failure;
+                }
             }
 
             /* Create one of these for each vertex. Then each vertex will
@@ -4414,7 +4508,7 @@ uncompressed_done:
             {
                 prc_error(ctx, PRC_API_ERROR_MEMORY,
                     "Memory allocation failed for position_normal_pair in compressed branch\n");
-                prc_free(ctx, cache);
+                if (cache_allocated_here) prc_free(ctx, cache);
                 code = PRC_API_ERROR_MEMORY;
                 goto compressed_failure;
             }
@@ -4428,7 +4522,7 @@ uncompressed_done:
                 prc_error(ctx, PRC_API_ERROR_MEMORY,
                     "Memory allocation failed for vertex_out->vertices in compressed branch\n");
                 prc_free(ctx, position_normal_pair);
-                prc_free(ctx, cache);
+                if (cache_allocated_here) prc_free(ctx, cache);
                 code = PRC_API_ERROR_MEMORY;
                 goto compressed_failure;
             }
@@ -4486,6 +4580,7 @@ uncompressed_done:
                api_tess instance; freed once in prc_api_release_data. */
             cache->position_normal_pair = position_normal_pair;
             cache->number_values = (size_t)num_prc_vertices;
+            cache->position_normal_cache_valid = 1;
             api_tess->reserved = (void *)cache;
         }
         else
@@ -5631,7 +5726,13 @@ failure:
             face_out_reserved = prc_face_internal_face(face_out);
             if (face_out_reserved != NULL)
             {
-                if (face_out_reserved->style != NULL)
+                /* owns_style == 0 means `style` is a borrowed pointer into
+                   the per-instance style cache (api_tess->reserved) --
+                   freeing it here would corrupt that cache for any other
+                   face_index call still to come on this same instance, or
+                   double-free if it's already been published there. It's
+                   freed once, with the cache, in prc_api_release_data. */
+                if (face_out_reserved->style != NULL && face_out_reserved->owns_style)
                 {
                     prc_free(ctx, face_out_reserved->style);
                     face_out_reserved->style = NULL;

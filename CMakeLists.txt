@@ -148,6 +148,13 @@ if (NANOPRC_BUILD_TESTS)
 	enable_testing()
 	include(tests/CMakeLists.txt)
 	include(tests/internal/CMakeLists.txt)
+	# test_stl_roundtrip shells out to the nano_prc_stl_export/nano_prc_stl_import
+	# demo executables (see tests/functional/CMakeLists.txt), so it only makes
+	# sense -- and only configures cleanly, since it references their
+	# $<TARGET_FILE:...> -- when demos are also being built.
+	if (NANOPRC_BUILD_DEMOS)
+		include(tests/functional/CMakeLists.txt)
+	endif()
 endif()
 
 # Install what we built

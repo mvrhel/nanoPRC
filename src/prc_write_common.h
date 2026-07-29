@@ -100,13 +100,38 @@ uint8_t *prc_write_le_unique_id(uint8_t *p, uint32_t word0);
    Acrobat's PRC engine has apparently never been updated to recognize
    version 10001 as valid, so declaring the literal spec-compliant value
    makes the single most important real-world reader refuse the file
-   entirely. examples/cube.pdf's 7094/23306 -- confirmed to open
-   successfully in real Acrobat -- are used instead: not spec-compliant
-   per the letter of the standard, but the only values actually proven to
-   work in the reader that matters most. Spec-purity was tried, tested
-   against real Acrobat, and lost. */
-#define PRC_WRITE_MIN_VERS_FOR_READ 7094u
-#define PRC_WRITE_AUTH_VERS 23306u
+   entirely.
+
+   7094/23306 (examples/cube.pdf's values, confirmed to open successfully
+   in real Acrobat) were used for a long time, but that pairing was flagged
+   (2026-07-27) as its own correctness problem independent of the above:
+   auth_vers=23306 asserts full compliance with the PRC spec as amended
+   through late 2023, while grepping every source_file_version-gated code
+   path in this codebase (prc_parse_tree.c, the only file with any) shows
+   the highest version this parser actually knows how to handle differently
+   is 8016 -- everything the spec added between 2008 and 2023 is something
+   this codebase has never read a word of, let alone implemented, yet every
+   nanoPRC-written file was unconditionally claiming full knowledge of it.
+   (One such gated field, PRC_TYPE_GRAPH_DirectionalLight's intensity at
+   >=8030, is read unconditionally by this codebase regardless of declared
+   version -- but nanoPRC's own writer never emits light nodes at all, so
+   this doesn't create a NEW self-inconsistency by lowering the declared
+   version here; it would only matter for reading third-party files that
+   already have lights and declare a version below 8030, which is a
+   pre-existing, separate concern.)
+
+   8016/8016 (single, self-consistent, matching exactly the highest version
+   this codebase can actually justify) is now used instead: an empirically
+   isolated test (2026-07-27, matching an independent encoder's own
+   self-consistent-version convention, 8137/8137) on three real files that
+   reproducibly blank the Acrobat model tree found declared version made no
+   difference to those specific failures either way -- so this change is
+   about not asserting compliance with 15+ years of spec content this
+   codebase has no knowledge of, not a fix for any currently-known bug.
+   Re-validate against the full previously-Acrobat-confirmed file set
+   before treating this as safely shipped, same as any bitstream change. */
+#define PRC_WRITE_MIN_VERS_FOR_READ 8016u
+#define PRC_WRITE_AUTH_VERS 8016u
 
 /* Writes ContentPRCBase/ContentPRCRefBase's `name` field (Table 31): bit
    same=1 with no following string if `name` is NULL (matching this write

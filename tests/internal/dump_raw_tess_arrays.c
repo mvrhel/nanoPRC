@@ -95,12 +95,33 @@ int main(int argc, char **argv)
         if (code < 0) { printf("prc_parse_content_prc_base failed: %d\n", code); return 1; }
     }
     tess_count = prc_bitread_uint32(ctx, &bit_state);
-    if (tess_count != 1) { printf("tess_count=%u (not 1)\n", tess_count); return 1; }
-    entry_tag = prc_bitread_uint32(ctx, &bit_state);
-    if (entry_tag != PRC_TYPE_TESS_3D_Compressed) { printf("entry tag=%u (not COMPRESSED)\n", entry_tag); return 1; }
-
-    code = prc_parse_tess_3d_compressed(ctx, &bit_state, &parsed, 0);
-    if (code < 0) { printf("prc_parse_tess_3d_compressed failed: %d\n", code); prc_api_print_error_stack(ctx); return 1; }
+    {
+        uint32_t want_index = 0;
+        uint32_t k;
+        const char *idx_env = getenv("PRC_DIAG_TESS_INDEX");
+        if (idx_env != NULL)
+            want_index = (uint32_t)atoi(idx_env);
+        if (want_index >= tess_count)
+        {
+            printf("tess_count=%u, requested index %u out of range\n", tess_count, want_index);
+            return 1;
+        }
+        for (k = 0; k < tess_count; k++)
+        {
+            prc_tess_3d_compressed *this_parsed = NULL;
+            entry_tag = prc_bitread_uint32(ctx, &bit_state);
+            if (entry_tag != PRC_TYPE_TESS_3D_Compressed)
+            {
+                printf("tess %u: entry tag=%u (not COMPRESSED) -- cannot skip past unknown entry type, stopping\n", k, entry_tag);
+                return 1;
+            }
+            code = prc_parse_tess_3d_compressed(ctx, &bit_state, &this_parsed, 0);
+            if (code < 0) { printf("tess %u: prc_parse_tess_3d_compressed failed: %d\n", k, code); prc_api_print_error_stack(ctx); return 1; }
+            if (k == want_index)
+                parsed = this_parsed;
+        }
+    }
+    if (parsed == NULL) { printf("requested tessellation not found\n"); return 1; }
 
     out = fopen(argv[2], "w");
     if (out == NULL) { printf("failed to open output %s\n", argv[2]); return 1; }
@@ -112,6 +133,21 @@ int main(int argc, char **argv)
     fprintf(out, "tolerance %.17g\n", parsed->tolerance);
     fprintf(out, "origin %.17g %.17g %.17g\n", parsed->origin_array.x, parsed->origin_array.y, parsed->origin_array.z);
     fprintf(out, "must_recalculate_normals %u\n", parsed->must_recalculate_normals);
+    fprintf(out, "crease_angle %.17g\n", parsed->crease_angle);
+    fprintf(out, "normal_recalculation_flags %u\n", parsed->normal_recalculation_flags);
+    fprintf(out, "face_number %u\n", parsed->face_number);
+    fprintf(out, "is_point_color %u\n", parsed->is_point_color);
+    fprintf(out, "is_multiple_line_attribute %u\n", parsed->is_multiple_line_attribute);
+    fprintf(out, "no_texture %u\n", parsed->no_texture);
+    fprintf(out, "has_behaviors %u\n", parsed->has_behaviors);
+    fprintf(out, "line_attribute_array_size %u\n", parsed->line_attribute_array_size);
+    fprintf(out, "line_attribute_array");
+    for (i = 0; i < parsed->line_attribute_array_size; i++) fprintf(out, " %d", parsed->line_attribute_array[i]);
+    fprintf(out, "\n");
+    fprintf(out, "is_face_planar");
+    if (parsed->is_face_planar != NULL)
+        for (i = 0; i < parsed->face_number; i++) fprintf(out, " %u", parsed->is_face_planar[i]);
+    fprintf(out, "\n");
 
     fprintf(out, "edge_status_array");
     for (i = 0; i < parsed->triangle_face_array_size; i++) fprintf(out, " %u", parsed->edge_status_array[i]);

@@ -358,7 +358,14 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
                             prc_free(ctx, face_out_reserved->texture_multi_norm.fan_offsets);
                         if (face_out_reserved->texture_multi_norm.strip_offsets != NULL)
                             prc_free(ctx, face_out_reserved->texture_multi_norm.strip_offsets);
-                        if (face_out_reserved->style != NULL)
+                        /* owns_style == 0 means `style` is a borrowed pointer
+                           into a per-api_tess-instance cache shared by every
+                           face of a compressed tessellation (see the
+                           face_style_cache cleanup below, near the
+                           tess_in[k].reserved release) -- freeing it here,
+                           once per face, would double-free after the first
+                           face. */
+                        if (face_out_reserved->style != NULL && face_out_reserved->owns_style)
                         {
                             /* Deal with any texture pipelines */
                             uint8_t done = 0;
@@ -416,6 +423,27 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
                         }
                     }
                     prc_free(ctx, tess_cache->position_normal_pair);
+                }
+                /* Per-face style table (face_style_cache_count entries),
+                   shared by every face_out_reserved->style in this
+                   instance's tess_faces (owns_style == 0 there, so none of
+                   them free it themselves -- see the per-face release loop
+                   above). Each entry can carry its own texture pipeline,
+                   same as the single-entry uncompressed case. */
+                if (tess_cache->face_style_cache != NULL)
+                {
+                    uint32_t si;
+                    for (si = 0; si < tess_cache->face_style_cache_count; si++)
+                    {
+                        prc_internal_texture *next = tess_cache->face_style_cache[si].texture.next_texture;
+                        while (next != NULL)
+                        {
+                            prc_internal_texture *next2 = next->next_texture;
+                            prc_free(ctx, next);
+                            next = next2;
+                        }
+                    }
+                    prc_free(ctx, tess_cache->face_style_cache);
                 }
                 prc_free(ctx, tess_cache);
                 tess_in[k].reserved = NULL;

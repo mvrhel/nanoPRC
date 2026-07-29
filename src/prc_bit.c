@@ -550,6 +550,19 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         return NULL;
     }
 
+    /* Each element is read via prc_bitread_uncompressed_uint32 below, a
+       fixed 32 bits per word; reject a huffman_array_size that couldn't
+       possibly be backed by what's left of the stream so a single
+       corrupted length field can't drive an arbitrarily large calloc
+       before any of it is validated (same pattern/precedent as the
+       tess_count fix, prc_parse_file_structure.c ~line 749). */
+    if (state->bit_count <= 0 ||
+        (uint64_t)huffman_array_size > (uint64_t)state->bit_count / 32)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "huffman_array_size implausible for remaining section size\n");
+        return NULL;
+    }
+
     huffman_array = (uint32_t *)prc_calloc(ctx, huffman_array_size, sizeof(uint32_t));
     if (huffman_array == NULL)
     {
@@ -634,6 +647,23 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         num_bits_read += max_code_length;
         code_values[k] = prc_bitread_huff_data(ctx, &huff_state, code_length[k]);
         num_bits_read += code_length[k];
+    }
+
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_READ_HUFF_TABLE): dumps the actual
+       leaf-value/code-length/code-value table as READ from an arbitrary
+       (including third-party-encoded) file's huffman_array, for comparing
+       table SHAPE against nanoPRC's own writer output -- added while
+       cross-checking the mixed_chains/fan8 Acrobat blank-tree investigation
+       against an independent encoder's file that hits the same superficial
+       "22-bit value + tie among other leaves" condition yet works in real
+       Acrobat. Zero behavior change when unset. */
+    if (getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
+    {
+        fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE: num_bits=%u max_code_length=%u num_leaves=%u\n",
+            num_bits, max_code_length, num_leaves);
+        for (k = 0; k < num_leaves; k++)
+            fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE:   leaf_value=%u code_length=%u code_value=%u\n",
+                leaf_values[k], code_length[k], code_values[k]);
     }
 
     /* Arena-allocate the tree nodes in one block instead of one prc_malloc per
@@ -874,6 +904,16 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
 
         if (huffman_array_size > 0)
         {
+            /* See the matching guard in prc_huffman_data_decoder above --
+               same unguarded-length-drives-unbounded-calloc pattern, same
+               fix (bound against the remaining section's own bit count). */
+            if (state->bit_count <= 0 ||
+                (uint64_t)huffman_array_size > (uint64_t)state->bit_count / 32)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE, "huffman_array_size implausible for remaining section size\n");
+                return NULL;
+            }
+
             huffman_array = (uint32_t*)prc_calloc(ctx, huffman_array_size, sizeof(uint32_t));
             if (huffman_array == NULL)
             {
@@ -957,6 +997,20 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
                 num_bits_read += max_code_length;
                 code_values[k] = prc_bitread_huff_data(ctx, &huff_state, code_length[k]);
                 num_bits_read += code_length[k];
+            }
+
+            /* DIAGNOSTIC (2026-07-24, PRC_DIAG_READ_HUFF_TABLE): see the
+               matching diagnostic in prc_huffman_data_decoder above -- this
+               is prc_bitread_character_array's own separate inline copy of
+               the same leaf-reading loop (used for point_array's bit-length
+               table among others), which needed its own copy of the dump. */
+            if (getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
+            {
+                fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE(char_array): num_bits=%u max_code_length=%u num_leaves=%u\n",
+                    num_bits, max_code_length, num_leaves);
+                for (k = 0; k < num_leaves; k++)
+                    fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE(char_array):   leaf_value=%u code_length=%u code_value=%u\n",
+                        leaf_values[k], code_length[k], code_values[k]);
             }
 
             /* Arena-allocate the tree nodes in one block instead of one prc_malloc
@@ -1339,11 +1393,25 @@ prc_bitread_compressed_integer_array(prc_context *ctx, prc_bit_state *state, uin
 
     /* Now get the integers of variable lengths */
    // DEBUG_LOG("prc_bitread_compressed_integer_array\n");
-    for (k = 0; k < size; k++)
     {
-        data[k] = prc_bitread_int_variable_bit(ctx, state, bit_lengths[k]);
-        //DEBUG_LOG("data[%d] = %d\n", k, data[k]);
-   //     DEBUG_LOG("%d, ", data[k]); /* MATLAB style */
+        uint8_t diag_bitpos = (getenv("PRC_DIAG_POINT_ARRAY_BITPOS") != NULL);
+        for (k = 0; k < size; k++)
+        {
+            /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITPOS): dumps the
+               exact bit_position (and its mod-8 byte-alignment phase) where
+               each point_array value's field STARTS, before consuming it --
+               added to check whether byte alignment (not the value/bit-length
+               itself, already micro-analyzed and found clean) explains the
+               fan8/mixed_chains Acrobat blank-tree bug's 22-bit boundary.
+               Zero behavior change when unset. */
+            if (diag_bitpos)
+                fprintf(stderr, "PRC_DIAG_POINT_ARRAY_BITPOS: k=%u bit_position=%lld byte_offset=%lld bit_in_byte=%d bit_length=%u\n",
+                    k, (long long)state->bit_position, (long long)(state->bit_position / 8),
+                    (int)(state->bit_position % 8), bit_lengths[k]);
+            data[k] = prc_bitread_int_variable_bit(ctx, state, bit_lengths[k]);
+            //DEBUG_LOG("data[%d] = %d\n", k, data[k]);
+       //     DEBUG_LOG("%d, ", data[k]); /* MATLAB style */
+        }
     }
 
     prc_free(ctx, bit_lengths);

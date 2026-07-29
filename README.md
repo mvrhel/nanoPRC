@@ -64,6 +64,7 @@ nanoPRC includes several source-code demonstrations that showcase how to use the
 | demos/stl_export | A utility to create binary STL mesh files from a PRC model |
 | demos/obj_export | A utility to create OBJ files from a PRC model with MTL and textures |
 | demos/teapot_write | A utility to generate a PRC file of the Utah teapot from 32 bicubic NURBS patches, demonstrating the write API below |
+| demos/stl_import | A utility to import binary or ASCII STL mesh files into PRC/PDF, with vertex welding and automatic multi-part detection |
 
 ### Writing PRC files
 

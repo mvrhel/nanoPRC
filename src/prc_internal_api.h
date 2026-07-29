@@ -109,10 +109,41 @@ struct prc_internal_api_position_normal_pair_s
     prc_internal_api_position_normal_pair *next;
 };
 
+/* Forward declaration only -- the full struct (prc_internal_graph_style_s)
+   is defined further down this file; only a pointer to it is needed here. */
+typedef struct prc_internal_graph_style_s prc_internal_graph_style;
+
 typedef struct prc_internal_api_position_normal_lookup_s
 {
     size_t number_values;
     prc_internal_api_position_normal_pair *position_normal_pair;
+    /* PRC_TYPE_TESS_3D_Compressed only: per-face-group style table
+       (face_number entries), built once per api_tess INSTANCE by
+       prc_api_get_tessellation_vertices' compressed branch and reused
+       across every face_index call for that same instance. Lives here
+       (not on the shared prc_tess struct) for the same reason the
+       position_normal_pair cache above does -- see this file's own
+       comment at the compressed branch's cache lookup site
+       ("An earlier version of this optimization cached on the shared
+       prc_tess struct instead... disc-brake-rendering-regression").
+       Before this cache existed, the style table (O(face_number) work)
+       was rebuilt from scratch on every single face_index call, which
+       for the standard one-call-per-face walk every demo/binding uses
+       (see demos/quick_start) cost O(face_number^2) time and -- because
+       nothing freed a face's own copy until the whole walk finished --
+       O(face_number^2) peak memory too. */
+    prc_internal_graph_style *face_style_cache;
+    uint32_t face_style_cache_count;
+    uint8_t face_style_has_more_than_one_ref_style;
+    uint8_t face_style_cache_valid;
+    /* Distinguishes "this cache struct has been allocated" from "the
+       position/normal portion of it has been built" -- both this cache
+       and the face style cache above now share one struct/one
+       api_tess->reserved slot, so `position_normal_pair != NULL` alone
+       is no longer a safe signal that this part specifically was already
+       built (position_normal_pair could also be NULL, e.g. calloc(0,...),
+       if this part was built with zero vertices). */
+    uint8_t position_normal_cache_valid;
 } prc_internal_api_position_normal_lookup;
 
 /* This structure is used to store the tessellation data for a given face.
@@ -149,7 +180,9 @@ struct prc_internal_texture_s
     prc_internal_texture *next_texture; /* We can have a pipeline of textures */
 };
 
-typedef struct prc_internal_graph_style_s prc_internal_graph_style;
+/* typedef already forward-declared above, near prc_internal_api_position_
+   normal_lookup, which needs a pointer to this type before it's fully
+   defined. */
 struct prc_internal_graph_style_s
 {
     double line_width;
@@ -204,6 +237,14 @@ typedef struct prc_internal_api_face_s
     prc_internal_api_tess_entities texture_multi_norm;
     size_t number_of_styles;
     prc_internal_graph_style *style;
+    /* 1 if `style` is this face's own allocation (the PRC_TYPE_TESS_3D
+       branch of prc_api_get_tessellation_vertices, one entry) and must be
+       freed (including its texture chain) when this face is released; 0
+       if it's a borrowed pointer into a per-api_tess-instance cache
+       shared by every face of a compressed tessellation (see
+       prc_internal_api_position_normal_lookup's face_style_cache) --
+       freed once, with the cache, not per-face. */
+    uint8_t owns_style;
 } prc_internal_api_face;
 
 /* We have a similar set up for the 3D wire */

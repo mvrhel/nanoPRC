@@ -20,6 +20,7 @@
    pattern its prc_bitread_X counterpart in prc_bit.c consumes -- each
    function below says which read function it pairs with and where. */
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -354,11 +355,32 @@ prc_acofdoe_find_exponent(unsigned exponent_value)
    Acrobat-working. The mechanism inside Acrobat's own PRC engine was not
    determined (proprietary, unavailable for inspection) -- avoiding this
    one shortcut is the confirmed, minimal fix. */
+/* DIAGNOSTIC (2026-07-24, PRC_DIAG_BITWRITE_DOUBLE): dumps every value
+   passed through prc_bitwrite_double and exactly which encoding path was
+   taken (zero fast-path / frequent-double table hit / exponent-table entry
+   + per-mantissa-byte literal-vs-shortcut choice). Added while chasing the
+   mixed_chains/UK_original.stl Acrobat blank-tree bug -- tolerance_mm
+   (prc_write_compress_tess.c) is the one field confirmed to differ in
+   VALUE (not just structure) between the known-failing fan8 repro and its
+   known-working rotated-fan comparison, and this is the function that
+   turns that value into bits; every earlier trace this investigation added
+   was one level removed from what this prints. Zero behavior change when
+   unset. */
+static int prc_diag_bitwrite_double_enabled_cache = -1;
+static int
+prc_diag_bitwrite_double_enabled(void)
+{
+    if (prc_diag_bitwrite_double_enabled_cache < 0)
+        prc_diag_bitwrite_double_enabled_cache = (getenv("PRC_DIAG_BITWRITE_DOUBLE") != NULL) ? 1 : 0;
+    return prc_diag_bitwrite_double_enabled_cache;
+}
+
 int
 prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
 {
     union ieee754_double target;
     uint64_t val_bits;
+    int diag = prc_diag_bitwrite_double_enabled();
 
     if (state->error)
         return -1;
@@ -368,7 +390,11 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
 
     /* Exact +0.0: the table's dedicated 2-bit code, no sign bit follows. */
     if (val_bits == 0)
+    {
+        if (diag)
+            fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE: val=%.17g path=zero\n", val);
         return prc_bitwrite_uint_variable_bit(ctx, state, 1, 2);
+    }
 
     {
         double magnitude = fabs(val);
@@ -376,6 +402,9 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
 
         if (entry != NULL)
         {
+            if (diag)
+                fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE: val=%.17g path=table_double bits=0x%x nbits=%d sign=%d\n",
+                    val, entry->Bits, (int)entry->NumberOfBits, (int)target.ieee.negative);
             if (prc_bitwrite_uint_variable_bit(ctx, state, entry->Bits, (uint32_t)entry->NumberOfBits) != 0)
                 return -1;
             return prc_bitwrite_bit(ctx, state, (uint8_t)target.ieee.negative);
@@ -398,13 +427,23 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
             return -1;
         }
 
+        if (diag)
+            fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE: val=%.17g path=table_exponent bits=0x%x nbits=%d sign=%d "
+                "exponent=0x%x mantissa0=0x%x mantissa1=0x%x\n",
+                val, entry->Bits, (int)entry->NumberOfBits, (int)target.ieee.negative,
+                (unsigned)target.ieee.exponent, (unsigned)target.ieee.mantissa0, (unsigned)target.ieee.mantissa1);
+
         if (prc_bitwrite_uint_variable_bit(ctx, state, entry->Bits, (uint32_t)entry->NumberOfBits) != 0)
             return -1;
         if (prc_bitwrite_bit(ctx, state, (uint8_t)target.ieee.negative) != 0)
             return -1;
 
         if (target.ieee.mantissa0 == 0 && target.ieee.mantissa1 == 0)
+        {
+            if (diag)
+                fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE:   no_mantissa\n");
             return prc_bitwrite_bit(ctx, state, 0); /* no mantissa */
+        }
 
         if (prc_bitwrite_bit(ctx, state, 1) != 0)
             return -1;
@@ -428,6 +467,10 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
         tb[4] = (uint8_t)((target.ieee.mantissa1 >> 8) & 0xFF);
         tb[5] = (uint8_t)(target.ieee.mantissa1 & 0xFF);
 
+        if (diag)
+            fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE:   mantissa_bytes=%02x %02x %02x %02x %02x %02x prev_byte=%02x\n",
+                tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], prev_byte);
+
         for (i = 0; i < 6; )
         {
             int j, all_eq;
@@ -437,6 +480,9 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
                 if (tb[j] != prev_byte) { all_eq = 0; break; }
             if (all_eq)
             {
+                if (diag)
+                    fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE:   byte[%d..5]=fill_all_remaining(prev=%02x) (opcode offset=0, %d byte(s))\n",
+                        i, prev_byte, 6 - i);
                 if (prc_bitwrite_bit(ctx, state, 0) != 0) return -1;
                 if (prc_bitwrite_uint_variable_bit(ctx, state, 0, 3) != 0) return -1;
                 break;
@@ -449,6 +495,9 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
                     if (tb[j] != prev_byte) { all_eq = 0; break; }
                 if (all_eq)
                 {
+                    if (diag)
+                        fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE:   byte[%d..4]=fill_except_last(prev=%02x), byte[5]=literal(%02x) (opcode offset=6)\n",
+                            i, prev_byte, tb[5]);
                     if (prc_bitwrite_bit(ctx, state, 0) != 0) return -1;
                     if (prc_bitwrite_uint_variable_bit(ctx, state, 6, 3) != 0) return -1;
                     if (prc_bitwrite_uint8(ctx, state, tb[5]) != 0) return -1;
@@ -456,6 +505,9 @@ prc_bitwrite_double(prc_context *ctx, prc_bit_write_state *state, double val)
                 }
             }
 
+            if (diag)
+                fprintf(stderr, "PRC_DIAG_BITWRITE_DOUBLE:   byte[%d]=literal(%02x) prev_byte_was=%02x %s\n",
+                    i, tb[i], prev_byte, (tb[i] == prev_byte) ? "(== prev_byte, but emitted literal, not offset=1 shortcut)" : "");
             if (prc_bitwrite_bit(ctx, state, 1) != 0) return -1;
             if (prc_bitwrite_uint8(ctx, state, tb[i]) != 0) return -1;
             prev_byte = tb[i];
@@ -643,6 +695,18 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
     }
     prc_free(ctx, sorted);
 
+    if (getenv("PRC_DIAG_HUFF_FREQ") != NULL)
+    {
+        uint32_t di;
+        uint32_t tie_count = 0;
+        for (di = 1; di < distinct_count; di++)
+            if (distinct_freqs[di] == distinct_freqs[di - 1]) tie_count++;
+        fprintf(stderr, "PRC_DIAG_HUFF_FREQ: count=%u distinct_count=%u tie_count=%u\n", count, distinct_count, tie_count);
+        for (di = 0; di < distinct_count; di++)
+            fprintf(stderr, "PRC_DIAG_HUFF_FREQ:   value=%u freq=%llu\n", distinct_values[di],
+                (unsigned long long)distinct_freqs[di]);
+    }
+
     /* +2 over the "normal" 2*distinct_count-1 node budget covers the
        active_count==1 single-value special case's extra phantom leaf below;
        +2 more (total +4) covers the unconditional top-level phantom-wrap
@@ -662,6 +726,50 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
     }
     node_count = 0;
     active_count = 0;
+
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_BREAK_3WAY_TIES): all 6
+       possible code-VALUE permutations of a known 3-way frequency tie
+       (mixed_chains_minimal_repro_fan8_strip.prc) were tried and ALL FAIL
+       in real Acrobat -- see project_huffman_tiebreak_3way_root_cause
+       memory. That rules out "which tied leaf gets which code" as the
+       mechanism entirely (every possible answer to that question was
+       tested). Remaining hypothesis: Acrobat's decoder cannot handle 3+
+       leaves sharing the exact same code LENGTH at all, regardless of
+       which gets which value within that length -- since every tie-break
+       variant tried still produced identical lengths for all 3 tied
+       leaves (only the value assignment differed), this hasn't been
+       tested yet. This diagnostic perturbs EFFECTIVE frequency (for tree-
+       shape purposes only, in ascending distinct_values order, which is
+       the array order at this point) so no more than 2 leaves ever share
+       an exact frequency -- known-working cases (fan9, fan8 rotated) both
+       have ordinary 2-way ties, so breaking 3+-way ties down to pairs
+       targets exactly the untested structural difference. Naive: adds
+       small increasing offsets, which can rarely coincide with an
+       unrelated leaf's own true frequency and create a new accidental
+       tie -- acceptable for this diagnostic, would need real hardening
+       before ever becoming a default. */
+    if (getenv("PRC_DIAG_HUFF_BREAK_3WAY_TIES") != NULL)
+    {
+        uint32_t di;
+        for (di = 0; di < distinct_count; di++)
+        {
+            uint32_t dj, run_len = 1;
+            for (dj = di + 1; dj < distinct_count; dj++)
+                if (distinct_freqs[dj] == distinct_freqs[di]) run_len++;
+            if (run_len >= 3)
+            {
+                uint32_t bump = 1;
+                for (dj = di + 1; dj < distinct_count; dj++)
+                {
+                    if (distinct_freqs[dj] == distinct_freqs[di])
+                    {
+                        distinct_freqs[dj] += bump;
+                        bump++;
+                    }
+                }
+            }
+        }
+    }
 
     for (i = 0; i < distinct_count; i++)
     {
@@ -705,18 +813,48 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
         active[active_count++] = phantom;
     }
 
+    {
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_TIEBREAK_REVERSE): the real
+       encoder's tie-breaking rule for equal-frequency leaves during this
+       merge is still an unresolved KNOWN LOOSE END (see
+       prc_huff_assign_codes' own comment) -- previously believed
+       inconsequential for decodability by any reader including Acrobat,
+       from only 2 synthetic test files that never happened to produce a
+       3-way+ tie. A minimal real repro now exists
+       (E:\Work\nanoPRC_supplementary_files\ISO-SPEC\test-meshes\
+       mixed_chains_minimal_repro_fan8_strip.prc) with a genuine 3-way tie
+       that DOES fail in real Acrobat -- see project_huffman_tiebreak_3way_
+       root_cause memory. Default tie-break (unset) prefers the FIRST
+       (lowest active[] index, i.e. lowest original value pre-merge, since
+       active[] starts value-sorted) node among ties for both min1 and
+       min2 -- via strict `<`. Setting this reverses it to prefer the
+       LAST (`<=`), testing whether that alternative convention matches
+       the real encoder for the known-failing 3-way-tie case. Not yet
+       validated against the previously-confirmed-working real files this
+       write facility was checked against -- do NOT flip the default
+       until that regression check is done. */
+    uint8_t tiebreak_reverse = (getenv("PRC_DIAG_HUFF_TIEBREAK_REVERSE") != NULL);
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_SWAP_LR_ON_TIE): a more
+       surgical alternative to PRC_DIAG_HUFF_TIEBREAK_REVERSE above --
+       leaves WHICH nodes get merged at each step completely unchanged
+       (same tree shape, same code LENGTHS, matching the "does NOT affect
+       code length" observation in prc_huff_assign_codes' own comment),
+       only flips which of the two EXACTLY-TIED-IN-FREQUENCY merged nodes
+       becomes the left (bit 0) vs right (bit 1) child. */
+    uint8_t swap_lr_on_tie = (getenv("PRC_DIAG_HUFF_SWAP_LR_ON_TIE") != NULL);
     while (active_count > 1)
     {
         uint32_t min1, min2, k;
         prc_huff_build_node *parent;
+        uint8_t this_merge_tied;
 
         min1 = 0;
         for (k = 1; k < active_count; k++)
-            if (active[k]->freq < active[min1]->freq)
+            if (tiebreak_reverse ? (active[k]->freq <= active[min1]->freq) : (active[k]->freq < active[min1]->freq))
                 min1 = k;
         min2 = (min1 == 0) ? 1 : 0;
         for (k = 0; k < active_count; k++)
-            if (k != min1 && active[k]->freq < active[min2]->freq)
+            if (k != min1 && (tiebreak_reverse ? (active[k]->freq <= active[min2]->freq) : (active[k]->freq < active[min2]->freq)))
                 min2 = k;
 
         parent = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
@@ -730,13 +868,23 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
         parent->freq = active[min1]->freq + active[min2]->freq;
         parent->is_leaf = 0;
         parent->value = 0;
-        parent->left = active[min1];
-        parent->right = active[min2];
+        this_merge_tied = (active[min1]->freq == active[min2]->freq) ? 1 : 0;
+        if (swap_lr_on_tie && this_merge_tied)
+        {
+            parent->left = active[min2];
+            parent->right = active[min1];
+        }
+        else
+        {
+            parent->left = active[min1];
+            parent->right = active[min2];
+        }
         nodes[node_count++] = parent;
 
         active[min1] = parent;
         active[min2] = active[active_count - 1];
         active_count--;
+    }
     }
 
     /* A real, independently-produced compressed PRC file's Huffman tree for
@@ -835,18 +983,33 @@ typedef struct
    mismatches were confined to frequency-tied leaves (e.g. two leaves both
    occurring 23 times get the same code LENGTH in both this tree and the
    real one, but the real file swaps which of the two gets the lower vs.
-   higher code VALUE). Tested the standard "canonical Huffman" hypothesis
-   (reassign code values purely from the already-correct lengths, sorted
-   by value, independent of tree shape) -- did not match either. The real
-   encoder's exact tie-breaking rule for equal-frequency leaves has not
-   been determined; would need tied-frequency examples from more real
-   files to pin down with confidence rather than guess from one. Does NOT
-   affect code LENGTH (hence total field size is already correct) and is
-   not shown to matter for decodability by any reader tried, including
-   Acrobat -- unlike the phantom-wrap/tree-shape fix elsewhere in this
-   file, which IS confirmed causal to Acrobat's blank-model-tree
-   rejection. Affects normal_angle_array and (very likely, same
-   mechanism, not independently re-verified) point_reference_array. */
+   higher code VALUE). The real encoder's exact tie-breaking rule for
+   equal-frequency leaves has not been determined. Does NOT affect code
+   LENGTH (hence total field size is already correct).
+
+   DO NOT "FIX" THIS WITH CANONICAL HUFFMAN CODING (2026-07-22, tried and
+   REVERTED after confirming it breaks real Acrobat decoding). Standard
+   canonical Huffman assigns code 0 (the all-zero-prefix codeword) to the
+   shortest-length symbol -- but prc_huff_build_tree's phantom-wrap merge
+   (below) deliberately reserves the tree root's entire '0'-branch as dead/
+   unused specifically because real Acrobat requires every actual leaf's
+   code to start with bit 1 (see that fix's own history). Canonical
+   assignment computed purely from code lengths, ignorant of which branch
+   the phantom occupies, silently reuses that reserved 0-branch --
+   reintroducing the exact defect the phantom-wrap fix exists to prevent,
+   just via a different code path. Confirmed via real Acrobat round-trip:
+   N=272 and N=709 synthetic COMPRESSED grids (previously Acrobat-
+   confirmed-working) both regressed to blank canvas/model tree with
+   canonical coding applied, and both went back to working immediately
+   upon reverting it, with nothing else changed. This tie-breaking
+   ambiguity is real but is NOT shown to matter for decodability by any
+   reader tried, including Acrobat, when left as this function's existing
+   tree-traversal-order assignment produces it -- unlike the phantom-wrap/
+   tree-shape fix itself, which IS confirmed causal to Acrobat's blank-
+   model-tree rejection. Affects normal_angle_array and (very likely, same
+   mechanism, not independently re-verified) point_reference_array; if
+   revisited, any replacement scheme MUST preserve the "every real leaf
+   code starts with bit 1" invariant, not just match code lengths. */
 static int
 prc_huff_assign_codes(prc_context *ctx, prc_huff_build_node *root, uint32_t leaf_count,
     uint32_t *leaf_values, uint32_t *code_lengths, uint32_t *code_values)
@@ -1009,6 +1172,109 @@ prc_bitwrite_huffman_block(prc_context *ctx, prc_bit_write_state *state,
         }
     }
 
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_CANONICAL_WITHIN_LENGTH): a
+       more targeted alternative than PRC_DIAG_HUFF_TIEBREAK_REVERSE/
+       PRC_DIAG_HUFF_SWAP_LR_ON_TIE (both disproven against the known
+       mixed_chains 3-way-tie repro -- see project_huffman_tiebreak_3way_
+       root_cause memory). Those changed tree SHAPE or per-merge L/R
+       assignment; this instead redistributes the ALREADY-COMPUTED set of
+       code_values within each maximal run of SAME-code_length leaves
+       (the array is already value-sorted at this point) so that ascending
+       leaf VALUE maps to ascending CODE VALUE -- i.e. canonical
+       reassignment scoped to just the tied-length group, not the whole
+       tree. This changes WHICH leaf gets which of an unchanged SET of
+       codes at that length (still prefix-free among same-length codes by
+       construction), so it cannot touch code LENGTHS or which lengths
+       exist at all, hence cannot disturb the phantom-wrap's "every real
+       leaf code starts with bit 1" invariant (unlike naive whole-tree
+       canonical Huffman, already tried and reverted for regressing real
+       files -- see prc_huff_assign_codes' own comment). */
+    if (getenv("PRC_DIAG_HUFF_CANONICAL_WITHIN_LENGTH") != NULL)
+    {
+        uint32_t run_start = 0;
+        while (run_start < leaf_count)
+        {
+            uint32_t run_end = run_start + 1;
+            uint32_t run_len = 1;
+            uint32_t *sorted_codes;
+            uint32_t r;
+            while (run_end < leaf_count && code_lengths[run_end] == code_lengths[run_start])
+            {
+                run_end++;
+                run_len++;
+            }
+            if (run_len > 1)
+            {
+                sorted_codes = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * run_len);
+                if (sorted_codes == NULL)
+                    goto cleanup;
+                for (r = 0; r < run_len; r++)
+                    sorted_codes[r] = code_values[run_start + r];
+                /* Simple insertion sort -- run_len is tiny in practice. */
+                for (r = 1; r < run_len; r++)
+                {
+                    uint32_t v = sorted_codes[r];
+                    uint32_t s = r;
+                    while (s > 0 && sorted_codes[s - 1] > v)
+                    {
+                        sorted_codes[s] = sorted_codes[s - 1];
+                        s--;
+                    }
+                    sorted_codes[s] = v;
+                }
+                /* leaf_values[run_start..run_end) is already ascending
+                   (whole array is value-sorted above), so assigning
+                   sorted_codes in order gives ascending value -> ascending
+                   code within this length group. */
+                for (r = 0; r < run_len; r++)
+                    code_values[run_start + r] = sorted_codes[r];
+                prc_free(ctx, sorted_codes);
+            }
+            run_start = run_end;
+        }
+    }
+
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_MANUAL_PERM): direct override
+       for exhaustively trying every remaining untested permutation of a
+       small tied-length group's code_values, without adding a new
+       toggle per permutation. Format: "value1:code1,value2:code2,...".
+       For each pair, finds the leaf with that leaf_value (post value-sort,
+       so this runs after all the reassignment logic above) and force-sets
+       its code_value to the given code -- caller's responsibility to
+       supply a permutation of the SAME set of codes already in use at
+       that length (this does no validation; a wrong set produces a
+       decodable-by-us-but-possibly-different-length-distribution result,
+       which would confound the test rather than isolate it). */
+    if (getenv("PRC_DIAG_HUFF_MANUAL_PERM") != NULL)
+    {
+        const char *spec = getenv("PRC_DIAG_HUFF_MANUAL_PERM");
+        char *spec_copy = (char *)prc_malloc(ctx, strlen(spec) + 1);
+        char *pair_tok;
+        if (spec_copy != NULL)
+        {
+            strcpy(spec_copy, spec);
+            for (pair_tok = strtok(spec_copy, ","); pair_tok != NULL;
+                 pair_tok = strtok(NULL, ","))
+            {
+                char *colon = strchr(pair_tok, ':');
+                if (colon != NULL)
+                {
+                    uint32_t want_value = (uint32_t)strtoul(pair_tok, NULL, 10);
+                    uint32_t want_code = (uint32_t)strtoul(colon + 1, NULL, 10);
+                    for (k = 0; k < leaf_count; k++)
+                    {
+                        if (leaf_values[k] == want_value)
+                        {
+                            code_values[k] = want_code;
+                            break;
+                        }
+                    }
+                }
+            }
+            prc_free(ctx, spec_copy);
+        }
+    }
+
     {
         uint32_t true_max_code_length = 0;
         for (k = 0; k < leaf_count; k++)
@@ -1032,6 +1298,15 @@ prc_bitwrite_huffman_block(prc_context *ctx, prc_bit_write_state *state,
            file leaf-for-leaf, isolating the max_code_length field itself
            as the sole remaining discrepancy (2026-07-10). */
         max_code_length = prc_spec_bits_for_unsigned(true_max_code_length);
+        if (getenv("PRC_DIAG_HUFF_STATS") != NULL)
+            printf("PRC_DIAG_HUFF_STATS: count=%u leaf_count=%u true_max_code_length=%u max_code_length_field=%u num_bits=%u\n",
+                count, leaf_count, true_max_code_length, max_code_length, (unsigned)num_bits);
+        if (getenv("PRC_DIAG_HUFF_TABLE") != NULL)
+        {
+            for (k = 0; k < leaf_count; k++)
+                fprintf(stderr, "PRC_DIAG_HUFF_TABLE: leaf_value=%u code_length=%u code_value=%u (binary computed below)\n",
+                    leaf_values[k], code_lengths[k], code_values[k]);
+        }
     }
 
     if (prc_bitwrite_init(ctx, &sub, 64) != 0)
@@ -1135,6 +1410,29 @@ cleanup:
    write facility's prc_bitwrite_int_variable_bit already implements that
    packing correctly; only the LENGTH this function computes (fed in as
    bit_lengths[k], i.e. uBitNumber) was wrong. */
+/* DIAGNOSTIC (2026-07-26, PRC_DIAG_NATURAL_BITWIDTH): SS9.8
+   "WriteCompressedIntegerArray" (point_array's own array type) computes its
+   per-entry bit length via `GetNumberOfBitsUsedToStoreInteger(piArray[u])`
+   applied directly to the signed value -- no visible extra +1 in the spec's
+   own pseudocode, unlike SS9.9 "WriteCompressedIndiceArray" (a DIFFERENT
+   array type, for delta-encoded indices), which explicitly computes
+   `GetNumberOfBitsUsedToStoreUnsignedInteger(abs(v))+1`. prc_int32_bit_
+   width_signed below implements SS9.9's formula (correct for indices, and
+   for max_code_length elsewhere in this file) but point_array
+   (prc_bitwrite_compressed_integer_array) also calls it -- possibly the
+   wrong spec section's formula for that specific array type, off by
+   exactly 1 bit whenever the magnitude isn't an exact power of two. This
+   diagnostic swaps point_array's bit-length computation to the "natural"
+   convention (1 sign bit + prc_bit_width_u32(magnitude), no extra +1) to
+   test that hypothesis without touching indices/max_code_length. Zero
+   behavior change when unset. */
+static uint32_t
+prc_int32_bit_width_signed_natural(int32_t v)
+{
+    uint32_t magnitude = (v < 0) ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
+    return 1 + prc_bit_width_u32(magnitude);
+}
+
 static uint32_t
 prc_int32_bit_width_signed(int32_t v)
 {
@@ -1166,6 +1464,16 @@ prc_bitwrite_character_array(prc_context *ctx, prc_bit_write_state *state,
        real Huffman encoder exists, this writer takes the compressed path
        whenever it's free to choose (has_comp_bit), not just when forced. */
     compressed = has_comp_bit ? 1 : ((num_known > 3) ? 1 : 0);
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_FORCE_UNCOMPRESSED_CHARARRAY): forces
+       compressed=0 even when has_comp_bit would otherwise mandate Huffman
+       compression -- added to test whether Huffman-compressing a character
+       array AT ALL (independent of any specific tie/code-assignment detail,
+       all already tested and disproven) is itself the enabling factor for
+       the mixed_chains/fan8 Acrobat blank-tree bug, after finding an
+       independent encoder's comparable file skips compression here
+       entirely. Zero behavior change when unset. */
+    if (compressed && getenv("PRC_DIAG_FORCE_UNCOMPRESSED_CHARARRAY") != NULL)
+        compressed = 0;
     if (has_comp_bit)
         if (prc_bitwrite_bit(ctx, state, compressed) != 0)
             return -1;
@@ -1249,6 +1557,10 @@ prc_bitwrite_short_array(prc_context *ctx, prc_bit_write_state *state,
        case here -- has_comp_bit == false always means plain output on the
        read side, so that's the only thing this branch can produce then. */
     compressed = has_comp_bit ? 1 : 0;
+    /* See the matching diagnostic/comment in prc_bitwrite_character_array
+       above (PRC_DIAG_FORCE_UNCOMPRESSED_CHARARRAY). */
+    if (compressed && getenv("PRC_DIAG_FORCE_UNCOMPRESSED_CHARARRAY") != NULL)
+        compressed = 0;
     if (has_comp_bit)
         if (prc_bitwrite_bit(ctx, state, compressed) != 0)
             return -1;
@@ -1341,27 +1653,85 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_bitwrite_compressed_integer_array\n");
         return -1;
     }
+    if (getenv("PRC_DIAG_NATURAL_BITWIDTH") != NULL)
+    {
+        for (k = 0; k < data_size; k++)
+            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed_natural(data[k]);
+    }
+    else
+    {
+        for (k = 0; k < data_size; k++)
+            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
+    }
+
+    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITLENGTHS): dumps each
+       value alongside its computed bit length, added while checking whether
+       a bit-width boundary (rather than duplicate values, already
+       disproven) correlates with the mixed_chains/fan8 Acrobat blank-tree
+       bug. Zero behavior change when unset. */
+    if (getenv("PRC_DIAG_POINT_ARRAY_BITLENGTHS") != NULL)
+    {
+        for (k = 0; k < data_size; k++)
+            fprintf(stderr, "PRC_DIAG_POINT_ARRAY_BITLENGTHS: k=%u value=%d bit_length=%u\n",
+                k, data[k], bit_lengths[k]);
+    }
+
+    /* WORKAROUND (2026-07-25, mixed_chains/fan8 Acrobat blank-tree bug --
+       see mixed_chains_fan8_boundary_investigation-24July.md and the
+       memory writeup's "fresh bisection directly on UK_original.stl" /
+       "BREAKTHROUGH: phase-independent grow-in-place" sections): real
+       Adobe Acrobat blanks the model tree for a COMPRESSED tessellation
+       entry containing a point_array value that needs exactly 22 bits.
+       Confirmed real-Acrobat-causal on multiple independent cases (a
+       synthetic fan8 repro, and two real components extracted from
+       UK_original.stl) -- fixed in every case by growing that ONE
+       entry's own declared bit-length to 23, in place, leaving its VALUE,
+       its position, and everything else in the array untouched (lossless:
+       the reader just consumes however many bits the table declares).
+
+       An earlier version of this fix instead shifted the flagged entry's
+       START PHASE by padding an EARLIER entry, based on an initial
+       characterization (a single synthetic fan8 instance) that only
+       phase 1 was dangerous. Real-world testing on UK_original.stl later
+       found bit-length-22 entries failing at OTHER phases too (3, 7),
+       which that phase-1-only condition couldn't even detect -- and
+       separately, a broadened version of the phase-shift mechanism
+       regressed the original fan8 case, while THIS grow-in-place
+       mechanism (tested standalone, without any phase-shifting at all)
+       fixed fan8, a minimal 4-triangle real repro, AND two more real
+       components -- superseding the more complex phase-tracking
+       rewind/retry design entirely. Still does not resolve every instance
+       of whatever broader bug family this belongs to: one specific real
+       component (UK_original.stl's smallest failing part) survives this
+       fix too and remains an open, unresolved case -- see the
+       investigation writeup for its own bisection trail. */
     for (k = 0; k < data_size; k++)
-        bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
+    {
+        if (bit_lengths[k] == 22)
+            bit_lengths[k] = 23;
+    }
 
     /* matches: bit_lengths = prc_bitread_character_array(ctx, state, &size,
        6, true, 0); (prc_bit.c 1435) -- the bit-length table itself, written
        (and possibly Huffman-compressed) before any of the values it
        describes. */
     result = prc_bitwrite_character_array(ctx, state, bit_lengths, data_size, 6, 1, 0);
-    if (result == 0)
+    if (result != 0)
     {
-        /* matches: for (k = 0; k < size; k++) data[k] =
-           prc_bitread_int_variable_bit(ctx, state, bit_lengths[k]);
-           (prc_bit.c 1445-1450) -- each value written with exactly the bit
-           length its own (already-written) table entry specifies. */
-        for (k = 0; k < data_size; k++)
+        prc_free(ctx, bit_lengths);
+        return result;
+    }
+
+    /* matches: for (k = 0; k < size; k++) data[k] =
+       prc_bitread_int_variable_bit(ctx, state, bit_lengths[k]);
+       (prc_bit.c 1445-1450) -- each value written with exactly the bit
+       length its own (already-written) table entry specifies. */
+    for (k = 0; k < data_size; k++)
+    {
+        if (prc_bitwrite_int_variable_bit(ctx, state, data[k], bit_lengths[k]) != 0)
         {
-            if (prc_bitwrite_int_variable_bit(ctx, state, data[k], bit_lengths[k]) != 0)
-            {
-                result = -1;
-                break;
-            }
+            result = -1;
+            break;
         }
     }
 

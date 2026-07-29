@@ -49,7 +49,25 @@ typedef struct prc_encode_mesh_s
     uint32_t  num_components;
     double    bbox[6];         /* xmin,ymin,zmin,xmax,ymax,zmax */
     double    tolerance_mm;    /* resolved tolerance actually used for dedup */
+    /* Number of deduplicated vertices touched by 2+ triangle "fans" that
+       don't share an edge with each other (see prc_encode_preprocess's own
+       split-handling comment) -- see prc_api_mesh_has_nonmanifold_fans's
+       doc comment (include/prc_api.h) for why callers may want to check
+       this before choosing COMPRESSED. */
+    uint32_t  nonmanifold_vertices;
 } prc_encode_mesh;
+
+/* MITIGATION (2026-07-26, mixed_chains/UK_original.stl/beetle_1000000.stl Acrobat blank-tree
+   investigation): prc_encode_preprocess (src/prc_write_compress_tess.c) applies a deterministic,
+   per-vertex position jitter of up to this many multiples of the resolved encoding tolerance, in
+   each of x/y/z independently, to every deduplicated vertex -- see that function's own comment for
+   the full rationale. This is now part of this write facility's documented position-fidelity
+   contract: a decoded vertex may differ from its original input position by up to this factor
+   (times sqrt(3) for the worst-case combined 3D displacement) times tolerance, not just ordinary
+   quantization noise -- callers/tests comparing decoded output against original input must budget
+   for this. Shared here (not left as a private constant in the .c file) so test code that verifies
+   position fidelity uses the same value rather than a duplicated magic number. */
+#define PRC_ENCODE_JITTER_TOLERANCE_FACTOR 100.0
 
 int prc_encode_preprocess(prc_context *ctx,
     const double *positions, uint32_t num_positions,

@@ -50,6 +50,7 @@
         int rc_ = (expr); \
         if (rc_ < 0) { \
             fprintf(stderr, "Error: %s (code: %d)\n", (msg), rc_); \
+            ret = 1; \
             goto cleanup; \
         } \
     } while (0)
@@ -169,6 +170,7 @@ int main(int argc, char *argv[])
     prc_api_product *model_tree = NULL;
     prc_api_tess *tesses = NULL;
     FILE *stl_file = NULL;
+    int ret = 0;
 
     uint32_t num_parts = 0, num_products = 0, num_markups = 0;
     uint32_t total_tessellations = 0, total_line_tessellations = 0;
@@ -212,6 +214,7 @@ int main(int argc, char *argv[])
         if (!tesses)
         {
             fprintf(stderr, "Error: Memory allocation failed for tessellation registry array\n");
+            ret = 1;
             goto cleanup;
         }
     }
@@ -227,6 +230,7 @@ int main(int argc, char *argv[])
         if (!tess->tess_faces)
         {
             fprintf(stderr, "Error: Memory allocation failed for tessellation faces\n");
+            ret = 1;
             goto cleanup;
         }
 
@@ -252,6 +256,7 @@ int main(int argc, char *argv[])
     if (!stl_file)
     {
         fprintf(stderr, "Error: Could not open output destination file path: %s\n", output_path);
+        ret = 1;
         goto cleanup;
     }
 
@@ -379,5 +384,5 @@ cleanup:
         prc_api_release_context(ctx);
     }
 
-    return 0;
+    return ret;
 }
