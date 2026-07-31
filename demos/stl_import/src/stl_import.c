@@ -992,6 +992,136 @@ uf_union(uint32_t *parent, uint8_t *rank, uint32_t a, uint32_t b)
         rank[a]++;
 }
 
+/* --- 2c: does this file's pre-weld jitter need per-triangle scope? ---
+ *
+ * The per-triangle jitter-magnitude fix (2026-07-29, commit 9076dd0) targets
+ * a specific fragility: mixed COMPRESSED+TRIANGLES trees are sensitive to
+ * over-jittering in a way same-kind trees aren't (see the jitter block's own
+ * comment in main() for the full mechanism/evidence). But it collapses the
+ * jitter magnitude far below the file's own weld tolerance for any file made
+ * of many small triangles relative to its whole bounding box -- confirmed
+ * real-Acrobat-regressive on UK_original.stl (460017 triangles, per-triangle
+ * magnitude ~378x smaller than the pre-fix whole-mesh magnitude that used to
+ * work for it). Mixed-kind trees can only arise when MULTIPLE separate
+ * tessellation entries are written (a single lumped entry never mixes with a
+ * sibling) AND at least one of those entries would contain a non-manifold
+ * vertex (triggering the TRIANGLES fallback) while at least one other
+ * wouldn't. This function estimates that via a throwaway trial weld of the
+ * RAW (un-jittered) positions -- real jitter and the real weld both still run
+ * afterward, unaffected by this trial; the only cost is one extra O(n) weld
+ * pass. Conservative on any ambiguity or allocation failure: returns 1 (use
+ * the finer, proven-safe-for-mixed-kind magnitude) rather than risk
+ * reintroducing the mixed-kind regression the 2026-07-29 fix exists to
+ * prevent. */
+static uint8_t
+stl_import_jitter_needs_per_triangle_scope(const stl_mesh *mesh, double weld_tolerance_fraction, double diagonal)
+{
+    weld_grid trial_grid;
+    uint32_t *trial_weld_index = NULL;
+    uint32_t *trial_parent = NULL;
+    uint8_t *trial_rank = NULL;
+    uint32_t *trial_component_of_root = NULL;
+    uint32_t num_components = 0;
+    uint8_t result = 1; /* conservative default */
+    uint32_t i, t;
+    uint8_t ok = 0;
+    double abs_tol = weld_tolerance_fraction * diagonal;
+
+    memset(&trial_grid, 0, sizeof(trial_grid));
+
+    if (mesh->num_triangles == 0)
+        return 0;
+
+    if (weld_grid_init(&trial_grid, abs_tol, mesh->num_triangles * 3) != 0)
+        return 1;
+
+    trial_weld_index = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)mesh->num_triangles * 3);
+    if (trial_weld_index == NULL)
+    {
+        weld_grid_free(&trial_grid);
+        return 1;
+    }
+
+    for (i = 0; i < mesh->num_triangles * 3; i++)
+    {
+        uint32_t wv = weld_grid_lookup_or_insert(&trial_grid, &mesh->raw_positions[(size_t)i * 3], abs_tol);
+        if (wv == UINT32_MAX)
+            goto done;
+        trial_weld_index[i] = wv;
+    }
+
+    trial_parent = (uint32_t *)malloc(sizeof(uint32_t) * trial_grid.count);
+    trial_rank = (uint8_t *)calloc(trial_grid.count, sizeof(uint8_t));
+    if (trial_parent == NULL || trial_rank == NULL)
+        goto done;
+    for (i = 0; i < trial_grid.count; i++)
+        trial_parent[i] = i;
+    for (t = 0; t < mesh->num_triangles; t++)
+    {
+        uf_union(trial_parent, trial_rank, trial_weld_index[t * 3 + 0], trial_weld_index[t * 3 + 1]);
+        uf_union(trial_parent, trial_rank, trial_weld_index[t * 3 + 1], trial_weld_index[t * 3 + 2]);
+    }
+    trial_component_of_root = (uint32_t *)malloc(sizeof(uint32_t) * trial_grid.count);
+    if (trial_component_of_root == NULL)
+        goto done;
+    for (i = 0; i < trial_grid.count; i++)
+        trial_component_of_root[i] = UINT32_MAX;
+    for (i = 0; i < trial_grid.count; i++)
+    {
+        uint32_t r = uf_find(trial_parent, i);
+        if (trial_component_of_root[r] == UINT32_MAX)
+            trial_component_of_root[r] = num_components++;
+    }
+    ok = 1;
+
+done:
+    if (!ok)
+    {
+        free(trial_weld_index); free(trial_parent); free(trial_rank); free(trial_component_of_root);
+        weld_grid_free(&trial_grid);
+        return 1;
+    }
+
+    if (num_components <= 1)
+    {
+        result = 0; /* only one part -- nothing to mix with */
+    }
+    else
+    {
+        uint8_t force_lump = 0;
+        static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
+        size_t bi;
+        for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
+            if (num_components == known_bad_tess_counts[bi]) { force_lump = 1; break; }
+
+        if (num_components > STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD || force_lump)
+        {
+            result = 0; /* forced into a single lumped entry -- no sibling to mix with */
+        }
+        else
+        {
+            /* Multiple genuinely separate entries will be written. Check
+               whether ANY non-manifold vertex exists anywhere in the file:
+               if none, every part will be COMPRESSED (homogeneous, safe for
+               the coarser magnitude); if at least one exists, at least one
+               part risks being written as TRIANGLES alongside COMPRESSED
+               siblings -- conservatively keep result=1 (mixed-kind risk). */
+            prc_context *check_ctx = prc_api_new_context(NULL);
+            if (check_ctx != NULL)
+            {
+                int has_nm = prc_api_mesh_has_nonmanifold_fans(check_ctx, trial_grid.positions, trial_grid.count,
+                    trial_weld_index, mesh->num_triangles, prc_write_tol_relative(weld_tolerance_fraction));
+                prc_api_release_context(check_ctx);
+                result = (has_nm > 0) ? 1 : 0;
+            }
+        }
+    }
+
+    free(trial_weld_index); free(trial_parent); free(trial_rank); free(trial_component_of_root);
+    weld_grid_free(&trial_grid);
+    return result;
+}
+
 /* ---------------------------------------------------------------------
  * Section 3: normal-index deduplication for --original-normals.
  *
@@ -2322,30 +2452,43 @@ main(int argc, char *argv[])
     {
         uint8_t preweld_disabled = (prc_diag_getenv("PRC_DIAG_DISABLE_PREWELD_JITTER") != NULL);
         const char *preweld_env = prc_diag_getenv("PRC_DIAG_PREWELD_JITTER_MAG");
+        /* FIX (2026-07-29, mixed-kind-tree Acrobat blank-tree investigation; SCOPED 2026-07-31,
+           UK_original.stl jitter regression): per-triangle magnitude is only actually needed for
+           files that risk producing a mixed COMPRESSED+TRIANGLES tree -- the specific fragility
+           this fix targets (see the loop body's own comment below for the mechanism/evidence).
+           For any other file, the coarser, historically-validated whole-mesh-scoped magnitude
+           (this importer's original behavior, pre-9076dd0) is used instead: per-triangle scaling
+           collapses the jitter far below the file's own weld tolerance for meshes made of many
+           small triangles relative to their whole bounding box, confirmed real-Acrobat-regressive
+           on UK_original.stl (460017 triangles, per-triangle magnitude ~378x smaller than the
+           whole-mesh magnitude that used to work for it, unrelated to the mixed-kind mechanism
+           since that file is homogeneous/single-kind). See
+           stl_import_jitter_needs_per_triangle_scope's own comment for how this is decided. */
+        uint8_t use_per_triangle = preweld_disabled ? 0 :
+            stl_import_jitter_needs_per_triangle_scope(&mesh, weld_tolerance_fraction, diagonal);
         if (!preweld_disabled)
         {
             uint32_t ti;
             for (ti = 0; ti < mesh.num_triangles; ti++)
             {
-                /* FIX (2026-07-29, mixed-kind-tree Acrobat blank-tree investigation): magnitude
-                   is now PER-TRIANGLE, not the whole mesh's bbox diagonal. A single global
-                   magnitude over-jitters any part that's spatially small relative to the file as
-                   a whole -- confirmed real-Acrobat-causal for a blank tree via a minimal, direct
-                   A/B/A/B repro (a small COMPRESSED part sharing a tree with a spatially distant
-                   TRIANGLES-fallback sibling; same-kind trees tolerated the same distortion, so
-                   this is a magnitude bug, not a kind-mixing one -- see project memory). Each
-                   triangle's own 3-vertex bbox diagonal is a cheap, purely local scale proxy that
-                   needs no connectivity pre-pass (component membership isn't known until AFTER
-                   welding, which must run AFTER jitter -- see this block's own header comment on
-                   why jitter has to see raw, pre-weld positions). This errs toward UNDER-scaling
-                   for a part made of many triangles spanning more area than any one of them,
-                   which is the safe direction: nothing in this investigation ever found
-                   insufficient jitter to cause new breakage, only to occasionally fail to escape
-                   an existing collision. */
+                /* Each triangle's own 3-vertex bbox diagonal is a cheap, purely local scale proxy
+                   that needs no connectivity pre-pass (component membership isn't known until
+                   AFTER welding, which must run AFTER jitter -- see this block's own header
+                   comment on why jitter has to see raw, pre-weld positions). This errs toward
+                   UNDER-scaling for a part made of many triangles spanning more area than any one
+                   of them, which is the safe direction when it IS needed: nothing in this
+                   investigation ever found insufficient jitter to cause new breakage, only to
+                   occasionally fail to escape an existing collision -- see
+                   stl_import_jitter_needs_per_triangle_scope for when this finer scope applies
+                   instead of the coarser whole-mesh one. */
                 double mag;
                 if (preweld_env != NULL)
                 {
                     mag = atof(preweld_env);
+                }
+                else if (!use_per_triangle)
+                {
+                    mag = weld_tolerance_fraction * diagonal * 8.65969267656085;
                 }
                 else
                 {
