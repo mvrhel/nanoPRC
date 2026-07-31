@@ -1084,6 +1084,43 @@ cleanup:
     return result;
  }
 
+static void
+prc_api_get_exact_geom_information(prc_context *ctx, prc_ri *ri,
+    uint32_t *topo_context_index, uint32_t *body_index)
+{
+    *topo_context_index = 0;
+    *body_index = 0;
+
+    switch (ri->representation_type)
+    {
+        case PRC_TYPE_RI_BrepModel:
+            if (ri->ri_brep_model->exact_geometry)
+            {
+                *topo_context_index = ri->ri_brep_model->index_topological_context;
+                *body_index = ri->ri_brep_model->index_body;
+            }
+            break;
+        case PRC_TYPE_RI_Curve:
+            if (ri->ri_curve->exact_geometry)
+            {
+                *topo_context_index = ri->ri_curve->index_topological_context;
+                *body_index = ri->ri_curve->index_body;
+            }
+            break;
+        case PRC_TYPE_RI_Plane:
+            if (ri->ri_plane->exact_geometry)
+            {
+                *topo_context_index = ri->ri_plane->index_topological_context;
+                *body_index = ri->ri_plane->index_body;
+            }
+            break;
+        default:
+            *topo_context_index = 0;
+            *body_index = 0;
+            break;
+    }
+}
+
 /* A recursive method to set the nodes in the product/part tree */
 static int
 prc_api_initialize_node(prc_context *ctx, prc_data *data, prc_api_product *product,
@@ -1110,6 +1147,7 @@ prc_api_initialize_node(prc_context *ctx, prc_data *data, prc_api_product *produ
     unsigned char name_3d_pmi[] = "3D PMI";
     uint8_t all_brep;
     unsigned char *model_name = NULL;
+    uint32_t topo_context_index, body_index;
 
     if (*num_nodes == 0)
     {
@@ -1188,6 +1226,10 @@ prc_api_initialize_node(prc_context *ctx, prc_data *data, prc_api_product *produ
                 product->part->biased_tess_index = tess_index_ri;
                 product->part->biased_style_index =
                     prc_part->rep_items[0].item_content.base.graphics_content.biased_index_of_line_style;
+                prc_api_get_exact_geom_information(ctx, &prc_part->rep_items[0], &topo_context_index, &body_index);
+                product->part->biased_topo_contex_index = topo_context_index;
+                product->part->biased_body_index = body_index;
+
             }
             else if (all_brep)
             {   /* If all the rep items are of type PRC_TYPE_RI_BrepModel then */
@@ -2638,6 +2680,11 @@ prc_api_helper_add_ri(prc_context *ctx, uint32_t file_index, prc_api_part *api_p
             }
         }
 
+        uint32_t topo_context_index, body_index;
+        prc_api_get_exact_geom_information(ctx, item.prc_ri, &topo_context_index, &body_index);
+        item.api_part->biased_topo_contex_index = topo_context_index;
+        item.api_part->biased_body_index = body_index;
+
         item.api_part->RI_item_style_node = ri_style;
         item.api_part->biased_local_coordinate_index = item.prc_ri->item_content.biased_index_local_coordinate_system;
         item.api_part->biased_style_index = item.prc_ri->item_content.base.graphics_content.biased_index_of_line_style;
@@ -3514,7 +3561,7 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
     uint32_t num_part_tessellations = 0;
     uint32_t num_markup_tessellations = 0;
     uint32_t num_tess_in_file;
-    uint32_t i, j, k ,m;
+    uint32_t i, j, k;
     prc_api_child_reserve *reserve = (prc_api_child_reserve *)model_tree->reserved;
     uint32_t num_parts = reserve->num_parts;
     uint32_t num_markups = reserve->num_markups;
@@ -3737,7 +3784,32 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                 }
             }
         }
+        /* Lets also go through the exact geometry data in the file and check
+           if we have any of that data for unassigned parts. If we have that
+           and not the tessellation data we will need to create tessellation
+           data from the exact geometry */
+        uint32_t top_context_count = data->file_struct[i].geometry->exact_geometry.topo_context_count;
+        for (j = 0; j < top_context_count; j++)
+        {
+            prc_topo_context *topo_context = &data->file_struct[i].geometry->exact_geometry.topo_contexts[j];
+            uint32_t num_bodies = topo_context->number_of_bodies;
+
+            /* Search the reserve for parts that have no tessellation but have
+               exact_geometry with a index_topological_context and index_body. */
+            for (k = 0; k < num_parts; k++)
+            {
+                part = &reserve->parts[k];
+
+                if (part->biased_tess_index == 0 && part->tess_file_index == i &&
+                    part->biased_topo_contex_index == j + 1 && part->biased_body_index < num_bodies + 1 &&
+                    part->biased_body_index != 0)
+                {
+                    int zz = 1; /* This is a RI that has no tessellation but has exact geometry. We will need to create tessellation data for this RI */
+                }
+            }
+        }
     }
+
     data->unique_part_count = num_part_tessellations;
     data->unique_markup_count = num_markup_tessellations;
     *num_tess = num_part_tessellations + num_markup_tessellations;

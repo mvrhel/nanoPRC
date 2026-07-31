@@ -2740,6 +2740,7 @@ struct prc_crv_composite_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_unsigned_int number_of_subcurves;
@@ -2752,6 +2753,7 @@ struct prc_crv_onsurf_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double tolerance;
@@ -2777,6 +2779,7 @@ struct prc_crv_equation_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_interval interval;
@@ -2821,6 +2824,7 @@ struct prc_crv_helix01_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     uint8_t type;
@@ -2835,6 +2839,7 @@ struct prc_crv_hyperbola_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double semi_axis;
@@ -2895,6 +2900,7 @@ struct prc_crv_offset_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_ptr_curve base_curve;
@@ -2907,6 +2913,7 @@ struct prc_crv_parabola_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double focal_length;

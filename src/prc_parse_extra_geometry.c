@@ -2744,6 +2744,17 @@ prc_parse_crv_parabola(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+    data->focal_length = prc_bitread_double(ctx, bit_state);
+    data->type = prc_bitread_uint32(ctx, bit_state);
+
     return 0;
 }
 

@@ -281,6 +281,8 @@ struct prc_api_part_s
     prc_api_tess *tess;
     prc_api_tess *tess_line;
     uint32_t biased_tess_index;
+    uint32_t biased_topo_contex_index;
+    uint32_t biased_body_index;
     uint32_t tess_file_index;
     uint32_t biased_style_index;
     uint32_t biased_layer_index;
