@@ -1994,7 +1994,25 @@ prc_add_edge_to_list(prc_context *ctx, treated_edge_list *edge_list,
             (size_t)PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY * sizeof(uint32_t));
         edge_list->edge[min_index].capacity = PRC_INITIAL_TREATED_EDGE_LIST_CAPACITY;
     }
-	else if (edge_list->edge[min_index].num_second_indices >= edge_list->edge[min_index].capacity)
+    /* BUG FIX (2026-07-31, decode-hang investigation): must grow BEFORE the
+       table becomes completely full, not only once it already is. Open-
+       addressing linear probing (prc_check_for_treated_edge's lookup, and
+       the insert loop just below) relies on always finding either the
+       target or an empty (UINT32_MAX) slot to know when to stop -- if every
+       slot is occupied, a lookup for a key that isn't present has no empty
+       slot to terminate on and probes the same occupied slots forever. The
+       old `num_second_indices >= capacity` check only triggers growth
+       AFTER an insert has already filled the last slot (confirmed via a
+       real file: min_index with capacity=5, num_second_indices=5 -- exactly
+       full -- causing prc_check_for_treated_edge to spin indefinitely on a
+       real-world tessellation entry, a genuine infinite hang, not just
+       slow). Comparing against capacity - 1 instead guarantees at least one
+       empty slot always remains after every insert. PRC_INITIAL_TREATED_
+       EDGE_LIST_CAPACITY (5) is small enough that ordinary vertices of
+       degree >= 5 -- not just extreme non-manifold cases -- reach this
+       exact boundary in real meshes, so this isn't a rare/adversarial-only
+       trigger. */
+	else if (edge_list->edge[min_index].num_second_indices >= edge_list->edge[min_index].capacity - 1)
 	{
         uint32_t old_capacity = edge_list->edge[min_index].capacity;
         uint32_t new_capacity;
@@ -3043,31 +3061,31 @@ cleanup:
         }
     }
 
-     /* Free each unique indice1 buffer once by pointer identity.
-         Keep pointers intact during this pass so duplicate detection
-         can compare against earlier entries. */
+    /* PERFORMANCE FIX (2026-07-31, decode-hang investigation): this used to
+       re-scan every earlier slot (m < k) before freeing each indice1 buffer,
+       an O(edge_list.capacity^2) pass -- the same class of bug as
+       prc_add_edge_to_list's and prc_compressed_tess_hash_unlink_edge's own
+       documented fixes earlier in this file, just hiding in the cleanup
+       path instead of the hot insert/lookup path. Confirmed real-world-
+       triggering: a tessellation entry with many non-manifold vertices
+       (many min_index slots each getting their own indice1 buffer) turned
+       this into a multi-minute 100%-CPU hang on a real file.
+       Each indice1 buffer is uniquely `prc_malloc`'d exactly once per
+       min_index slot (`prc_add_edge_to_list`, only on first use when
+       `capacity == 0`) and never aliased -- there is no code path anywhere
+       in this file that assigns one slot's indice1 from another slot's
+       value, so two different slots can never legitimately hold the same
+       pointer. The duplicate check was therefore dead defensive code,
+       paying a quadratic cost for a case that cannot occur; a plain O(n)
+       free is correct. */
     for (k = 0; k < edge_list.capacity; k++)
     {
-        int m;
-        uint8_t already_freed = 0;
         uint32_t *indices = edge_list.edge[k].indice1;
 
         if (indices == NULL)
             continue;
 
-        for (m = 0; m < k; m++)
-        {
-            if (edge_list.edge[m].indice1 == indices)
-            {
-                already_freed = 1;
-                break;
-            }
-        }
-
-        if (!already_freed)
-        {
-            prc_free(ctx, indices);
-        }
+        prc_free(ctx, indices);
     }
 
     /* Clear edge slots after cleanup pass completes. */
