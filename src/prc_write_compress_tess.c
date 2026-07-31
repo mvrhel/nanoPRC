@@ -274,6 +274,7 @@ prc_encode_preprocess(prc_context *ctx,
     uint32_t *remap = NULL;
     uint32_t *parent = NULL;
     uint32_t *label = NULL;
+    uint32_t *presplit_tri_component = NULL;
     double diagonal, tol;
     uint32_t i;
     uint32_t clean_tris = 0;
@@ -816,6 +817,70 @@ prc_encode_preprocess(prc_context *ctx,
         prc_free(ctx, excess_tri);
         prc_free(ctx, excess_slot);
 
+        /* Pre-split edge-connected components (2026-07-31, davidgbarnes.stl
+           Acrobat blank-tree investigation): computed on the mesh as it
+           stands BEFORE the non-manifold-vertex fix below runs, purely to
+           let that fix distinguish a GENUINE bowtie (multiple fans meeting
+           at a vertex that are ALSO connected via some other edge-path
+           elsewhere -- a real defect within one intended surface) from two
+           (or more) otherwise entirely independent mesh pieces that happen
+           to touch at exactly one point (perfectly valid topology, which
+           PRC's point_reference_array mechanism -- already correctly
+           implemented in the encode traversal's own vtx_map reference logic
+           -- represents correctly without any split at all). Same
+           union-find-over-shared-edges algorithm as the later, real
+           out->tri_component computation below, just run earlier and
+           discarded once the vertex-split loop is done with it -- edges
+           only connect two triangles when they share a genuine 2-vertex
+           edge (never a lone shared vertex), so two fans meeting ONLY at
+           one non-manifold vertex are, by construction, in different
+           components here unless they reconnect via some other path. */
+        {
+            uint32_t *presplit_parent = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
+            uint32_t *presplit_label = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
+            presplit_tri_component = (uint32_t *)prc_malloc(ctx, (size_t)clean_tris * sizeof(uint32_t));
+            if (presplit_parent == NULL || presplit_label == NULL || presplit_tri_component == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_preprocess pre-split components\n");
+                prc_free(ctx, presplit_parent);
+                prc_free(ctx, presplit_label);
+                prc_free(ctx, presplit_tri_component);
+                presplit_tri_component = NULL;
+                ret = PRC_ERROR_MEMORY;
+                goto fail;
+            }
+            for (i = 0; i < clean_tris; i++)
+            {
+                presplit_parent[i] = i;
+                presplit_label[i] = UINT32_MAX;
+            }
+            for (i = 0; i < nedges; i++)
+            {
+                if (out->edges[i].tri1 != -1)
+                {
+                    uint32_t ra = prc_uf_find(presplit_parent, (uint32_t)out->edges[i].tri0);
+                    uint32_t rb = prc_uf_find(presplit_parent, (uint32_t)out->edges[i].tri1);
+                    if (ra != rb)
+                        presplit_parent[ra] = rb;
+                }
+            }
+            {
+                uint32_t presplit_ncomp = 0;
+                for (i = 0; i < clean_tris; i++)
+                {
+                    uint32_t root = prc_uf_find(presplit_parent, i);
+                    if (presplit_label[root] == UINT32_MAX)
+                    {
+                        presplit_label[root] = presplit_ncomp;
+                        presplit_ncomp++;
+                    }
+                    presplit_tri_component[i] = presplit_label[root];
+                }
+            }
+            prc_free(ctx, presplit_parent);
+            prc_free(ctx, presplit_label);
+        }
+
         /* Non-manifold VERTEX fix (2026-07-23): a DIFFERENT defect class
            than the non-manifold EDGE case above -- a vertex is non-
            manifold if the triangles touching it don't form a single
@@ -857,6 +922,7 @@ prc_encode_preprocess(prc_context *ctx,
             uint32_t *tri_local_stamp = (uint32_t *)prc_calloc(ctx, clean_tris, sizeof(uint32_t));
             uint32_t stamp = 0;
             uint32_t total = 0, etotal = 0, vi, ti2, ei2, nonmanifold_vertices = 0, splits_needed = 0;
+            uint32_t corner_touches_preserved = 0;
             /* Captured BEFORE the per-vertex loop below, which grows
                out->num_positions in place as vertices get split -- the
                per-vertex triangle/edge index arrays (vtri_.. and vedge_..)
@@ -983,6 +1049,29 @@ prc_encode_preprocess(prc_context *ctx,
                     {
                         uint32_t root = prc_uf_find(vparent, k2);
                         if (root == root0) continue; /* stays on original vertex */
+                        /* Corner-touch check (2026-07-31, davidgbarnes.stl Acrobat blank-tree
+                           investigation): this fan and fan 0 meet ONLY at this one vertex --
+                           genuinely non-manifold by definition. But if they're not otherwise
+                           edge-connected ANYWHERE ELSE in the mesh either (different pre-split
+                           components), they're two independent pieces that happen to touch at
+                           exactly one point, not a bowtie defect within one intended surface.
+                           That's valid topology PRC's point_reference_array already represents
+                           correctly (see prc_encode_chain_start's vtx_map reference logic) --
+                           leave this fan on the original vertex instead of splitting, exactly
+                           like fan 0, so the traversal below references it instead of emitting
+                           (and Acrobat then choking on) a spurious duplicate point. Only fans
+                           that reconnect to fan 0 elsewhere (same pre-split component -- a
+                           genuine bowtie) still get split. */
+                        if (presplit_tri_component != NULL)
+                        {
+                            uint32_t this_tri = vtri_list[vtri_start[vi] + k2];
+                            uint32_t fan0_tri = vtri_list[vtri_start[vi] + 0];
+                            if (presplit_tri_component[this_tri] != presplit_tri_component[fan0_tri])
+                            {
+                                corner_touches_preserved++;
+                                continue;
+                            }
+                        }
                         if (vfan_new_vertex[root] == UINT32_MAX)
                         {
                             /* Allocate a new position lazily, in place, by
@@ -1058,8 +1147,8 @@ prc_encode_preprocess(prc_context *ctx,
                     }
                 }
                 if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
-                    printf("PRC_DIAG_MESH_QUALITY: nonmanifold_vertices=%u vertex_splits=%u (out of %u positions before splitting)\n",
-                        nonmanifold_vertices, splits_needed, orig_num_positions);
+                    printf("PRC_DIAG_MESH_QUALITY: nonmanifold_vertices=%u vertex_splits=%u corner_touches_preserved=%u (out of %u positions before splitting)\n",
+                        nonmanifold_vertices, splits_needed, corner_touches_preserved, orig_num_positions);
             }
             out->nonmanifold_vertices = nonmanifold_vertices;
             if (vtri_count != NULL) prc_free(ctx, vtri_count);
@@ -1148,6 +1237,9 @@ prc_encode_preprocess(prc_context *ctx,
         label = NULL;
     }
 
+    prc_free(ctx, presplit_tri_component);
+    presplit_tri_component = NULL;
+
     return 0;
 
 fail:
@@ -1161,6 +1253,8 @@ fail:
         prc_free(ctx, parent);
     if (label != NULL)
         prc_free(ctx, label);
+    if (presplit_tri_component != NULL)
+        prc_free(ctx, presplit_tri_component);
     prc_encode_preprocess_free(ctx, out);
     return ret;
 }
