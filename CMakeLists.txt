@@ -97,7 +97,9 @@ set(PRC_CORE_SOURCES
 	"src/prc_schema.c"
 	"src/prc_vector_util.c"
 	"src/prc_decode_compressed_tess.c"
-	"src/prc_decode_markup_tess.c")
+	"src/prc_decode_markup_tess.c"
+	"src/prc_tessellation_exact_geom.c"
+	)
 
 add_library(nano_prc SHARED ${PRC_CORE_SOURCES})
 

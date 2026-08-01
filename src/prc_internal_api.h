@@ -337,9 +337,7 @@ struct prc_api_object_style_s
    helper is called rather than by re-deriving the cast's intent each time.
    The caller is still responsible for knowing which interpretation applies
    at a given call site (usually via the tessellation/face type); these are
-   plain accessors, not a tagged union. prc_api_tess::reserved2 is a
-   separate, unrelated field (currently holding prc_internal_graph_style*,
-   always NULL in the current codebase) and is out of scope here. */
+   plain accessors, not a tagged union.  */
 static PRC_INLINE prc_internal_api_face *
 prc_tess_internal_face(const prc_api_tess *t)
 {

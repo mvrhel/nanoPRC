@@ -218,7 +218,6 @@ typedef struct prc_api_tess_s
     uint8_t is_material;
     prc_api_material tess_material;
     void *reserved;
-    void *reserved2;
     void *style_leaf;
 } prc_api_tess;
 
@@ -523,9 +522,10 @@ PRC_EXPORT int prc_api_initialize_tessellation(prc_context* ctx, prc_api_data da
  * @param modeltree Model tree root.
  * @param num_tess Output count of tessellations.
  * @param num_line_tess Output count of line tessellations.
+ * @param num_exact_geom_tess Output count of exact geometry tessellations.
  * @return 0 on success, negative PRC_API_ERROR_* code on failure.
  */
-PRC_EXPORT int prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data, prc_api_product *modeltree, uint32_t *num_tess, uint32_t *num_line_tess);
+PRC_EXPORT int prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data, prc_api_product *modeltree, uint32_t *num_tess, uint32_t *num_line_tess, uint32_t *num_exact_geom_tess);
 
 /**
  * @brief Return number of faces for a tessellation.
@@ -542,28 +542,38 @@ PRC_EXPORT uint32_t prc_api_get_number_faces(prc_context *ctx, prc_api_data data
  *
  * @param ctx Active API context.
  * @param data Data handle.
- * @param api_tree Model tree root.
  * @param tess_index Tessellation index.
  * @param face_index Face index in tessellation.
  * @param face_out Output face metadata.
  * @param tess_line Output line tessellation data.
  * @return 0 on success, negative PRC_API_ERROR_* code on failure.
  */
-PRC_EXPORT int prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data, prc_api_product *api_tree, uint32_t tess_index, uint32_t face_index, prc_api_face *face_out, prc_api_tess *tess_line);
+PRC_EXPORT int prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data, uint32_t tess_index, uint32_t face_index, prc_api_face *face_out, prc_api_tess *tess_line);
 
 /**
  * @brief Build tessellation vertices/primitives for one tessellation face.
  *
  * @param ctx Active API context.
  * @param data_in Data handle.
- * @param api_tree Model tree root.
  * @param tess_index Tessellation index.
  * @param face_index Face index in tessellation.
  * @param face_out Output face metadata.
  * @param api_tess Output tessellation data.
  * @return 0 on success, negative PRC_API_ERROR_* code on failure.
  */
-PRC_EXPORT int prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in, prc_api_product *api_tree, uint32_t tess_index, uint32_t face_index, prc_api_face *face_out, prc_api_tess *api_tess);
+PRC_EXPORT int prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in, uint32_t tess_index, uint32_t face_index, prc_api_face *face_out, prc_api_tess *api_tess);
+
+/**
+ * @brief Build tessellation vertices/primitives for exact geometry.
+ *
+ * @param ctx Active API context.
+ * @param data_in Data handle.
+ * @param api_tree Model tree root.
+ * @param tess_index Tessellation index.
+ * @param api_tess Output tessellation data.
+ * @return 0 on success, negative PRC_API_ERROR_* code on failure.
+ */
+PRC_EXPORT int prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data data_in, prc_api_product *api_tree, uint32_t tess_index, prc_api_tess *api_tess);
 
 /**
  * @brief Get one graphics primitive descriptor by index.

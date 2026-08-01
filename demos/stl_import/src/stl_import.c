@@ -2065,6 +2065,7 @@ stl_import_count_tessellations(prc_context *ctx, const char *path, uint32_t *out
     prc_api_data data;
     prc_api_product *model_tree = NULL;
     uint32_t num_parts, num_products, num_markups, num_line_tess;
+    uint32_t num_extra_geom_tess = 0;
     int code;
 
     data = prc_api_open_contents(ctx, path);
@@ -2078,7 +2079,7 @@ stl_import_count_tessellations(prc_context *ctx, const char *path, uint32_t *out
     if (code == 0)
         code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
     if (code == 0)
-        code = prc_api_get_number_tessellations(ctx, data, model_tree, out_num_tess, &num_line_tess);
+        code = prc_api_get_number_tessellations(ctx, data, model_tree, out_num_tess, &num_line_tess, &num_extra_geom_tess);
 
     prc_api_release_data(ctx, data, NULL, 0, NULL, 0, model_tree);
     if (code != 0)

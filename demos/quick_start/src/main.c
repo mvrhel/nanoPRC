@@ -31,6 +31,7 @@ int main(int argc, char *argv[])
     uint32_t num_vertices_print;
     uint32_t i, j;
     uint32_t totalTesselations, totalLineTesselations, k;
+    uint32_t num_extra_geom_tess = 0;
     uint8_t has_lines = 0;
     uint8_t vertics_printed = 0;
     uint32_t num_graphic_primitives;
@@ -96,7 +97,7 @@ int main(int argc, char *argv[])
        in the spec but Adobe does this) and we can have line data in the uncompressed
        tessellation */
     code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations,
-                                            &totalLineTesselations);
+                                            &totalLineTesselations, &num_extra_geom_tess);
     if (code < 0)
     {
         printf("prc_api_get_number_tessellations failed\n");
@@ -145,8 +146,7 @@ int main(int argc, char *argv[])
             tess->type == PRC_API_TESS_MarkUp)
         {
             /* 3D wire case and 3D markup cases */
-            code = prc_api_get_tessellation_vertices(ctx, data, model_tree,
-                k, 0, NULL, tess);
+            code = prc_api_get_tessellation_vertices(ctx, data, k, 0, NULL, tess);
             if (code < 0)
             {
                 printf("prc_api_get_tessallation_vertices failed\n");
@@ -157,8 +157,8 @@ int main(int argc, char *argv[])
         {
             for (j = 0; j < tess->num_faces; j++)
             {
-                code = prc_api_get_tessellation_vertices(ctx, data, model_tree,
-                    k, j, tess->tess_faces + j, tess);
+                code = prc_api_get_tessellation_vertices(ctx, data, k, j,
+                    tess->tess_faces + j, tess);
                 if (code < 0)
                 {
                     printf("prc_api_get_tessallation_vertices failed\n");

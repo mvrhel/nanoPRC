@@ -661,6 +661,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     char *model_name = NULL;
     prc_api_product *model_tree;
     uint32_t totalTesselations;
+    uint32_t totalExactGeomTess;
     uint32_t totalLineTesselations;
     int code;
     uint32_t j, k;
@@ -712,7 +713,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
        in the spec but Adobe does this) and we can have line data in the uncompressed
        tessellation */
     code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations,
-                                            &totalLineTesselations);
+                                            &totalLineTesselations, &totalExactGeomTess);
     if (code < 0)
     {
         printf("Scene::load: prc_api_get_number_tessellations failed\n");
@@ -720,6 +721,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     }
     prc_api_tess *tesses = new prc_api_tess[totalTesselations];
     prc_api_tess *tesses_line = NULL;
+    prc_api_tess *tesses_exact = NULL;
     uint32_t line_tess_index = 0;
 
     if (tesses == NULL)
@@ -794,8 +796,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
             tess.type == PRC_API_TESS_MarkUp)
         {
             /* 3D wire case and 3D markup cases */
-            code = prc_api_get_tessellation_vertices(ctx, data, model_tree,
-                                                k, 0, NULL, &tess);
+            code = prc_api_get_tessellation_vertices(ctx, data, k, 0, NULL, &tess);
             if (code < 0)
             {
                 printf("Scene::load: prc_api_get_tessallation_vertices failed\n");
@@ -806,9 +807,8 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
         {
             for (j = 0; j < tess.num_faces; j++)
             {
-                code = prc_api_get_tessellation_vertices(ctx, data, model_tree,
-                    k, j, tess.tess_faces + j,
-                    &tess);
+                code = prc_api_get_tessellation_vertices(ctx, data, k, j,
+                    tess.tess_faces + j, &tess);
                 if (code < 0)
                 {
                     printf("Scene::load: prc_api_get_tessallation_vertices failed\n");
@@ -827,9 +827,8 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
                have lines and some may not. */
             for (j = 0; j < tess.num_faces; j++)
             {
-                 code = prc_api_get_line_tessellation_vertices(ctx, data, model_tree,
-                                                    k, j, tess_line->tess_faces + j,
-                                                    tess_line);
+                 code = prc_api_get_line_tessellation_vertices(ctx, data, k, j,
+                     tess_line->tess_faces + j, tess_line);
                 if (code < 0)
                 {
                     printf("Scene::load: prc_api_get_line_tessallation_vertices failed\n");
@@ -837,6 +836,26 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
                 }
             }
             line_tess_index++;
+        }
+    }
+
+    /* Now deal with any of the exact geometry tessellations */
+    if (totalExactGeomTess > 0)
+    {
+        tesses_exact = new prc_api_tess[totalExactGeomTess];
+        if (tesses_exact == NULL)
+        {
+            printf("Scene::load: failed to allocate exact geometry tessellation array\n");
+            exit(1);
+        }
+        for (k = 0; k < totalExactGeomTess; k++)
+        {
+            code = prc_api_get_exact_geometry_tessellation_vertices(ctx, data, model_tree, k, &tesses_exact[k]);
+            if (code < 0)
+            {
+                printf("Scene::load: prc_api_get_exact_geometry_tessallation_vertices failed\n");
+                exit(1);
+            }
         }
     }
 
@@ -872,28 +891,10 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     _bbox_max[1] = max_bound.y;
     _bbox_max[2] = max_bound.z;
 
-    /* Lets get the camera views if we have any */
+    /* Lets get the camera views if we have any. Always add the viewer
+       default one in case all the other views are terrible */
     uint32_t num_views = prc_api_get_number_of_view(ctx, data);
-    if (num_views > 0)
-    {
-        double *matrix;
-        double camera_z;
-        char *name;
-
-        camera->setNumViews(num_views);
-        for (uint32_t i = 0; i < num_views; i++)
-        {
-            code = prc_api_get_view(ctx, data, i, &name, &matrix, &camera_z);
-            if (code < 0)
-            {
-                printf("Scene::load: prc_api_get_view failed\n");
-                exit(1);
-            }
-            camera->addView(matrix, camera_z, i, name);
-        }
-    }
-    else
-    {
+    auto addDefaultView = [&]() {
         /* Create a default view based on bounding box */
         Vector3 max = Vector3(_bbox_max[0], _bbox_max[1], _bbox_max[2]);
         Vector3 min = Vector3(_bbox_min[0], _bbox_min[1], _bbox_min[2]);
@@ -939,20 +940,43 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
 
         /* Build PRC camera matrix (column-major: 3x3 rotation + position) */
         double default_matrix[12] = {
-            R.columns[0].x, R.columns[0].y, R.columns[0].z,     // Column 0
-            R.columns[1].x, R.columns[1].y, R.columns[1].z,     // Column 1
-            R.columns[2].x, R.columns[2].y, R.columns[2].z,     // Column 2
-            position.x, position.y, position.z                   // Column 3
+            R.columns[0].x, R.columns[0].y, R.columns[0].z,
+            R.columns[1].x, R.columns[1].y, R.columns[1].z,
+            R.columns[2].x, R.columns[2].y, R.columns[2].z,
+            position.x, position.y, position.z
         };
 
         /* Center of orbit distance */
         double camera_z_orbit = distance;
+        char default_name[] = "viewer default";
 
-        char *default_name = new char[8];
-        strcpy(default_name, "default");
+        camera->addView(default_matrix, camera_z_orbit, static_cast<int>(num_views), default_name);
+    };
 
+    if (num_views > 0)
+    {
+        double *matrix;
+        double camera_z;
+        char *name;
+
+        camera->setNumViews(num_views + 1);
+        for (uint32_t i = 0; i < num_views; i++)
+        {
+            code = prc_api_get_view(ctx, data, i, &name, &matrix, &camera_z);
+            if (code < 0)
+            {
+                printf("Scene::load: prc_api_get_view failed\n");
+                exit(1);
+            }
+            camera->addView(matrix, camera_z, i, name);
+        }
+
+        addDefaultView();
+    }
+    else
+    {
         camera->setNumViews(1);
-        camera->addView(default_matrix, camera_z_orbit, 0, default_name);
+        addDefaultView();
     }
     /* Set the initial camera position based on bounding box */
    // setCameraInitialPosition(camera);

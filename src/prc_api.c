@@ -483,10 +483,6 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
             if (tess_in[k].tess_vertices.vertices != NULL)
                 prc_free(ctx, tess_in[k].tess_vertices.vertices);
         }
-        if (tess_in[k].reserved2 != NULL)
-        {
-            prc_free(ctx, tess_in[k].reserved2);
-        }
         if (tess_in[k].text_primitives != NULL)
         {
             prc_free(ctx, tess_in[k].text_primitives);
@@ -3554,7 +3550,7 @@ prc_api_helper(prc_context *ctx, prc_data *data_in, uint32_t file_index,
 PRC_EXPORT int
 prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                                  prc_api_product *model_tree, uint32_t *num_tess,
-                                 uint32_t *num_line_tess)
+                                 uint32_t *num_line_tess, uint32_t *num_exact_geom_tess)
 {
     prc_data *data = (prc_data *)data_in;
     uint32_t num_files;
@@ -3582,8 +3578,11 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
     prc_filestructure *file_struct;
     prc_tess *tess;
     prc_tesslation_t tess_type;
+    int code;
 
+    *num_exact_geom_tess = 0;
     *num_line_tess = 0;
+    *num_tess = 0;
 
     data->part_details = (tess_style_file_part *)prc_calloc(ctx, sizeof(tess_style_file_part), PARTS_DETAIL_INIT_SIZE);
     if (data->part_details == NULL)
@@ -3785,7 +3784,7 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
             }
         }
         /* Lets also go through the exact geometry data in the file and check
-           if we have any of that data for unassigned parts. If we have that
+           if we have any of that data for unassigned RIs. If we have that
            and not the tessellation data we will need to create tessellation
            data from the exact geometry */
         uint32_t top_context_count = data->file_struct[i].geometry->exact_geometry.topo_context_count;
@@ -3804,7 +3803,69 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                     part->biased_topo_contex_index == j + 1 && part->biased_body_index < num_bodies + 1 &&
                     part->biased_body_index != 0)
                 {
-                    int zz = 1; /* This is a RI that has no tessellation but has exact geometry. We will need to create tessellation data for this RI */
+                    /* This is a RI that has no tessellation but has exact geometry.
+                       We will need to create tessellation data for this RI */
+                    if (data->exact_geom_capacity <= data->exact_geom_tess_count)
+                    {
+                        uint32_t old_capacity = data->exact_geom_capacity;
+                        uint32_t new_capacity;
+                        size_t old_bytes;
+                        size_t new_bytes;
+
+                        if (data->exact_geom_capacity == 0)
+                        {
+                            data->exact_geom_capacity = 1;
+                        }
+                        if (data->exact_geom_capacity > (UINT32_MAX / 2u))
+                        {
+                            prc_error(ctx, PRC_ERROR_MEMORY, "exact_geom_capacity overflow in prc_api_get_number_tessellations\n");
+                            return PRC_ERROR_MEMORY;
+                        }
+                        data->exact_geom_capacity *= 2;
+                        new_capacity = data->exact_geom_capacity;
+
+                        if ((size_t)new_capacity > (SIZE_MAX / sizeof(prc_exact_geom_tess)))
+                        {
+                            prc_error(ctx, PRC_ERROR_MEMORY, "exact_geom_tess size overflow in prc_api_get_number_tessellations\n");
+                            return PRC_ERROR_MEMORY;
+                        }
+
+                        old_bytes = (size_t)old_capacity * sizeof(prc_exact_geom_tess);
+                        new_bytes = (size_t)new_capacity * sizeof(prc_exact_geom_tess);
+                        prc_exact_geom_tess *new_exact_geom_tess = (prc_exact_geom_tess *)prc_realloc(ctx,
+                            data->exact_geom_tess, new_bytes);
+                        if (new_exact_geom_tess == NULL)
+                        {
+                            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_get_number_tessellations\n");
+                            return PRC_ERROR_MEMORY;
+                        }
+                        data->exact_geom_tess = new_exact_geom_tess;
+
+                        /* Initialize only the newly added tail to zero. */
+                        memset(((unsigned char *)data->exact_geom_tess) + old_bytes,
+                            0, new_bytes - old_bytes);
+                    }
+                    data->exact_geom_tess[data->exact_geom_tess_count].biased_style_index = part->biased_style_index;
+                    data->exact_geom_tess[data->exact_geom_tess_count].file_index = i;
+                    data->exact_geom_tess[data->exact_geom_tess_count].topo_context_index = j;
+                    data->exact_geom_tess[data->exact_geom_tess_count].body_index = part->biased_body_index - 1;
+                    data->exact_geom_tess[data->exact_geom_tess_count].part_reserve_index = k;
+
+                    /* Now approximate the exact geometry */
+                    code = prc_approximate_exact_geom(ctx, data);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Failed in prc_approximate_exact_geom\n");
+                        return code;
+                    }
+
+                    if (data->exact_geom_tess[data->exact_geom_tess_count].type == PRC_EXACT_GEOM_WIRE ||
+                        data->exact_geom_tess[data->exact_geom_tess_count].type == PRC_EXACT_GEOM_3D)
+                    {
+                        ++(*num_exact_geom_tess);
+                    }
+
+                    data->exact_geom_tess_count++;
                 }
             }
         }
@@ -3975,7 +4036,6 @@ prc_api_initialize_tessellation(prc_context *ctx, prc_api_data data_in,
     api_tess->product_index = -1;
     api_tess->mark_up_index = -1;
     api_tess->reserved = NULL;
-    api_tess->reserved2 = NULL;
     api_tess->text_primitives = NULL;
 
     tessellation = &data->file_struct[file_index].tessellation->tess[tessellation_index];
@@ -4062,7 +4122,6 @@ prc_api_initialize_tessellation(prc_context *ctx, prc_api_data data_in,
             api_tess_line->product_index = -1;
             api_tess_line->mark_up_index = -1;
             api_tess_line->reserved = NULL;
-            api_tess_line->reserved2 = NULL;
             api_tess_line->text_primitives = NULL;
             reserve->parts[part_detail->part_reserve_index].tess_line = api_tess_line;
         }

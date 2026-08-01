@@ -81,6 +81,7 @@ int main(int argc, char **argv)
     prc_api_product *model_tree = NULL;
     uint32_t num_parts, num_products, num_markups;
     uint32_t totalTesselations, totalLineTesselations, j;
+    uint32_t num_extra_geom_tess;
     uint8_t has_lines = 0;
     int code;
     uint32_t target_index;
@@ -103,7 +104,7 @@ int main(int argc, char **argv)
     if (code < 0) { printf("prep_model_tree failed\n"); return 1; }
     code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
     if (code < 0) { printf("create_model_tree failed\n"); return 1; }
-    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations);
+    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations, &num_extra_geom_tess);
     if (code < 0) { printf("get_number_tessellations failed\n"); return 1; }
     if (target_index >= totalTesselations) { printf("tess_index %u out of range (total %u)\n", target_index, totalTesselations); return 1; }
 
@@ -119,7 +120,7 @@ int main(int argc, char **argv)
         return 1;
     }
     for (j = 0; j < tess.num_faces; j++)
-        prc_api_get_tessellation_vertices(ctx, data, model_tree, target_index, j, tess.tess_faces + j, &tess);
+        prc_api_get_tessellation_vertices(ctx, data, target_index, j, tess.tess_faces + j, &tess);
 
     if (tess.type == PRC_API_TESS_3D_Compressed)
     {

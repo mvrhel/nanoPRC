@@ -735,12 +735,14 @@ public:
     Document& operator=(const Document&) = delete;
 
     Document(Document&& other) noexcept
-        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_) {
+        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_), num_exact_geom_tessellations_(other.num_exact_geom_tessellations_), exact_geom_offset_(other.exact_geom_offset_) {
         other.data_ = nullptr;
         other.model_tree_ = nullptr;
         other.tessellation_initialized_ = false;
         other.num_tessellations_ = 0;
         other.num_line_tessellations_ = 0;
+        other.num_exact_geom_tessellations_ = 0;
+        other.exact_geom_offset_ = 0;
     }
 
     Document& operator=(Document&& other) noexcept {
@@ -769,11 +771,15 @@ public:
             tessellation_initialized_ = other.tessellation_initialized_;
             num_tessellations_ = other.num_tessellations_;
             num_line_tessellations_ = other.num_line_tessellations_;
+            num_exact_geom_tessellations_ = other.num_exact_geom_tessellations_;
+            exact_geom_offset_ = other.exact_geom_offset_;
             other.data_ = nullptr;
             other.model_tree_ = nullptr;
             other.tessellation_initialized_ = false;
             other.num_tessellations_ = 0;
             other.num_line_tessellations_ = 0;
+            other.num_exact_geom_tessellations_ = 0;
+            other.exact_geom_offset_ = 0;
         }
         return *this;
     }
@@ -853,6 +859,11 @@ public:
         return py::make_tuple(num_tessellations_, num_line_tessellations_);
     }
 
+    uint32_t exact_geometry_tessellation_count() {
+        initialize_tessellations();
+        return num_exact_geom_tessellations_;
+    }
+
     uint32_t number_of_faces(uint32_t tess_index) {
         initialize_tessellations();
         const prc_api_tess& tess = get_tessellation(tess_index);
@@ -919,6 +930,17 @@ public:
         result["part_index"] = py::int_(tess.part_index);
         result["product_index"] = py::int_(tess.product_index);
         result["mark_up_index"] = py::int_(tess.mark_up_index);
+        return result;
+    }
+
+    py::dict exact_geometry_tessellation_info(uint32_t exact_tess_index) {
+        initialize_tessellations();
+        const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
+
+        py::dict result;
+        result["index"] = py::int_(exact_tess_index);
+        result["type"] = py::int_(static_cast<int>(tess.type));
+        result["vertex_count"] = py::int_(static_cast<uint32_t>(tess.tess_vertices.num_vertices));
         return result;
     }
 
@@ -1053,6 +1075,23 @@ public:
         return result;
     }
 
+    uint32_t exact_geometry_vertex_count(uint32_t exact_tess_index) {
+        initialize_tessellations();
+        const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
+        return static_cast<uint32_t>(tess.tess_vertices.num_vertices);
+    }
+
+    py::array exact_geometry_vertex_positions(uint32_t exact_tess_index) {
+        initialize_tessellations();
+        const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
+        py::object owner = py::cast(shared_from_this());
+        return make_float_array_from_vertex_field(
+            tess.tess_vertices,
+            tess.tess_vertices.vertices ? tess.tess_vertices.vertices[0].position : nullptr,
+            3,
+            owner);
+    }
+
 private:
     void initialize_tessellations() {
         if (tessellation_initialized_) {
@@ -1065,14 +1104,18 @@ private:
 
         uint32_t num_tess = 0;
         uint32_t num_line_tess = 0;
-        int result = prc_api_get_number_tessellations(owner_->raw(), data_, model_tree_, &num_tess, &num_line_tess);
+        uint32_t num_exact_geom_tess = 0;
+        int result = prc_api_get_number_tessellations(owner_->raw(), data_, model_tree_, &num_tess, &num_line_tess, &num_exact_geom_tess);
         if (result != 0) {
             throw std::runtime_error("prc_api_get_number_tessellations failed");
         }
 
         num_tessellations_ = num_tess;
         num_line_tessellations_ = num_line_tess;
-        tessellations_.assign(num_tessellations_, prc_api_tess{});
+        num_exact_geom_tessellations_ = num_exact_geom_tess;
+        exact_geom_offset_ = num_tessellations_;
+
+        tessellations_.assign(num_tessellations_ + num_exact_geom_tessellations_, prc_api_tess{});
         line_tessellations_.assign(num_line_tessellations_, prc_api_tess{});
         tess_faces_storage_.clear();
         tess_faces_storage_.reserve(num_tessellations_);
@@ -1113,7 +1156,7 @@ private:
                 line_tessellations_[line_tess_index].tess_faces = line_tess_faces_storage_.back().data();
 
                 for (uint32_t face_index = 0; face_index < faces; ++face_index) {
-                    code = prc_api_get_line_tessellation_vertices(owner_->raw(), data_, model_tree_, tess_index, face_index,
+                    code = prc_api_get_line_tessellation_vertices(owner_->raw(), data_, tess_index, face_index,
                         &line_tessellations_[line_tess_index].tess_faces[face_index], &line_tessellations_[line_tess_index]);
                     if (code != 0) {
                         throw std::runtime_error("prc_api_get_line_tessellation_vertices failed");
@@ -1124,18 +1167,31 @@ private:
             }
 
             if (tessellations_[tess_index].type == PRC_API_TESS_3D_Wire || tessellations_[tess_index].type == PRC_API_TESS_MarkUp) {
-                code = prc_api_get_tessellation_vertices(owner_->raw(), data_, model_tree_, tess_index, 0, nullptr, &tessellations_[tess_index]);
+                code = prc_api_get_tessellation_vertices(owner_->raw(), data_, tess_index, 0, nullptr, &tessellations_[tess_index]);
                 if (code != 0) {
                     throw std::runtime_error("prc_api_get_tessellation_vertices failed");
                 }
             } else {
                 for (uint32_t face_index = 0; face_index < faces; ++face_index) {
-                    code = prc_api_get_tessellation_vertices(owner_->raw(), data_, model_tree_, tess_index, face_index,
+                    code = prc_api_get_tessellation_vertices(owner_->raw(), data_, tess_index, face_index,
                         &tessellations_[tess_index].tess_faces[face_index], &tessellations_[tess_index]);
                     if (code != 0) {
                         throw std::runtime_error("prc_api_get_tessellation_vertices failed");
                     }
                 }
+            }
+        }
+
+        for (uint32_t exact_tess_index = 0; exact_tess_index < num_exact_geom_tessellations_; ++exact_tess_index) {
+            uint32_t storage_index = exact_geom_offset_ + exact_tess_index;
+            int code = prc_api_get_exact_geometry_tessellation_vertices(
+                owner_->raw(),
+                data_,
+                model_tree_,
+                exact_tess_index,
+                &tessellations_[storage_index]);
+            if (code != 0) {
+                throw std::runtime_error("prc_api_get_exact_geometry_tessellation_vertices failed");
             }
         }
 
@@ -1147,6 +1203,13 @@ private:
             throw std::out_of_range("Tessellation index out of range");
         }
         return tessellations_[tess_index];
+    }
+
+    const prc_api_tess& get_exact_geometry_tessellation(uint32_t exact_tess_index) const {
+        if (exact_tess_index >= num_exact_geom_tessellations_) {
+            throw std::out_of_range("Exact geometry tessellation index out of range");
+        }
+        return tessellations_[exact_geom_offset_ + exact_tess_index];
     }
 
     const prc_api_face& get_face(const prc_api_tess& tess, uint32_t face_index) const {
@@ -1171,6 +1234,8 @@ private:
     bool tessellation_initialized_ = false;
     uint32_t num_tessellations_ = 0;
     uint32_t num_line_tessellations_ = 0;
+    uint32_t num_exact_geom_tessellations_ = 0;
+    uint32_t exact_geom_offset_ = 0;
 };
 
 std::shared_ptr<Document> context_open(const std::shared_ptr<Context>& ctx, const std::string& infile) {
@@ -1249,6 +1314,8 @@ PYBIND11_MODULE(_core, m) {
              "Create the model tree and return its root node.")
         .def("tessellation_counts", &Document::tessellation_counts,
              "Return a tuple (num_tess, num_line_tess) after the model tree exists.")
+           .def("exact_geometry_tessellation_count", &Document::exact_geometry_tessellation_count,
+               "Return the number of exact-geometry tessellations.")
         .def("number_of_faces", &Document::number_of_faces, py::arg("tess_index"),
              "Return the number of faces in a tessellation.")
         .def("tessellation_vertex_count", &Document::tessellation_vertex_count, py::arg("tess_index"),
@@ -1263,6 +1330,12 @@ PYBIND11_MODULE(_core, m) {
              "Return a zero-copy (n,2) float array of tessellation vertex UV coordinates.")
            .def("tessellation_info", &Document::tessellation_info, py::arg("tess_index"),
                "Return metadata for one tessellation (name and source indices).")
+       .def("exact_geometry_tessellation_info", &Document::exact_geometry_tessellation_info, py::arg("exact_tess_index"),
+           "Return metadata for one exact-geometry tessellation.")
+       .def("exact_geometry_vertex_count", &Document::exact_geometry_vertex_count, py::arg("exact_tess_index"),
+           "Return the number of vertices in one exact-geometry tessellation.")
+       .def("exact_geometry_vertex_positions", &Document::exact_geometry_vertex_positions, py::arg("exact_tess_index"),
+           "Return a zero-copy (n,3) float array of exact-geometry vertex positions.")
         .def("face_vertex_count", &Document::face_vertex_count,
              py::arg("tess_index"), py::arg("face_index"),
              "Return the number of vertices in a tessellation face.")
