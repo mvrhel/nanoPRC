@@ -2687,15 +2687,34 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             In any event we need to look at the reference point array and determine
             which of the three we have to deal with */
 
-            /* We may need to revisit this and its interaction with the code below it */
-            code = prc_handle_empty_stack_decode(ctx, data, point_array_scaled,
-                    vertices_out, &treated_tri, &point_array_count,
-                    &reference_array_count, &vertex_treatment_count,
-                    &points_is_reference_index);
-            if (code < 0)
+            /* DIAGNOSTIC (2026-08-02, PRC_DIAG_CHAIN_BOUNDARIES): the stack going
+               empty here is exactly a new traversal chain starting (a fresh seed
+               triangle, per ISO 14739 7.8.9.2) -- added to measure chain count and
+               per-chain point_array-entry counts (how many of point_array's
+               entries are chain-start V0/V1/V2 vs grow-step) for an RG-vs-nanoPRC
+               chain-structure comparison, motivated by RG's point_array staying
+               under 18 bits where nanoPRC reaches 23 on identical geometry. Reads
+               point_array_count on both sides of the call (prc_handle_empty_stack_
+               decode advances it by 1-3 depending on which of the three reference
+               cases above is hit) so a chain's point-count is derivable without
+               touching that function itself. Zero behavior change when unset. */
             {
-                prc_error(ctx, code, "Failed in prc_handle_empty_stack_decode\n");
-                goto cleanup;
+                uint8_t diag_chains = (getenv("PRC_DIAG_CHAIN_BOUNDARIES") != NULL);
+                uint32_t before_count = diag_chains ? point_array_count : 0;
+
+                /* We may need to revisit this and its interaction with the code below it */
+                code = prc_handle_empty_stack_decode(ctx, data, point_array_scaled,
+                        vertices_out, &treated_tri, &point_array_count,
+                        &reference_array_count, &vertex_treatment_count,
+                        &points_is_reference_index);
+                if (code < 0)
+                {
+                    prc_error(ctx, code, "Failed in prc_handle_empty_stack_decode\n");
+                    goto cleanup;
+                }
+                if (diag_chains)
+                    fprintf(stderr, "PRC_DIAG_CHAIN_BOUNDARIES: chain_start_point_index=%u chain_start_points_consumed=%u\n",
+                        before_count, point_array_count - before_count);
             }
 			stack_was_empty = 1;
         }
