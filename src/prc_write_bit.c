@@ -1410,7 +1410,7 @@ cleanup:
    write facility's prc_bitwrite_int_variable_bit already implements that
    packing correctly; only the LENGTH this function computes (fed in as
    bit_lengths[k], i.e. uBitNumber) was wrong. */
-/* DIAGNOSTIC (2026-07-26, PRC_DIAG_NATURAL_BITWIDTH): SS9.8
+/* INVESTIGATED (2026-07-26 through 2026-08-02): SS9.8
    "WriteCompressedIntegerArray" (point_array's own array type) computes its
    per-entry bit length via `GetNumberOfBitsUsedToStoreInteger(piArray[u])`
    applied directly to the signed value -- no visible extra +1 in the spec's
@@ -1418,19 +1418,47 @@ cleanup:
    array type, for delta-encoded indices), which explicitly computes
    `GetNumberOfBitsUsedToStoreUnsignedInteger(abs(v))+1`. prc_int32_bit_
    width_signed below implements SS9.9's formula (correct for indices, and
-   for max_code_length elsewhere in this file) but point_array
-   (prc_bitwrite_compressed_integer_array) also calls it -- possibly the
-   wrong spec section's formula for that specific array type, off by
-   exactly 1 bit whenever the magnitude isn't an exact power of two. This
-   diagnostic swaps point_array's bit-length computation to the "natural"
-   convention (1 sign bit + prc_bit_width_u32(magnitude), no extra +1) to
-   test that hypothesis without touching indices/max_code_length. Zero
-   behavior change when unset. */
+   for max_code_length elsewhere in this file); point_array
+   (prc_bitwrite_compressed_integer_array) was also calling it, wasting
+   exactly 1 bit per entry whenever the magnitude isn't an exact power of
+   two, relative to this "natural" convention -- confirmed decode-safe
+   against nanoPRC's own reader (byte-identical full decode on a real STL
+   round-trip) because prc_bitread_compressed_integer_array takes each
+   entry's bit length straight off the wire's own per-entry table rather
+   than recomputing it. BUT: briefly made the default and then reverted
+   after real Acrobat testing broke on Walnut_Viewport3_PDF3D and
+   QCD_Leinweber (both previously Acrobat-confirmed working via this exact
+   compressed path) while UK_original (routed through the unrelated
+   uncompressed fallback that run) stayed unaffected -- a clean isolation.
+   Leading hypothesis: this convention lets magnitude==0 produce
+   bit_length==1, a value that can never occur under
+   prc_int32_bit_width_signed (whose minimum is 2), so it's a wire pattern
+   with zero prior Acrobat-tested history in this Huffman-compressed
+   bit-length table -- confirmed present (331 of 562899 point_array entries
+   in the Walnut regression file). prc_int32_bit_width_signed_natural below
+   is kept as the raw (unclamped) convention for reference; see the
+   _clamped variant below it for the current candidate, which restores the
+   floor of 2 to stay inside previously-tested wire-pattern space while
+   still saving 1 bit for every magnitude >= 1 (i.e. every case except the
+   one just implicated). Not yet confirmed on real Acrobat. */
 static uint32_t
 prc_int32_bit_width_signed_natural(int32_t v)
 {
     uint32_t magnitude = (v < 0) ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
     return 1 + prc_bit_width_u32(magnitude);
+}
+
+/* Candidate fix for point_array (see the INVESTIGATED comment above):
+   prc_int32_bit_width_signed_natural, but with a floor of 2 so
+   magnitude==0 still yields bit_length==2 exactly as
+   prc_int32_bit_width_signed does -- the one wire value confirmed to have
+   broken real Acrobat when allowed to drop to 1. Every magnitude >= 1
+   still saves the 1 bit prc_int32_bit_width_signed was wasting. */
+static uint32_t
+prc_int32_bit_width_signed_natural_clamped(int32_t v)
+{
+    uint32_t width = prc_int32_bit_width_signed_natural(v);
+    return (width < 2) ? 2 : width;
 }
 
 static uint32_t
@@ -1653,16 +1681,28 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_bitwrite_compressed_integer_array\n");
         return -1;
     }
-    if (getenv("PRC_DIAG_NATURAL_BITWIDTH") != NULL)
-    {
-        for (k = 0; k < data_size; k++)
-            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed_natural(data[k]);
-    }
-    else
-    {
-        for (k = 0; k < data_size; k++)
-            bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
-    }
+    /* REVERTED AGAIN (2026-08-02): the clamped-to-2 variant (see
+       prc_int32_bit_width_signed_natural_clamped and the INVESTIGATED
+       comment above prc_int32_bit_width_signed_natural) was tried next --
+       it provably eliminates every bit_length==1 occurrence (confirmed via
+       PRC_DIAG_POINT_ARRAY_BITPOS: Walnut's distribution floor moved back
+       to 2, matching the old formula exactly) -- and STILL broke Walnut on
+       real Acrobat. That falsifies the "bit_length==1 is the trigger"
+       hypothesis: the problem is not that one new value, it's something
+       about shifting point_array's bit-length distribution at all, most
+       likely by perturbing the Huffman-compressed bit_lengths table this
+       array is written through (prc_bitwrite_character_array ->
+       prc_bitwrite_huffman_block) -- an area this codebase has already
+       found fragile once before (the 2026-07-10 max_code_length bug on
+       this exact table, and the separate, never-fully-root-caused
+       mixed_chains Huffman-tie-break investigation). Reverted to
+       prc_int32_bit_width_signed (the original, real-Acrobat-safe formula)
+       again. Do not retry a bit-length change here without first diffing
+       the actual Huffman leaf/code tables this table produces between a
+       working and a broken file -- guessing further point-value variants
+       has now failed twice. */
+    for (k = 0; k < data_size; k++)
+        bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
 
     /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITLENGTHS): dumps each
        value alongside its computed bit length, added while checking whether
