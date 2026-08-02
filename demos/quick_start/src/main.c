@@ -189,7 +189,20 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            if (tess->type == PRC_API_TESS_3D)
+            if (tess->num_faces == 0)
+            {
+                /* tess->tess_faces[face_index] below is only valid when the
+                   tessellation actually has faces -- calloc(0, ...) at
+                   allocation time means indexing it here is a heap-buffer-
+                   overflow (found via ASan on a real prc-db corpus file,
+                   D110T_3D.stream-58.prc, whose 3D tessellations include at
+                   least one with zero faces). face is reset to NULL so the
+                   graphic-primitives block below doesn't see a stale
+                   pointer left over from a previous loop iteration. */
+                face = NULL;
+                printf("Tessellation %d has no faces. Skipping vertex printout.\n", i);
+            }
+            else if (tess->type == PRC_API_TESS_3D)
             {
                 /* In this structure we have different faces.  Here we just will
                    do face 0 */
@@ -236,6 +249,7 @@ int main(int argc, char *argv[])
             }
             else
             {
+                face = NULL;
                 printf("Tessellation %d is not a 3D type. Skipping vertex printout.\n", i);
             }
 
