@@ -2156,7 +2156,12 @@ prc_api_helper_get_material_from_style_index(prc_context *ctx, prc_api_data data
                 {
                     /* Use the generic material */
                     int32_t material_index = graph_style.biased_color_index - 1;
-                    prc_graph_material graph_material = global_data->materials[material_index];
+                    prc_graph_material graph_material;
+                    if (material_index < 0 || material_index >= (int32_t)global_data->material_count)
+                    {
+                        return PRC_ERROR_PARSE;
+                    }
+                    graph_material = global_data->materials[material_index];
                     material_index = graph_material.biased_material_generic_index - 1;
 
                     /* This is the surface materials case */
@@ -2216,6 +2221,10 @@ prc_api_helper_get_material_from_style_index(prc_context *ctx, prc_api_data data
             {
                 /* We don't know yet if it is something with material properties
                    or has a texture. We have to dig deeper. Get the material */
+                if (color_index_unbiased < 0 || color_index_unbiased >= (int32_t)global_data->material_count)
+                {
+                    return PRC_ERROR_PARSE;
+                }
                 prc_material = global_data->materials[color_index_unbiased];
                 if (prc_material.biased_texture_definition_index > 0)
                 {
