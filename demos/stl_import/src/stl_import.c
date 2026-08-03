@@ -75,6 +75,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <ctype.h>
+#include <prc_diag_env.h>
 
 /* Minimal, single-block-only MD5 (RFC 1321), duplicated from src/prc_write_compress_tess.c's
    own (private/static) copy -- see that copy's comment for why this exists (replicating an
@@ -1360,7 +1361,7 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
                unaffected; kept as a diagnostic in case a narrower
                investigation wants it later. */
             double effective_fraction = weld_tolerance_fraction;
-            if (getenv("PRC_DIAG_HALVE_LUMPED_TOLERANCE") != NULL)
+            if (prc_diag_getenv("PRC_DIAG_HALVE_LUMPED_TOLERANCE") != NULL)
                 effective_fraction *= 0.5;
             tess->tolerance = prc_write_tol_relative(effective_fraction);
         }
@@ -1396,7 +1397,7 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
            risk for a confirmed one. Restricting to check_nonmanifold
            keeps the >100-threshold lump's previously-validated behavior
            completely untouched. */
-        if (check_nonmanifold && getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
+        if (check_nonmanifold && prc_diag_getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
             nonmanifold_check_ctx != NULL && prc_api_mesh_has_nonmanifold_fans(nonmanifold_check_ctx,
                 combined_positions, num_welded, combined_tri_indices, mesh->num_triangles, tess->tolerance) > 0)
         {
@@ -1440,8 +1441,8 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
             if (tess->kind == PRC_API_WRITE_TESS_KIND_TRIANGLES)
                 tess->must_calculate_normals = 1;
             tess->crease_angle_degrees = 30.0;
-            if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
-                tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
+            if (prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
+                tess->crease_angle_degrees = atof(prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
         }
     }
 
@@ -1551,7 +1552,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
 
     {
         uint32_t lump_threshold = STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD;
-        const char *ov = getenv("PRC_DIAG_LUMP_THRESHOLD");
+        const char *ov = prc_diag_getenv("PRC_DIAG_LUMP_THRESHOLD");
         uint8_t force_lump = 0;
         /* MITIGATION (2026-07-26, mixed_chains/UK_original.stl Acrobat blank-tree
            investigation): a real, reproducible Acrobat defect blanks the model tree for specific
@@ -1816,7 +1817,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                component keeps COMPRESSED's size win for the (overwhelming
                majority of) components that don't hit this, at the cost of
                larger output for the rare component that does. */
-            if (getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
+            if (prc_diag_getenv("PRC_DIAG_DISABLE_NONMANIFOLD_FALLBACK") == NULL &&
                 nonmanifold_check_ctx != NULL && prc_api_mesh_has_nonmanifold_fans(nonmanifold_check_ctx,
                     local_positions, local_vertex_count, local_tri_indices, tri_count, comp_tolerance) > 0)
             {
@@ -1846,7 +1847,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                    PRC_DIAG_EXPAND_TRIANGLES so the default behavior above
                    (still deduplicated) is unaffected until this is proven
                    causal. Zero behavior change when unset. */
-                if (getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
+                if (prc_diag_getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
                 {
                     uint32_t exp_count = tri_count * 3;
                     double *exp_positions = (double *)malloc(sizeof(double) * 3 * exp_count);
@@ -1889,8 +1890,8 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                     tess->norm_indices = NULL;
                     tess->must_calculate_normals = 1;
                     tess->crease_angle_degrees = 30.0;
-                    if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
-                        tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
+                    if (prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
+                        tess->crease_angle_degrees = atof(prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
                 }
                 goto tess_entry_done;
             }
@@ -1914,8 +1915,8 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                 tess->num_normals = 0;
                 tess->norm_indices = NULL;
                 tess->crease_angle_degrees = 30.0;
-                if (getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
-                    tess->crease_angle_degrees = atof(getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
+                if (prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES") != NULL)
+                    tess->crease_angle_degrees = atof(prc_diag_getenv("PRC_DIAG_CREASE_ANGLE_DEGREES"));
             }
 tess_entry_done:;
         }
@@ -2217,11 +2218,11 @@ main(int argc, char *argv[])
        narrow down the responsible triangles. Diagnostic only; not for
        production use (arbitrarily truncating a real mesh this way
        produces an open/non-representative sub-mesh). */
-    if (getenv("PRC_DIAG_TRI_RANGE") != NULL)
+    if (prc_diag_getenv("PRC_DIAG_TRI_RANGE") != NULL)
     {
         char spec[128];
         uint32_t start, end;
-        strncpy(spec, getenv("PRC_DIAG_TRI_RANGE"), sizeof(spec) - 1);
+        strncpy(spec, prc_diag_getenv("PRC_DIAG_TRI_RANGE"), sizeof(spec) - 1);
         spec[sizeof(spec) - 1] = '\0';
         if (sscanf(spec, "%u,%u", &start, &end) == 2 && start < end && end <= mesh.num_triangles)
         {
@@ -2310,8 +2311,8 @@ main(int argc, char *argv[])
        automatic magnitude (absolute units) for testing; PRC_DIAG_DISABLE_PREWELD_JITTER
        disables this mitigation entirely. */
     {
-        uint8_t preweld_disabled = (getenv("PRC_DIAG_DISABLE_PREWELD_JITTER") != NULL);
-        const char *preweld_env = getenv("PRC_DIAG_PREWELD_JITTER_MAG");
+        uint8_t preweld_disabled = (prc_diag_getenv("PRC_DIAG_DISABLE_PREWELD_JITTER") != NULL);
+        const char *preweld_env = prc_diag_getenv("PRC_DIAG_PREWELD_JITTER_MAG");
         if (!preweld_disabled)
         {
             double mag = (preweld_env != NULL) ? atof(preweld_env) : (weld_tolerance_fraction * diagonal * 8.65969267656085);
@@ -2343,7 +2344,7 @@ main(int argc, char *argv[])
                 pv[0] = (double)(float)pv[0];
                 pv[1] = (double)(float)pv[1];
                 pv[2] = (double)(float)pv[2];
-                if (vi == 0 && getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
+                if (vi == 0 && prc_diag_getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
                     fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
                         (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
             }
@@ -2424,7 +2425,7 @@ main(int argc, char *argv[])
        now-compacted triangle list) -- rejected outright rather than
        silently producing wrong normals. */
     {
-        const char *diag_component_filter = getenv("PRC_DIAG_COMPONENT_FILTER");
+        const char *diag_component_filter = prc_diag_getenv("PRC_DIAG_COMPONENT_FILTER");
         if (diag_component_filter != NULL)
         {
             uint8_t *keep;
@@ -2479,7 +2480,7 @@ main(int argc, char *argv[])
                    back to a real raw STL facet index, e.g. for building a
                    precise (not reconstructed-from-rounded-text) minimal
                    repro via PRC_DIAG_TRI_RANGE on just that facet. */
-                if (getenv("PRC_DIAG_DUMP_TRIANGLE_MAP") != NULL)
+                if (prc_diag_getenv("PRC_DIAG_DUMP_TRIANGLE_MAP") != NULL)
                     printf("PRC_DIAG_TRIANGLE_MAP: filtered_index=%u raw_facet_index=%u\n",
                         (unsigned)kept_triangles, (unsigned)t);
                 kept_triangles++;

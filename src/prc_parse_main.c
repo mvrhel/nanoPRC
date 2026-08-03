@@ -22,6 +22,7 @@
 #include "prc_parse_common.h"
 #include "prc_parse_extra_geometry.h"
 #include "prc_parse_tess.h"
+#include "prc_diag_env.h"
 
 #include "prc_bit.h"
 #include "zlib.h"
@@ -102,7 +103,7 @@ static uint32_t
 prc_fuzz_read_env_u32(const char *env_name, uint32_t default_value, uint32_t min_value,
                       uint32_t max_value)
 {
-    const char *text = getenv(env_name);
+    const char *text = prc_diag_getenv(env_name);
     unsigned long parsed;
     char *endptr;
 
@@ -179,7 +180,7 @@ static uint32_t
 prc_fuzz_read_section_mask(void)
 {
     uint32_t mask_override;
-    const char *text = getenv("PRC_FUZZ_SECTION");
+    const char *text = prc_diag_getenv("PRC_FUZZ_SECTION");
     char buffer[256];
     char *token;
     uint32_t mask = 0u;
@@ -229,7 +230,7 @@ prc_fuzz_should_mutate(uint32_t section_mask, uint32_t section_bit)
 static const char*
 prc_fuzz_log_path(void)
 {
-    const char *path = getenv("PRC_FUZZ_LOG");
+    const char *path = prc_diag_getenv("PRC_FUZZ_LOG");
     if (path == NULL || *path == '\0')
     {
         return "prc_unzipped_fuzz.log";

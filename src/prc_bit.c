@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "prc_diag_env.h"
 #include "prc_data.h"
 #include "prc_bit.h"
 #include "prc_double.h"
@@ -657,7 +658,7 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
        against an independent encoder's file that hits the same superficial
        "22-bit value + tie among other leaves" condition yet works in real
        Acrobat. Zero behavior change when unset. */
-    if (getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
+    if (prc_diag_getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
     {
         fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE: num_bits=%u max_code_length=%u num_leaves=%u\n",
             num_bits, max_code_length, num_leaves);
@@ -1004,7 +1005,7 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
                is prc_bitread_character_array's own separate inline copy of
                the same leaf-reading loop (used for point_array's bit-length
                table among others), which needed its own copy of the dump. */
-            if (getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
+            if (prc_diag_getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
             {
                 fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE(char_array): num_bits=%u max_code_length=%u num_leaves=%u\n",
                     num_bits, max_code_length, num_leaves);
@@ -1394,7 +1395,7 @@ prc_bitread_compressed_integer_array(prc_context *ctx, prc_bit_state *state, uin
     /* Now get the integers of variable lengths */
    // DEBUG_LOG("prc_bitread_compressed_integer_array\n");
     {
-        uint8_t diag_bitpos = (getenv("PRC_DIAG_POINT_ARRAY_BITPOS") != NULL);
+        uint8_t diag_bitpos = (prc_diag_getenv("PRC_DIAG_POINT_ARRAY_BITPOS") != NULL);
         for (k = 0; k < size; k++)
         {
             /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITPOS): dumps the
