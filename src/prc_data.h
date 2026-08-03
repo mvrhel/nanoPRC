@@ -2740,6 +2740,7 @@ struct prc_crv_composite_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_unsigned_int number_of_subcurves;
@@ -2752,6 +2753,7 @@ struct prc_crv_onsurf_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double tolerance;
@@ -2777,6 +2779,7 @@ struct prc_crv_equation_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_interval interval;
@@ -2821,6 +2824,7 @@ struct prc_crv_helix01_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     uint8_t type;
@@ -2835,6 +2839,7 @@ struct prc_crv_hyperbola_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double semi_axis;
@@ -2895,6 +2900,7 @@ struct prc_crv_offset_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     prc_ptr_curve base_curve;
@@ -2907,6 +2913,7 @@ struct prc_crv_parabola_s
 {
     prc_unsigned_int tag;
     prc_content_curve curve_data;
+    uint8_t has_transform;
     prc_trans_3d transform;
     prc_parameterization parameterization;
     double focal_length;
@@ -3692,6 +3699,59 @@ typedef struct tess_style_file_markup_s
     uint32_t style_biased_index; /* The index of the style based for the markup. */
 } tess_style_file_markup;
 
+/* This section is for dealing with exact geometry data and creating tessellations
+   or wire descriptions that we can actually render. This is not in the spec. */
+
+/* The wire data which is just a series of 3D points */
+typedef struct prc_exact_geom_wire_data_s
+{
+    uint32_t number_of_points;
+    prc_vec3 *points;
+} prc_exact_geom_wire_data;
+
+/* The tessellation data which is going to be simple for now consisting of just
+   a position and a normal at each vertex */
+typedef struct prc_exact_geom_vertex_s
+{
+    float position[3];
+    float normal[3];
+} prc_exact_geom_vertex;
+
+typedef struct prc_exact_geom_tess_data_s
+{
+    uint32_t number_of_vertices;
+    prc_exact_geom_vertex *vertices;
+    uint32_t number_of_triangles;
+    uint32_t *triangles; /* Each triangle is 3 indices into the vertex array */
+} prc_exact_geom_tess_data;
+
+/* Enumerated type so we know if we have a curve or a surface/brep */
+typedef enum {
+    PRC_EXACT_GEOM_3D = 100,
+    PRC_EXACT_GEOM_WIRE,
+    PRC_EXACT_GEOM_UNKNOWN
+} prc_exact_geom_tess_t;
+
+/* This is used to create, store, and manage the tessellations of the exact
+   geometry data. All tesselllations will be uncompressed 3D triangle data
+   or if they are a curve they will just be simple line segments */
+typedef struct prc_exact_geom_tess_s
+{
+    prc_exact_geom_tess_t type;
+    uint32_t biased_style_index;
+    uint32_t file_index;
+    uint32_t style_index_biased;
+    uint32_t topo_context_index;
+    uint32_t body_index;
+    uint32_t part_reserve_index;
+    uint8_t has_matrix; /* Need to implement this... */
+    double matrix[16];
+    prc_exact_geom_wire_data *wire_data;
+    prc_exact_geom_tess_data *tess_data;
+} prc_exact_geom_tess;
+
+/* Done with exact geometry tessellation management */
+
 struct prc_data_s
 {
     prc_header *header;
@@ -3703,13 +3763,15 @@ struct prc_data_s
     tess_style_file_part *part_details;
     uint32_t unique_markup_count;
     tess_style_file_markup *markup_details;
+    uint32_t exact_geom_capacity;
+    uint32_t exact_geom_tess_count;
+    prc_exact_geom_tess *exact_geom_tess;
 };
 
 struct prc_triangle_s
 {
     size_t indices[3];
 };
-
 
 /* Data types returned by schema methods */
 struct prc_schema_read_s
@@ -3759,5 +3821,6 @@ struct prc_nano_brep_compressed_data_s
 
 prc_data* prc_open_contents(prc_context *ctx, const char *infile);
 void prc_release_data(prc_context *ctx, prc_data *data);
+int prc_approximate_exact_geom(prc_context *ctx, prc_api_data data_in);
 
 #endif

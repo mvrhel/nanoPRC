@@ -44,7 +44,7 @@ int main(int argc, char **argv)
     prc_api_data data;
     prc_api_product *model_tree = NULL;
     uint32_t num_parts = 0, num_products = 0, num_markups = 0;
-    uint32_t num_tess = 0, num_line_tess = 0;
+    uint32_t num_tess = 0, num_line_tess = 0, num_extra_geom_tess = 0;
     int code;
 
     if (argc < 2)
@@ -87,7 +87,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    code = prc_api_get_number_tessellations(ctx, data, model_tree, &num_tess, &num_line_tess);
+    code = prc_api_get_number_tessellations(ctx, data, model_tree, &num_tess, &num_line_tess, &num_extra_geom_tess);
     if (code != 0)
     {
         printf("RESULT\tGET_NUM_TESS_FAIL\tcode=%d\n", code);

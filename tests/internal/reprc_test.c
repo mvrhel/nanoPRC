@@ -84,7 +84,8 @@ int main(int argc, char **argv)
     if (prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups) != 0) { fprintf(stderr, "create failed\n"); return 1; }
 
     uint32_t total_tess = 0, total_line_tess = 0;
-    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess) != 0) { fprintf(stderr, "count failed\n"); return 1; }
+    uint32_t num_extra_geom_tess = 0;
+    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess) != 0) { fprintf(stderr, "count failed\n"); return 1; }
     printf("total_tess=%u\n", total_tess);
 
     /* Collect all triangles across all faces of tessellation 0 into flat
@@ -100,7 +101,7 @@ int main(int argc, char **argv)
     uint8_t has_lines = 0;
     if (prc_api_initialize_tessellation(ctx, data, model_tree, 0, &tess, NULL, &has_lines) != 0) { fprintf(stderr, "init tess failed\n"); return 1; }
     for (uint32_t j = 0; j < tess.num_faces; j++)
-        if (prc_api_get_tessellation_vertices(ctx, data, model_tree, 0, j, tess.tess_faces + j, &tess) != 0) { fprintf(stderr, "get verts failed\n"); return 1; }
+        if (prc_api_get_tessellation_vertices(ctx, data, 0, j, tess.tess_faces + j, &tess) != 0) { fprintf(stderr, "get verts failed\n"); return 1; }
 
     /* Count triangles across all graphic primitives (TRIANGLES/STRIP/FAN),
        same pattern as demos/stl_export.c. */

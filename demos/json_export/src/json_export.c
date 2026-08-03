@@ -272,12 +272,14 @@ static int tess_table_build(prc_context *ctx, prc_api_data data,
     uint32_t k;
     int code;
     uint8_t has_lines = 0;
+    uint32_t num_extra_geom_tess; /* Not part of spec */
 
     memset(table, 0, sizeof(*table));
 
     code = prc_api_get_number_tessellations(ctx, data, model_tree,
                                              &table->num_tess,
-                                             &table->num_line_tess);
+                                             &table->num_line_tess,
+                                             &num_extra_geom_tess);
     if (code < 0)
     {
         fprintf(stderr, "error: prc_api_get_number_tessellations failed (%d)\n", code);
@@ -334,7 +336,7 @@ static int tess_table_build(prc_context *ctx, prc_api_data data,
         {
             /* Wire / markup tessellations carry a single shared vertex
                buffer rather than per-face buffers. */
-            code = prc_api_get_tessellation_vertices(ctx, data, model_tree, k, 0, NULL, tess);
+            code = prc_api_get_tessellation_vertices(ctx, data, k, 0, NULL, tess);
             if (code < 0)
             {
                 fprintf(stderr, "error: prc_api_get_tessellation_vertices failed for index %u (%d)\n",
@@ -347,7 +349,7 @@ static int tess_table_build(prc_context *ctx, prc_api_data data,
             uint32_t f;
             for (f = 0; f < tess->num_faces; f++)
             {
-                code = prc_api_get_tessellation_vertices(ctx, data, model_tree, k, f,
+                code = prc_api_get_tessellation_vertices(ctx, data, k, f,
                                                           tess->tess_faces + f, tess);
                 if (code < 0)
                 {

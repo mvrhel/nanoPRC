@@ -837,6 +837,7 @@ int main(int argc, char *argv[])
             prc_api_product *model_tree = NULL;
             uint32_t num_parts, num_products, num_markups;
             uint32_t total_tess = 0, total_line_tess = 0;
+            uint32_t num_extra_geom_tess = 0;
 
             data = prc_api_open_contents(ctx, paths[p]);
             if (data == NULL)
@@ -851,7 +852,7 @@ int main(int argc, char *argv[])
             if (code == 0)
                 code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
             if (code == 0)
-                code = prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess);
+                code = prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess);
 
             if (code != 0)
             {

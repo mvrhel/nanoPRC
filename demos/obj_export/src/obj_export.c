@@ -271,6 +271,7 @@ int main(int argc, char *argv[])
 
     uint32_t num_parts = 0, num_products = 0, num_markups = 0;
     uint32_t total_tessellations = 0, total_line_tessellations = 0;
+    uint32_t num_extra_geom_tess = 0;
 
     uint32_t global_v_counter = 1;
     uint32_t global_vt_counter = 1;
@@ -308,7 +309,7 @@ int main(int argc, char *argv[])
     PRC_CHECK_RC(prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups),
                  "prc_api_create_model_tree node creation failed");
 
-    PRC_CHECK_RC(prc_api_get_number_tessellations(ctx, data, model_tree, &total_tessellations, &total_line_tessellations),
+    PRC_CHECK_RC(prc_api_get_number_tessellations(ctx, data, model_tree, &total_tessellations, &total_line_tessellations, &num_extra_geom_tess),
                  "prc_api_get_number_tessellations count retrieval failed");
 
     if (total_tessellations > 0)
@@ -347,7 +348,7 @@ int main(int argc, char *argv[])
 
         for (uint32_t j = 0; j < tess->num_faces; j++)
         {
-            PRC_CHECK_RC(prc_api_get_tessellation_vertices(ctx, data, model_tree, k, j, tess->tess_faces + j, tess),
+            PRC_CHECK_RC(prc_api_get_tessellation_vertices(ctx, data, k, j, tess->tess_faces + j, tess),
                          "prc_api_get_tessellation_vertices mapping lookup failure");
         }
     }

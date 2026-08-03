@@ -2831,6 +2831,36 @@ prc_release_file_struct(prc_context *ctx, prc_filestructure *file_struct)
     file_struct->extra_geometry = NULL;
 }
 
+static void
+prc_release_exact_geometry_tess(prc_context *ctx, prc_exact_geom_tess *tess)
+{
+    if (tess->tess_data != NULL)
+    {
+        if (tess->tess_data->triangles != NULL)
+        {
+            prc_free(ctx, tess->tess_data->triangles);
+            tess->tess_data->triangles = NULL;
+        }
+        if (tess->tess_data->vertices != NULL)
+        {
+            prc_free(ctx, tess->tess_data->vertices);
+            tess->tess_data->vertices = NULL;
+        }
+        prc_free(ctx, tess->tess_data);
+    }
+
+    if (tess->wire_data != NULL)
+    {
+        if (tess->wire_data->points != NULL)
+        {
+            prc_free(ctx, tess->wire_data->points);
+            tess->wire_data->points = NULL;
+        }
+        prc_free(ctx, tess->wire_data);
+        tess->wire_data = NULL;
+    }
+}
+
 /* The root release method */
 void
 prc_release_data(prc_context *ctx, prc_data *data)
@@ -2861,6 +2891,15 @@ prc_release_data(prc_context *ctx, prc_data *data)
             }
         }
         prc_free(ctx, data->views);
+    }
+
+    if (data->exact_geom_capacity > 0 && data->exact_geom_tess != NULL)
+    {
+        for (k = 0; k < data->exact_geom_capacity; k++)
+        {
+            prc_release_exact_geometry_tess(ctx, &data->exact_geom_tess[k]);
+        }
+        prc_free(ctx, data->exact_geom_tess);
     }
 
     prc_release_file_struct_schema(ctx);

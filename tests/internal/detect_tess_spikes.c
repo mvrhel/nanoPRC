@@ -77,6 +77,7 @@ int main(int argc, char **argv)
     prc_api_product *model_tree;
     uint32_t num_parts, num_products, num_markups;
     uint32_t totalTesselations, totalLineTesselations, k, j;
+    uint32_t num_extra_geom_tess;
     uint8_t has_lines = 0;
     int code;
     prc_api_tess *tesses;
@@ -107,7 +108,7 @@ int main(int argc, char **argv)
     code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
     if (code < 0) { printf("create_model_tree failed\n"); return 1; }
 
-    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations);
+    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations, &num_extra_geom_tess);
     if (code < 0) { printf("get_number_tessellations failed\n"); return 1; }
     printf("parts=%u products=%u markups=%u total tessellations=%u\n",
         num_parts, num_products, num_markups, totalTesselations);
@@ -130,7 +131,7 @@ int main(int argc, char **argv)
 
         for (j = 0; j < tess->num_faces; j++)
         {
-            code = prc_api_get_tessellation_vertices(ctx, data, model_tree, k, j, tess->tess_faces + j, tess);
+            code = prc_api_get_tessellation_vertices(ctx, data, k, j, tess->tess_faces + j, tess);
             if (code < 0) continue;
         }
 

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <float.h>
 #include "../include/prc_api.h"
 #include "prc_internal_api.h"
 #include "prc_internal_proto_api.h"
@@ -2013,7 +2014,7 @@ prc_api_helper_get_material_from_style_index(prc_context *ctx, prc_api_data data
     uint32_t file_index, uint32_t style_index, float alpha, uint8_t dont_allow_texture,
     uint8_t *is_material, uint8_t *is_texture, uint8_t *is_pure_color,
     prc_api_material *material, prc_internal_graph_style *style, float *color,
-    uint32_t face_index, uint32_t tess_index, uint8_t *had_defined_style)
+    uint8_t *had_defined_style)
 {
     prc_data *data = (prc_data *)data_in;
     prc_filestructure *file_struct;
@@ -2038,7 +2039,7 @@ prc_api_helper_get_material_from_style_index(prc_context *ctx, prc_api_data data
     style->face_style_file_index = file_index;
     style->face_style_index = style_index;
 
-    if (global_data->styles == NULL || style_index < 0 ||
+    if (global_data->styles == NULL ||
         file_index >= data->file_structure_count ||
         style_index >= data->file_struct[file_index].globals->global_data.style_count)
     {
@@ -2341,8 +2342,7 @@ prc_api_helper_get_face_style(prc_context *ctx, prc_api_data data_in,
     uint8_t dont_allow_texture, uint8_t *is_material, uint8_t *is_texture,
     uint8_t *is_pure_color, prc_api_material *material,
     prc_internal_graph_style *style, float *color, prc_api_tess *api_tess,
-    prc_api_face *face_out, uint32_t face_index, uint32_t tess_index,
-    uint8_t *had_defined_style)
+    prc_api_face *face_out,uint8_t *had_defined_style)
 {
     int32_t code;
     prc_data *data = (prc_data *)data_in;
@@ -2352,7 +2352,7 @@ prc_api_helper_get_face_style(prc_context *ctx, prc_api_data data_in,
     code = prc_api_helper_get_material_from_style_index(ctx, data_in,
         file_index, style_index, alpha, dont_allow_texture,
         is_material, is_texture, is_pure_color, material, style, color,
-        face_index, tess_index, had_defined_style);
+        had_defined_style);
     if (code < 0)
         return code;
 
@@ -2574,8 +2574,8 @@ prc_internal_api_set_vertex_texture_coords(prc_context *ctx,
    and that we create for the 3D compressed data */
 PRC_EXPORT int
 prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
-    prc_api_product *api_tree, uint32_t tess_index_in, uint32_t face_index,
-    prc_api_face *face_out, prc_api_tess *tess_line)
+    uint32_t tess_index_in, uint32_t face_index, prc_api_face *face_out,
+    prc_api_tess *tess_line)
 {
     prc_data *data = (prc_data *)data_in;
     prc_tesslation_t tess_type;
@@ -2975,11 +2975,221 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
     return 0;
 }
 
+PRC_EXPORT int
+prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
+    prc_api_product *api_tree, uint32_t tess_index_in, prc_api_tess *api_tess)
+{
+    prc_data *data = (prc_data *)data_in;
+    prc_exact_geom_tess_t tess_type;
+    float *vertex_colors = NULL;
+    prc_internal_api_wire *wire = NULL;
+    int code = 0;
+    uint32_t k;
+    prc_api_child_reserve *reserve;
+    uint32_t biased_style_index = 0;
+    uint32_t file_index = 0;
+    float alpha = 1.0f;
+    uint8_t is_material = 0;
+    uint8_t is_texture = 0;
+    uint8_t is_pure_color = 0;
+    prc_api_material material;
+    prc_internal_graph_style style;
+    float color[4] = { 0, 0, 0, 1 };
+    uint8_t had_defined_style = 0;
+
+    if (tess_index_in >= data->exact_geom_tess_count)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Exact geometry tessellation index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
+        return PRC_API_ERROR_PARAMETER;
+    }
+
+    tess_type = data->exact_geom_tess[tess_index_in].type;
+    biased_style_index = data->exact_geom_tess[tess_index_in].biased_style_index;
+    file_index = data->exact_geom_tess[tess_index_in].file_index;
+
+    if (biased_style_index > 0)
+    {
+        /* Lets get the style information for this */
+        code = prc_api_helper_get_material_from_style_index(ctx, data_in,
+            file_index, biased_style_index - 1, alpha, 0,
+            &is_material, &is_texture, &is_pure_color, &material, &style, color,
+            &had_defined_style);
+        if (code < 0)
+            return code;
+    }
+    else
+    {
+        /* No style information. Just use default values */
+        is_material = 0;
+        is_texture = 0;
+        is_pure_color = 1;
+        color[0] = 0.5f;
+        color[1] = 0.5f;
+        color[2] = 0.5f;
+        color[3] = 1.0f;
+    }
+
+    /* Lets do some initialization of the api_tess */
+    memset(api_tess, 0, sizeof(prc_api_tess));
+
+    if (tess_type == PRC_EXACT_GEOM_3D)
+    {
+        /* Not implemented yet */
+        return 0;
+    }
+    else if (tess_type == PRC_EXACT_GEOM_WIRE)
+    {
+        /* Wire case. We simply have a set of vertices that we need to connect
+           with a line.  Create the primitives for this */
+        uint32_t num_points = data->exact_geom_tess[tess_index_in].wire_data->number_of_points;
+
+        api_tess->type = PRC_API_TESS_3D_Wire;
+        api_tess->tess_vertices.num_vertices = num_points;
+        api_tess->tess_vertices.capacity = num_points;
+        api_tess->tess_vertices.vertices = (prc_api_vertex *)prc_calloc(ctx, num_points, sizeof(prc_api_vertex));
+        if (api_tess->tess_vertices.vertices == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for exact geometry wire vertex buffer in prc_api_get_exact_geometry_tessellation_vertices\n");
+            return PRC_API_ERROR_MEMORY;
+        }
+
+        api_tess->bounding_box_max[0] = -DBL_MAX;
+        api_tess->bounding_box_max[1] = -DBL_MAX;
+        api_tess->bounding_box_max[2] = -DBL_MAX;
+        api_tess->bounding_box_min[0] = DBL_MAX;
+        api_tess->bounding_box_min[1] = DBL_MAX;
+        api_tess->bounding_box_min[2] = DBL_MAX;
+
+        for (uint32_t i = 0; i < num_points; i++)
+        {
+            api_tess->tess_vertices.vertices[i].position[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
+            api_tess->tess_vertices.vertices[i].position[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
+            api_tess->tess_vertices.vertices[i].position[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
+
+            /* Temp color for debug */
+            if (is_material)
+            {
+                memcpy(api_tess->tess_vertices.vertices[i].color, material.diffuse, 3 * sizeof(float));
+                api_tess->tess_vertices.vertices[i].color[3] = 1.0;
+            }
+            else
+            {
+                memcpy(api_tess->tess_vertices.vertices[i].color, color, 4 * sizeof(float));
+            }
+
+            if (api_tess->bounding_box_max[0] < data->exact_geom_tess[tess_index_in].wire_data->points[i].x)
+            {
+                api_tess->bounding_box_max[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
+            }
+            if (api_tess->bounding_box_max[1] < data->exact_geom_tess[tess_index_in].wire_data->points[i].y)
+            {
+                api_tess->bounding_box_max[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
+            }
+            if (api_tess->bounding_box_max[2] < data->exact_geom_tess[tess_index_in].wire_data->points[i].z)
+            {
+                api_tess->bounding_box_max[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
+            }
+            if (api_tess->bounding_box_min[0] > data->exact_geom_tess[tess_index_in].wire_data->points[i].x)
+            {
+                api_tess->bounding_box_min[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
+            }
+            if (api_tess->bounding_box_min[1] > data->exact_geom_tess[tess_index_in].wire_data->points[i].y)
+            {
+                api_tess->bounding_box_min[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
+            }
+            if (api_tess->bounding_box_min[2] > data->exact_geom_tess[tess_index_in].wire_data->points[i].z)
+            {
+                api_tess->bounding_box_min[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
+            }
+
+            api_tess->has_transparency = 0;
+            api_tess->tess_vertices.vertices[i].uv_set = false;
+            api_tess->tess_vertices.vertices[i].normal_set = false;
+        }
+
+        api_tess->num_line_primitives = 1;
+
+        wire = (prc_internal_api_wire *)prc_calloc(ctx, 1, sizeof(prc_internal_api_wire));
+        if (wire == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for wire primitive array in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto wire_failure;
+        }
+
+        wire->num_indices = num_points;
+        wire->vertex_indices = (uint32_t *)prc_calloc(ctx, num_points, sizeof(uint32_t));
+        if (wire->vertex_indices == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for wire->vertex_indices in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto wire_failure;
+        }
+
+        for (k = 0; k < wire->num_indices; k++)
+        {
+            wire->vertex_indices[k] = k;
+        }
+
+        /* Set the type */
+        if (wire->num_indices == 2)
+            wire->type = PRC_API_LINE;
+        else
+            wire->type = PRC_API_LINE_STRIP;
+
+        /* Set the reserved data */
+        api_tess->reserved = (void *)wire;
+    }
+    else
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Unsupported exact geometry tessellation type in prc_api_get_exact_geometry_tessellation_vertices\n");
+        return PRC_API_ERROR_PARAMETER;
+    }
+
+    /* Associate the api_tess with the model tree part */
+    if (api_tree == NULL)
+        return PRC_API_ERROR;
+
+    reserve = (prc_api_child_reserve *)api_tree->reserved;
+    reserve->parts[data->exact_geom_tess[tess_index_in].part_reserve_index].tess = api_tess;
+
+    return 0;
+
+wire_failure:
+    if (wire != NULL)
+    {
+        if (wire->vertex_indices != NULL)
+        {
+            prc_free(ctx, wire->vertex_indices);
+            wire->vertex_indices = NULL;
+        }
+        prc_free(ctx, wire);
+        wire = NULL;
+    }
+
+    if (api_tess->tess_vertices.vertices != NULL)
+    {
+        prc_free(ctx, api_tess->tess_vertices.vertices);
+        api_tess->tess_vertices.vertices = NULL;
+        api_tess->tess_vertices.num_vertices = 0;
+        api_tess->tess_vertices.capacity = 0;
+    }
+
+    api_tess->num_line_primitives = 0;
+    api_tess->reserved = NULL;
+    return code;
+}
+
 /* tess_index_in is an index into the tessellations in part_details or
    markup_details in prc_data */
 PRC_EXPORT int
 prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
-    prc_api_product *api_tree, uint32_t tess_index_in, uint32_t face_index,
+    uint32_t tess_index_in, uint32_t face_index,
     prc_api_face *face_out, prc_api_tess *api_tess)
 {
     prc_data *data = (prc_data *)data_in;
@@ -3102,8 +3312,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
                 leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
                 &api_tess->is_material, &has_texture, &is_pure_color, &api_tess->tess_material,
-                face_out_reserved->style, face_color, api_tess, face_out, face_index,
-                tess_index_in, &has_ref_style_defined);
+                face_out_reserved->style, face_color, api_tess, face_out, &has_ref_style_defined);
             if (code < 0)
             {
                 PRC_API_FAIL(code,
@@ -3225,8 +3434,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                     code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
                         leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
                         &api_tess->is_material, &has_texture, &is_pure_color, &api_tess->tess_material,
-                        &style_cache->face_style_cache[k], face_color, api_tess, face_out, k,
-                        tess_index_in, &has_ref_style_defined);
+                        &style_cache->face_style_cache[k], face_color, api_tess, face_out, &has_ref_style_defined);
                     if (code < 0)
                     {
                         PRC_API_FAIL(code,
@@ -3262,8 +3470,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
                     leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
                     &api_tess->is_material, &has_texture, &is_pure_color, &api_tess->tess_material,
-                    &style_cache->face_style_cache[last_k], face_color, api_tess, face_out, last_k,
-                    tess_index_in, &has_ref_style_defined);
+                    &style_cache->face_style_cache[last_k], face_color, api_tess, face_out, &has_ref_style_defined);
                 if (code < 0)
                 {
                     PRC_API_FAIL(code,
@@ -3377,8 +3584,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
                 is_uncompressed_with_no_texture_entities,
                 &api_tess->is_material, &has_texture, &is_pure_color,
                 &api_tess->tess_material, face_out_reserved->style, face_color,
-                api_tess, face_out, face_index, tess_index_in,
-                &has_ref_style_defined);
+                api_tess, face_out, &has_ref_style_defined);
             if (code < 0)
             {
                 prc_error(ctx, PRC_API_ERROR_PARAMETER, "Failed to get face style in prc_api_get_tessellation_vertices\n");
@@ -5141,13 +5347,6 @@ compressed_failure:
         vertex_out->num_vertices = num_vertices;
         vertex_out->capacity = num_vertices;
 
-        /* Set the base style if there is one */
-        prc_internal_graph_style *wire_style = (prc_internal_graph_style*) api_tess->reserved2;
-        if (wire_style != NULL)
-        {
-            prc_copy_internal_graph_style_to_api(ctx, wire_style, &api_tess->tess_material);
-        }
-
         if (tess->has_vertex_colors)
         {
             num_vertex_colors = tess->vertex_color_count;
@@ -5182,21 +5381,11 @@ compressed_failure:
             vertex_out->vertices[k].position[1] = tess->tessellation_coordinates.coordinates[k * 3 + 1];
             vertex_out->vertices[k].position[2] = tess->tessellation_coordinates.coordinates[k * 3 + 2];
 
-            if (wire_style != NULL)
-            {
-                vertex_out->vertices[k].color[0] = wire_style->tint[0];
-                vertex_out->vertices[k].color[1] = wire_style->tint[1];
-                vertex_out->vertices[k].color[2] = wire_style->tint[2];
-                vertex_out->vertices[k].color[3] = wire_style->tint[3];
-            }
-            else
-            {
-                /* Default to white wires */
-                vertex_out->vertices[k].color[0] = 1.0;
-                vertex_out->vertices[k].color[1] = 1.0;
-                vertex_out->vertices[k].color[2] = 1.0;
-                vertex_out->vertices[k].color[3] = 1.0;
-            }
+            /* Default to white wires */
+            vertex_out->vertices[k].color[0] = 1.0;
+            vertex_out->vertices[k].color[1] = 1.0;
+            vertex_out->vertices[k].color[2] = 1.0;
+            vertex_out->vertices[k].color[3] = 1.0;
         }
 
         /* Distribute the decoded colors to the vertices they actually belong
