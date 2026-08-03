@@ -31,6 +31,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 option(PRC_ENABLE_DEBUG_MEMORY "Enable PRC debug memory tracking" OFF)
 option(PRC_ENABLE_UNZIPPED_FUZZ "Enable deterministic fuzzing of unzipped PRC sections" OFF)
+option(PRC_ENABLE_DIAG_ENV "Enable PRC_DIAG_*/PRC_TRACE_*/PRC_FUZZ_* runtime diagnostic env-var hooks; OFF removes them from the binary entirely (see include/prc_diag_env.h)" OFF)
 option(NANOPRC_ENABLE_BREP "Enable B-Rep write facility (Phase 2)" OFF)
 option(NANOPRC_BUILD_DEMOS "Build nanoPRC demo executables" ON)
 option(NANOPRC_BUILD_TESTS "Build nanoPRC tests" ON)
@@ -77,6 +78,7 @@ set(PRC_CORE_SOURCES
 	"src/prc_write_pdf.c"
 	"src/prc_write_pdf_3d.c"
 	"src/prc_context.c"
+	"src/prc_diag_env.c"
 	"src/prc_double.c"
 	"src/prc_error.c"
 	"src/prc_huff.c"
@@ -124,6 +126,7 @@ target_include_directories(nano_prc PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/generate
 target_compile_definitions(nano_prc PRIVATE PRC_VERSION_STRING="${PRC_VERSION_STRING}")
 target_compile_definitions(nano_prc PUBLIC PRC_DEBUG_MEMORY=$<BOOL:${PRC_ENABLE_DEBUG_MEMORY}>)
 target_compile_definitions(nano_prc PUBLIC PRC_ENABLE_UNZIPPED_FUZZ=$<BOOL:${PRC_ENABLE_UNZIPPED_FUZZ}>)
+target_compile_definitions(nano_prc PUBLIC PRC_ENABLE_DIAG_ENV=$<BOOL:${PRC_ENABLE_DIAG_ENV}>)
 
 # Static twin of nano_prc, built from the same sources, for tests that need
 # to call internal (non-PRC_EXPORT) functions directly -- those aren't
@@ -141,6 +144,7 @@ endif()
 target_compile_definitions(prc_static PRIVATE PRC_VERSION_STRING="${PRC_VERSION_STRING}")
 target_compile_definitions(prc_static PUBLIC PRC_DEBUG_MEMORY=$<BOOL:${PRC_ENABLE_DEBUG_MEMORY}>)
 target_compile_definitions(prc_static PUBLIC PRC_ENABLE_UNZIPPED_FUZZ=$<BOOL:${PRC_ENABLE_UNZIPPED_FUZZ}>)
+target_compile_definitions(prc_static PUBLIC PRC_ENABLE_DIAG_ENV=$<BOOL:${PRC_ENABLE_DIAG_ENV}>)
 
 if (NANOPRC_BUILD_DEMOS)
 	add_subdirectory(demos)

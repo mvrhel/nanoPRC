@@ -19,6 +19,7 @@
 #include <string.h>
 #include "prc_write_model.h"
 #include "prc_data.h"
+#include "prc_diag_env.h"
 
 int
 prc_write_model_file_to_stream(prc_context *ctx, prc_bit_write_state *s,
@@ -160,14 +161,14 @@ prc_write_main_header_compute_layout(uint32_t section_count, prc_write_main_head
 static uint32_t
 prc_write_diag_min_vers_for_read(void)
 {
-    const char *ov = getenv("PRC_DIAG_MIN_VERS_FOR_READ");
+    const char *ov = prc_diag_getenv("PRC_DIAG_MIN_VERS_FOR_READ");
     return ov != NULL ? (uint32_t)strtoul(ov, NULL, 10) : PRC_WRITE_MIN_VERS_FOR_READ;
 }
 
 static uint32_t
 prc_write_diag_auth_vers(void)
 {
-    const char *ov = getenv("PRC_DIAG_AUTH_VERS");
+    const char *ov = prc_diag_getenv("PRC_DIAG_AUTH_VERS");
     return ov != NULL ? (uint32_t)strtoul(ov, NULL, 10) : PRC_WRITE_AUTH_VERS;
 }
 
