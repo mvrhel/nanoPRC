@@ -144,6 +144,30 @@ typedef struct prc_internal_api_position_normal_lookup_s
        built (position_normal_pair could also be NULL, e.g. calloc(0,...),
        if this part was built with zero vertices). */
     uint8_t position_normal_cache_valid;
+    /* PRC_TYPE_TESS_3D_Compressed only: the whole tessellation's index
+       list (num_prc_indices entries -- every triangle's 3 vertex indices,
+       for the ENTIRE compressed entry), built once per api_tess INSTANCE
+       and reused (borrowed, not copied) across every face_index call for
+       that same instance. Every face_index of a compressed tessellation
+       returns this SAME array -- see prc_api_get_graphics_primitive's
+       compressed branch (`graphics_object->indices = face->vertex_indices`,
+       no per-face filtering) and this cache's own build-site comment in
+       prc_tri_primitives_api.c for why: the compressed format doesn't
+       cleanly separate per-face index data, so treating "face" as
+       anything other than the whole entry isn't meaningful here. Before
+       this cache existed, this array was reallocated and fully rebuilt
+       from scratch on every single face_index call -- for the standard
+       one-call-per-face walk every demo/binding uses (see
+       demos/quick_start), that is O(face_number) redundant allocations of
+       the SAME full-mesh-sized buffer, confirmed reaching 60-90+GB and
+       still climbing on a real ~26000-face compressed tessellation before
+       being killed (nothing frees one face's copy before the next face's
+       call runs in a real all-faces walk). A cache hit borrows this
+       pointer (face_out_reserved->owns_vertex_indices left at its
+       calloc'd default of 0); only a cache miss allocates+builds it. */
+    uint32_t *vertex_indices_cache;
+    size_t vertex_indices_cache_count;
+    uint8_t vertex_indices_cache_valid;
 } prc_internal_api_position_normal_lookup;
 
 /* This structure is used to store the tessellation data for a given face.
@@ -245,6 +269,14 @@ typedef struct prc_internal_api_face_s
        prc_internal_api_position_normal_lookup's face_style_cache) --
        freed once, with the cache, not per-face. */
     uint8_t owns_style;
+    /* Same convention as owns_style immediately above, for `vertex_indices`
+       instead of `style`: 1 if this face's own allocation (the
+       PRC_TYPE_TESS_3D branch, one entry) and must be freed when this face
+       is released; 0 if it's a borrowed pointer into a per-api_tess-
+       instance cache shared by every face of a compressed tessellation
+       (see prc_internal_api_position_normal_lookup's vertex_indices_cache)
+       -- freed once, with the cache, not per-face. */
+    uint8_t owns_vertex_indices;
 } prc_internal_api_face;
 
 /* We have a similar set up for the 3D wire */

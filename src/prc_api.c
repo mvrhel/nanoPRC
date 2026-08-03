@@ -341,7 +341,16 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
                     {
                         prc_internal_api_face *face_out_reserved =
                             prc_face_internal_face(&tess_in[k].tess_faces[j]);
-                        if (face_out_reserved->vertex_indices != NULL)
+                        /* owns_vertex_indices == 0 means `vertex_indices`
+                           is a borrowed pointer into the per-instance
+                           vertex_indices_cache (api_tess->reserved,
+                           compressed tessellations only) -- freeing it
+                           here would corrupt that cache for any other face
+                           of this same instance still to be released, or
+                           double-free once the cache cleanup below runs.
+                           Same convention/reasoning as owns_style just
+                           below. Freed once, with the cache. */
+                        if (face_out_reserved->vertex_indices != NULL && face_out_reserved->owns_vertex_indices)
                             prc_free(ctx, face_out_reserved->vertex_indices);
                         if (face_out_reserved->single_norm.fan_offsets != NULL)
                             prc_free(ctx, face_out_reserved->single_norm.fan_offsets);
@@ -446,6 +455,13 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
                     }
                     prc_free(ctx, tess_cache->face_style_cache);
                 }
+                /* Whole-tessellation index list (vertex_indices_cache_count
+                   entries), shared by every face_out_reserved->vertex_indices
+                   in this instance's tess_faces (owns_vertex_indices == 0
+                   there, so none of them free it themselves -- see the
+                   per-face release loop above). */
+                if (tess_cache->vertex_indices_cache != NULL)
+                    prc_free(ctx, tess_cache->vertex_indices_cache);
                 prc_free(ctx, tess_cache);
                 tess_in[k].reserved = NULL;
             }
