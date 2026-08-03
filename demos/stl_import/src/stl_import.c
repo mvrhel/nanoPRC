@@ -166,6 +166,24 @@ prc_md5_12bytes(const uint8_t in[12], uint8_t out[16])
  * setting in practice, so this define is not meant to be set to 0. */
 #define STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD 100
 
+/* Default floor for the COMPRESSED entry's own quantization tolerance
+   (--quant-tolerance), used when that flag is omitted -- see quant_
+   tolerance_fraction's resolution in main() below. Value derived (2026-08-02)
+   from an independent commercial PRC encoder's own point_array tolerance on
+   real geometry, back-computed as a bbox-diagonal-relative fraction
+   (independent_tolerance_mm / (nanoPRC_default_tolerance_mm / 1e-6)); see
+   project memory project_point_array_bitwidth_and_prcdb_analysis_2026-08-02.md
+   for the derivation and validation. Real-Acrobat-confirmed safe (UK_original/
+   Walnut/QCD_Leinweber, each with its own correct weld/jitter configuration
+   otherwise unchanged) and corpus-validated (146 real-world files, zero
+   write/decode regressions, ~20% smaller point_array payload on average,
+   worst-case bit-length 23->20) PROVIDED vertex welding and pre-weld jitter
+   magnitude are computed from a separate, unwidened tolerance -- which is
+   exactly what --weld-tolerance (default 1e-6, untouched by this constant)
+   still governs. Never used to make quantization TIGHTER than the mesh's
+   actual weld tolerance -- see the max() in main()'s resolution logic. */
+#define STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION 6.826086758455277e-6
+
 /* Multiplies `count * elem_size`, checking for size_t overflow first.
    Every allocation in this file that scales with a value read from (or
    derived from counting through) an untrusted input file goes through
@@ -2195,12 +2213,11 @@ print_usage(const char *prog)
         "                       (same bounding-box-diagonal-fraction convention as\n"
         "                       --weld-tolerance), independent of vertex welding and\n"
         "                       jitter magnitude, both of which stay governed by\n"
-        "                       --weld-tolerance alone. Defaults to --weld-tolerance's\n"
-        "                       value (i.e. no effect) when omitted. A larger value\n"
-        "                       here shrinks point_array bit-lengths/file size without\n"
-        "                       touching topology -- real-Acrobat-validated on the\n"
-        "                       UK_original/Walnut/QCD_Leinweber regression set at\n"
-        "                       6.826e-6 (nanoPRC's default is 1e-6).\n"
+        "                       --weld-tolerance alone. Defaults to the wider of\n"
+        "                       --weld-tolerance's own value and %.6g (nanoPRC's\n"
+        "                       validated default, real-Acrobat- and corpus-tested --\n"
+        "                       see project notes) when omitted, so quantization is\n"
+        "                       never tighter than actual welding by default.\n"
         "  --verify              Force the read-back self-check (see below) even on a\n"
         "                       large mesh where it's skipped by default.\n"
         "  --no-verify           Skip the read-back self-check even on a small mesh\n"
@@ -2210,7 +2227,7 @@ print_usage(const char *prog)
         "                       large COMPRESSED tessellation back can take far\n"
         "                       longer than writing it -- see --verify's own note\n"
         "                       printed at import time when this applies).\n",
-        prog, (unsigned)STL_VERIFY_DEFAULT_TRIANGLE_LIMIT);
+        prog, STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION, (unsigned)STL_VERIFY_DEFAULT_TRIANGLE_LIMIT);
 }
 
 /* Splits `input_path` into just its filename, without directory or
@@ -2379,7 +2396,17 @@ main(int argc, char *argv[])
         return 1;
     }
     if (quant_tolerance_fraction < 0.0)
-        quant_tolerance_fraction = weld_tolerance_fraction;
+    {
+        /* Default (2026-08-03): the wider of weld_tolerance_fraction and
+           STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION -- see that constant's
+           own comment for the full derivation/validation. The max() keeps
+           quantization from defaulting to something TIGHTER than whatever
+           weld tolerance the caller actually chose (pointless: it would
+           spend bits on precision the weld pass already discarded) if
+           --weld-tolerance was itself set coarser than this default. */
+        quant_tolerance_fraction = (weld_tolerance_fraction > STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION)
+            ? weld_tolerance_fraction : STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION;
+    }
     else if (quant_tolerance_fraction == 0.0)
     {
         fprintf(stderr, "Error: --quant-tolerance must be positive\n");
