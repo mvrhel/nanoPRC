@@ -875,6 +875,12 @@ prc_parse_tess_3d_compressed(prc_context *ctx, prc_bit_state *bit_state, prc_tes
     /* Spec states data->face_number is derived from maximum value in triangle_face_array */
     data->triangle_face_array = (uint32_t *)prc_bitread_compressed_indice_array(ctx,
                                 bit_state, &data->triangle_face_array_size, true, 0);
+    if (data->triangle_face_array == NULL && data->triangle_face_array_size != 0)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_tess_3d_compressed\n");
+        return PRC_ERROR_MEMORY;
+    }
+
     data->face_number = 0;
     DEBUG_LOG("\nTriangle face array\n");
     for (k = 0; k < data->triangle_face_array_size; k++)
