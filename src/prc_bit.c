@@ -471,6 +471,29 @@ prc_bitread_double(prc_context *ctx, prc_bit_state *state)
             else
             {
                 // one repeated byte
+                //
+                // offset is an untrusted 3-bit value (1-5 or 7 here; 0 and 6
+                // are handled above) read straight from the input stream.
+                // BYTEAT(currentByte, offset) dereferences currentByte+offset
+                // (little-endian) or currentByte-offset (big-endian) with no
+                // relation to how far the loop has actually progressed, so a
+                // large offset early in the loop can point past the 8-byte
+                // `value` union. Treat an out-of-range offset the same as the
+                // offset==0 case (fill the remaining mantissa bytes with the
+                // previous byte) instead of reading out of bounds.
+                unsigned char *value_bytes = (unsigned char*)&value;
+#ifdef PRC_BIG_ENDIAN
+                uint8_t in_range = (currentByte - value_bytes) >= (ptrdiff_t)offset;
+#else
+                uint8_t in_range = (currentByte + offset) <= (value_bytes + sizeof(value) - 1);
+#endif
+                if (!in_range)
+                {
+                    unsigned char pByte = BYTEAT(currentByte, 1);
+                    for (; MOREBYTE(currentByte, lastByte); NEXTBYTE(currentByte))
+                        *currentByte = pByte;
+                    break;
+                }
                 *currentByte = BYTEAT(currentByte, offset);
             }
         }
