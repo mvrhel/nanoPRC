@@ -26,10 +26,12 @@
  * Usage:
  *     nano_prc_stl_import <input.stl> [output.prc] [output.pdf]
  *                          [--original-normals] [--weld-tolerance F]
+ *                          [--quant-tolerance F]
  * Output paths default to the input file's own basename with .stl swapped
- * for .prc/.pdf if omitted. --original-normals and --weld-tolerance are
- * documented where they're used below (stl_options_parse) and in the
- * per-part tessellation build step (stl_import_build_tess_entries).
+ * for .prc/.pdf if omitted. --original-normals, --weld-tolerance, and
+ * --quant-tolerance are documented where they're used below
+ * (stl_options_parse) and in the per-part tessellation build step
+ * (stl_import_build_tess_entries).
  *
  * THE STL FORMAT
  * ---------------------------------------------------------------------
@@ -1387,7 +1389,8 @@ stl_parts_free(stl_parts *parts)
 static int
 stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_positions, uint32_t num_welded,
     const uint32_t *weld_index, int original_normals, const uint32_t *global_normal_index,
-    const double *dedup_normals, double weld_tolerance_fraction, int check_nonmanifold, stl_parts *parts)
+    const double *dedup_normals, double weld_tolerance_fraction, double quant_tolerance_fraction,
+    int check_nonmanifold, stl_parts *parts)
 {
     uint32_t *combined_tri_indices = NULL;
     double *combined_positions = NULL;
@@ -1490,7 +1493,25 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
                validated real-file output at the unhalved tolerance) is
                unaffected; kept as a diagnostic in case a narrower
                investigation wants it later. */
-            double effective_fraction = weld_tolerance_fraction;
+            /* --quant-tolerance (2026-08-02): the COMPRESSED entry's own
+               tolerance (quantization step + internal re-weld) is governed
+               by quant_tolerance_fraction, independent of
+               weld_tolerance_fraction -- which still alone drives this
+               importer's STL-level pre-weld radius (Section 2a) and the
+               pre-weld jitter magnitude below. Motivated by a real-Acrobat
+               finding: widening weld_tolerance_fraction itself to shrink
+               point_array bit-lengths also scaled UK_original.stl's
+               automatic jitter magnitude by the same factor (it's a direct
+               multiple of weld_tolerance_fraction), pushing it out of the
+               narrow, empirically-validated window that escapes the
+               mixed_chains Acrobat collision family -- see project memory
+               project_nonmanifold_split_rootcause_2026-07-31.md.
+               quant_tolerance_fraction defaults to weld_tolerance_fraction
+               (main() resolves the sentinel before either function here is
+               called), so omitting --quant-tolerance is a no-op. Real-
+               Acrobat-validated at 6.826e-6 (vs. nanoPRC's 1e-6 default) on
+               the UK_original/Walnut/QCD_Leinweber regression set. */
+            double effective_fraction = quant_tolerance_fraction;
             if (prc_diag_getenv("PRC_DIAG_HALVE_LUMPED_TOLERANCE") != NULL)
                 effective_fraction *= 0.5;
             tess->tolerance = prc_write_tol_relative(effective_fraction);
@@ -1663,7 +1684,7 @@ static int
 stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uint32_t num_welded,
     const uint32_t *weld_index, const uint32_t *component_of_welded, uint32_t num_components,
     int original_normals, const uint32_t *global_normal_index, const double *dedup_normals,
-    double weld_tolerance_fraction, stl_parts *parts)
+    double weld_tolerance_fraction, double quant_tolerance_fraction, stl_parts *parts)
 {
     uint32_t *component_of_triangle = NULL;
     uint32_t *tri_count_per_component = NULL;
@@ -1725,7 +1746,8 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                path). */
             uint8_t check_nm = (uint8_t)(force_lump || getenv("PRC_DIAG_FORCE_LUMP_NONMANIFOLD_CHECK") != NULL);
             ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
-                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, check_nm, parts);
+                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction,
+                quant_tolerance_fraction, check_nm, parts);
             goto cleanup;
         }
     }
@@ -1909,7 +1931,11 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
 
         {
             prc_api_write_tessellation *tess = &parts->tess_entries[c];
-            prc_write_tolerance comp_tolerance = prc_write_tol_relative(weld_tolerance_fraction);
+            /* --quant-tolerance: see the matching comment at this function's
+               other tess->tolerance assignment site (the lump path, in
+               stl_import_build_single_lumped_model) -- same parameter, same
+               rationale, applied here for the per-component path. */
+            prc_write_tolerance comp_tolerance = prc_write_tol_relative(quant_tolerance_fraction);
             /* COMPRESSED (not TRIANGLES): welding, degenerate-triangle
                removal, and EdgeBreaker-style traversal compression are all
                built in, giving meaningfully smaller output than TRIANGLES
@@ -2150,7 +2176,8 @@ print_usage(const char *prog)
 {
     fprintf(stderr,
         "Usage: %s <input.stl> [output.prc] [output.pdf] [--original-normals]\n"
-        "                          [--weld-tolerance F] [--verify|--no-verify]\n\n"
+        "                          [--weld-tolerance F] [--quant-tolerance F]\n"
+        "                          [--verify|--no-verify]\n\n"
         "  input.stl            Binary or ASCII STL file to import.\n"
         "  output.prc/.pdf      Default to input's own basename with .stl swapped for .prc/.pdf.\n"
         "  --original-normals   Use the STL file's own stored per-facet normals (flat\n"
@@ -2158,7 +2185,23 @@ print_usage(const char *prog)
         "                       normals at all, letting the reader compute smooth\n"
         "                       per-vertex normals from the welded geometry.\n"
         "  --weld-tolerance F   Vertex-welding tolerance, as a fraction of the mesh's\n"
-        "                       bounding-box diagonal. Default 1e-6.\n"
+        "                       bounding-box diagonal. Default 1e-6. Also sets the\n"
+        "                       pre-weld jitter magnitude (an Acrobat-compatibility\n"
+        "                       mitigation, see the code comment where it's computed) --\n"
+        "                       widening this value changes jitter too, which can\n"
+        "                       reopen an already-escaped Acrobat collision on some\n"
+        "                       files. Use --quant-tolerance instead if you only want\n"
+        "                       smaller COMPRESSED output, not coarser welding.\n"
+        "  --quant-tolerance F  COMPRESSED tessellations' own quantization tolerance\n"
+        "                       (same bounding-box-diagonal-fraction convention as\n"
+        "                       --weld-tolerance), independent of vertex welding and\n"
+        "                       jitter magnitude, both of which stay governed by\n"
+        "                       --weld-tolerance alone. Defaults to --weld-tolerance's\n"
+        "                       value (i.e. no effect) when omitted. A larger value\n"
+        "                       here shrinks point_array bit-lengths/file size without\n"
+        "                       touching topology -- real-Acrobat-validated on the\n"
+        "                       UK_original/Walnut/QCD_Leinweber regression set at\n"
+        "                       6.826e-6 (nanoPRC's default is 1e-6).\n"
         "  --verify              Force the read-back self-check (see below) even on a\n"
         "                       large mesh where it's skipped by default.\n"
         "  --no-verify           Skip the read-back self-check even on a small mesh\n"
@@ -2239,6 +2282,11 @@ main(int argc, char *argv[])
     const char *pdf_path = NULL;
     int original_normals = 0;
     double weld_tolerance_fraction = 1e-6;
+    /* Negative sentinel: "not given on the command line" -- resolved to
+       weld_tolerance_fraction's own final value below, once both flags have
+       been parsed, so --quant-tolerance defaults to matching whatever
+       --weld-tolerance ends up being (including a non-default one). */
+    double quant_tolerance_fraction = -1.0;
     int verify_mode = 0; /* 0 = auto (size-based default), 1 = force on, -1 = force off */
     int positional = 0;
     int i;
@@ -2285,6 +2333,16 @@ main(int argc, char *argv[])
             weld_tolerance_fraction = atof(argv[++i]);
             continue;
         }
+        if (strcmp(argv[i], "--quant-tolerance") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+            quant_tolerance_fraction = atof(argv[++i]);
+            continue;
+        }
         if (strcmp(argv[i], "--verify") == 0)
         {
             verify_mode = 1;
@@ -2319,6 +2377,13 @@ main(int argc, char *argv[])
     if (weld_tolerance_fraction <= 0.0)
     {
         fprintf(stderr, "Error: --weld-tolerance must be positive\n");
+        return 1;
+    }
+    if (quant_tolerance_fraction < 0.0)
+        quant_tolerance_fraction = weld_tolerance_fraction;
+    else if (quant_tolerance_fraction == 0.0)
+    {
+        fprintf(stderr, "Error: --quant-tolerance must be positive\n");
         return 1;
     }
 
@@ -2565,6 +2630,8 @@ main(int argc, char *argv[])
         weld_index[i] = wv;
     }
     printf("Welded to %u vertices (tolerance %.3g x bbox diagonal)\n", (unsigned)grid.count, weld_tolerance_fraction);
+    if (quant_tolerance_fraction != weld_tolerance_fraction)
+        printf("COMPRESSED quantization tolerance %.3g x bbox diagonal (independent of welding)\n", quant_tolerance_fraction);
 
     parent = (uint32_t *)malloc(sizeof(uint32_t) * grid.count);
     rank = (uint8_t *)calloc(grid.count, sizeof(uint8_t));
@@ -2719,7 +2786,8 @@ main(int argc, char *argv[])
 
     /* Step 4: build the per-part tessellations + tree nodes (Section 4). */
     if (stl_import_build_parts(&mesh, grid.positions, grid.count, weld_index, component_of_welded, num_components,
-            original_normals, global_normal_index, nd.normals, weld_tolerance_fraction, &parts) != 0)
+            original_normals, global_normal_index, nd.normals, weld_tolerance_fraction,
+            quant_tolerance_fraction, &parts) != 0)
         goto cleanup;
     have_parts = 1;
 
