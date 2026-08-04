@@ -499,7 +499,8 @@ prc_bitread_huff_data(prc_context *ctx, prc_bit_state *state, uint32_t num_bits)
 *  is specified by the data type. For example, for the Edge_status_array the number
 *  is equal to 2.  In that case, it is writing out a character array each with 2 bits
 *  per character.  normal_angle_array is a shortarray with 16bits per character.
-*  This decoder, always returns data of uint32_t but data could have been smaller when compressed.
+*  Data values are written into an elem_size-wide buffer (1 or 4 bytes -- the only
+*  two widths any caller needs); data could have been smaller when compressed.
 *  The characterArray, shortArray, character_array_compressed
 *
 *  Here is some types and bit sizes that the spec says:
@@ -519,12 +520,21 @@ prc_bitread_huff_data(prc_context *ctx, prc_bit_state *state, uint32_t num_bits)
 *
 * CompressedIndiceArray  --> invokes WriteCharacterArray but with out having written if the data is compressed or not. It is impled from the number of reference_points.
 * point_reference_array, triangle_face_array
+*
+* This is the shared implementation behind prc_huffman_data_decoder (elem_size 4,
+* used by prc_bitread_short_array) and the compressed branch of
+* prc_bitread_character_array (elem_size 1) -- those two used to be ~250 lines
+* of independently-maintained duplicated logic (S1 in the encode/decode review
+* action plan), differing only in this output element width. Consolidated here
+* so a future fix (like the num_leaves==0/max_code_length-error-code cleanup
+* folded in below) only needs to happen once.
 */
-static uint32_t*
-prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bits, uint32_t huffman_array_size, uint32_t *data_decode_size)
+static void *
+prc_huffman_decode_core(prc_context *ctx, prc_bit_state *state, uint8_t num_bits,
+    uint32_t huffman_array_size, size_t elem_size, uint32_t *data_decode_size)
 {
     uint32_t k;
-    uint32_t *data; /* Just take the largest we might encounter */
+    void *data;
     uint32_t *huffman_array = NULL;
     uint32_t bits_last_integer;
     prc_bit_state huff_state;
@@ -540,7 +550,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
     uint32_t num_values;
     uint32_t index;
     size_t max_bits;
-    size_t num_bits_read = 0;
     prc_huff_node *node_arena = NULL;
     uint64_t node_arena_capacity;
     uint64_t node_arena_used = 0;
@@ -590,7 +599,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
 
     /* First read in huffman array */
     num_leaves = prc_bitread_huff_data(ctx, &huff_state, num_bits + 1);
-    num_bits_read = num_bits_read + num_bits + 1;
 
     max_code_length = prc_bitread_huff_data(ctx, &huff_state, 8);
     if (max_code_length == 0 || max_code_length > 32)
@@ -600,12 +608,11 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         return NULL;
     }
 
-    num_bits_read += 8;
-
     /* Each leaf consumes at least num_bits + max_code_length bits; reject a
        leaf count that could not possibly be backed by the remaining data
-       instead of allocating/looping on an attacker-chosen huge count. */
-    if (huff_state.overrun ||
+       instead of allocating/looping on an attacker-chosen huge count, and
+       reject zero leaves (used below as a node-array size). */
+    if (huff_state.overrun || num_leaves == 0 ||
         (uint64_t)num_leaves * ((uint64_t)num_bits + max_code_length) > (uint64_t)max_bits)
     {
         prc_error(ctx, PRC_ERROR_PARSE, "huffman_array num_leaves is invalid\n");
@@ -643,11 +650,8 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
     for (k = 0; k < num_leaves; k++)
     {
         leaf_values[k] = prc_bitread_huff_data(ctx, &huff_state, num_bits);
-        num_bits_read += num_bits;
         code_length[k] = prc_bitread_huff_data(ctx, &huff_state, max_code_length);
-        num_bits_read += max_code_length;
         code_values[k] = prc_bitread_huff_data(ctx, &huff_state, code_length[k]);
-        num_bits_read += code_length[k];
     }
 
     /* DIAGNOSTIC (2026-07-24, PRC_DIAG_READ_HUFF_TABLE): dumps the actual
@@ -726,7 +730,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
                         return NULL;
                     }
                     curr_node->left = &node_arena[node_arena_used++];
-                    curr_node->next = curr_node->left;
                 }
                 curr_node = curr_node->left;
             }
@@ -746,7 +749,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
                         return NULL;
                     }
                     curr_node->right = &node_arena[node_arena_used++];
-                    curr_node->next = curr_node->right;
                 }
                 curr_node = curr_node->right;
             }
@@ -758,7 +760,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
 
     /* Now get the number of data values that were encoded */
     num_values = prc_bitread_huff_data(ctx, &huff_state, 32);
-    num_bits_read += 32;
 
     /* Each decoded value consumes at least one bit; reject a count that could
        not possibly be backed by the remaining data instead of allocating on
@@ -774,7 +775,7 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         return NULL;
     }
 
-    data = (uint32_t *)prc_calloc(ctx, num_values, sizeof(uint32_t));
+    data = prc_calloc(ctx, num_values, elem_size);
     if (data == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of huffman data\n");
@@ -792,7 +793,6 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
     while (index < num_values)
     {
         bit = prc_bitread_huff_bit(ctx, &huff_state);
-        num_bits_read += 1;
         if (bit == 0)
         {
             curr_node = curr_node->left;
@@ -817,7 +817,14 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
         }
         if (curr_node->is_leaf)
         {
-            data[index] = curr_node->value;
+            /* elem_size is always 1 (character array) or 4 (uint32_t array,
+               matching prc_huff_node.value's own width) -- a plain narrowing
+               cast for the 1-byte case is exactly what each original copy did
+               for its own output type, so this preserves both byte-for-byte. */
+            if (elem_size == sizeof(uint8_t))
+                ((uint8_t *)data)[index] = (uint8_t)curr_node->value;
+            else
+                ((uint32_t *)data)[index] = curr_node->value;
             index += 1;
             curr_node = root_node;
         }
@@ -833,6 +840,12 @@ prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bit
     return data;
 }
 
+static uint32_t*
+prc_huffman_data_decoder(prc_context *ctx, prc_bit_state *state, uint8_t num_bits, uint32_t huffman_array_size, uint32_t *data_decode_size)
+{
+    return (uint32_t *)prc_huffman_decode_core(ctx, state, num_bits, huffman_array_size, sizeof(uint32_t), data_decode_size);
+}
+
 /* 10.6 Inverse of Writecharacterarray. */
 uint8_t*
 prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *data_size,
@@ -842,9 +855,6 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
     uint32_t k;
     uint8_t*data;
     uint32_t huffman_array_size;
-    uint32_t *huffman_array = NULL;
-    uint32_t bits_last_integer;
-    prc_bit_state huff_state;
     uint32_t array_size;
 
     /* Get the is_compressed bit. */
@@ -886,295 +896,10 @@ prc_bitread_character_array(prc_context *ctx, prc_bit_state *state, uint32_t *da
 
     if (compressed)
     {
-        uint32_t num_leaves;
-        uint32_t max_code_length;
-        uint32_t *leaf_values;
-        uint32_t *code_length;
-        uint32_t *code_values;
-        uint32_t bit_mask, bit;
-        int j;
-        prc_huff_node *root_node;
-        prc_huff_node *curr_node;
-        prc_huff_node *node_arena = NULL;
-        uint64_t node_arena_capacity;
-        uint64_t node_arena_used = 0;
-        uint32_t num_values;
-        uint32_t index;
-        size_t max_bits;
-        size_t num_bits_read = 0;
-
         if (huffman_array_size > 0)
         {
-            /* See the matching guard in prc_huffman_data_decoder above --
-               same unguarded-length-drives-unbounded-calloc pattern, same
-               fix (bound against the remaining section's own bit count). */
-            if (state->bit_count <= 0 ||
-                (uint64_t)huffman_array_size > (uint64_t)state->bit_count / 32)
-            {
-                prc_error(ctx, PRC_ERROR_PARSE, "huffman_array_size implausible for remaining section size\n");
-                return NULL;
-            }
-
-            huffman_array = (uint32_t*)prc_calloc(ctx, huffman_array_size, sizeof(uint32_t));
-            if (huffman_array == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of huffman_array\n");
-                return NULL;
-            }
-
-            for (k = 0; k < huffman_array_size; k++)
-            {
-                huffman_array[k] = prc_bitread_uncompressed_uint32(ctx, state);
-            }
-            bits_last_integer = prc_bitread_uint32(ctx, state);
-            /* So we over read the last bit.  We need to reset the state?? */
-            //uint8_t backup_bits = 32 - (int) bits_last_integer;
-            //prc_bitread_rewind(ctx, state, backup_bits);
-
-            max_bits = (size_t)(huffman_array_size - 1) * 32 + bits_last_integer;
-
-            /* Now take the huffman array apart into the values, codes and code lengths */
-            /* Everything is bit compressed.  And of course it is encoded different
-               than the rest of the data, hence the special _huff_ calls.  The spec
-               obfuscates this fact.  Madness. */
-            prc_init_huff_bit_state(ctx, &huff_state, (uint8_t*) huffman_array, (int64_t)max_bits);
-
-            /* First read in huffman array */
-            num_leaves = prc_bitread_huff_data(ctx, &huff_state, num_bits + 1);
-            num_bits_read = num_bits_read + num_bits + 1;
-
-            max_code_length = prc_bitread_huff_data(ctx, &huff_state, 8);
-            if (max_code_length == 0 || max_code_length > 32)
-            {
-                prc_error(ctx, PRC_ERROR_HUFFMAN, "Error in huffman max_code_length\n");
-                prc_free(ctx, huffman_array);
-                return NULL;
-            }
-            num_bits_read += 8;
-
-            /* Reject a leaf count that couldn't possibly be backed by the
-               remaining data (each leaf needs at least num_bits + max_code_length
-               bits), and reject zero leaves (used below as a node-array size). */
-            if (huff_state.overrun || num_leaves == 0 ||
-                (uint64_t)num_leaves * ((uint64_t)num_bits + max_code_length) > (uint64_t)max_bits)
-            {
-                prc_error(ctx, PRC_ERROR_PARSE, "huffman_array num_leaves is invalid\n");
-                prc_free(ctx, huffman_array);
-                return NULL;
-            }
-
-            leaf_values = (uint32_t*)prc_calloc(ctx, num_leaves, sizeof(uint32_t));
-            if (leaf_values == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of leaf_values\n");
-                prc_free(ctx, huffman_array);
-                return NULL;
-            }
-
-            code_length = (uint32_t*)prc_calloc(ctx, num_leaves, sizeof(uint32_t));
-            if (code_length == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of code_length\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                return NULL;
-            }
-
-            code_values = (uint32_t*)prc_calloc(ctx, num_leaves, sizeof(uint32_t));
-            if (code_values == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of code_values\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                prc_free(ctx, code_length);
-                return NULL;
-            }
-
-            for (k = 0; k < num_leaves; k++)
-            {
-                leaf_values[k] = prc_bitread_huff_data(ctx, &huff_state, num_bits);
-                num_bits_read += num_bits;
-                code_length[k] = prc_bitread_huff_data(ctx, &huff_state, max_code_length);
-                num_bits_read += max_code_length;
-                code_values[k] = prc_bitread_huff_data(ctx, &huff_state, code_length[k]);
-                num_bits_read += code_length[k];
-            }
-
-            /* DIAGNOSTIC (2026-07-24, PRC_DIAG_READ_HUFF_TABLE): see the
-               matching diagnostic in prc_huffman_data_decoder above -- this
-               is prc_bitread_character_array's own separate inline copy of
-               the same leaf-reading loop (used for point_array's bit-length
-               table among others), which needed its own copy of the dump. */
-            if (prc_diag_getenv("PRC_DIAG_READ_HUFF_TABLE") != NULL)
-            {
-                fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE(char_array): num_bits=%u max_code_length=%u num_leaves=%u\n",
-                    num_bits, max_code_length, num_leaves);
-                for (k = 0; k < num_leaves; k++)
-                    fprintf(stderr, "PRC_DIAG_READ_HUFF_TABLE(char_array):   leaf_value=%u code_length=%u code_value=%u\n",
-                        leaf_values[k], code_length[k], code_values[k]);
-            }
-
-            /* Arena-allocate the tree nodes in one block instead of one prc_malloc
-               per node (PERF-3, matches the encode side's node_bank in
-               prc_huff.c). Each of the num_leaves root-to-leaf walks below
-               creates at most one new node per bit of its code_length, plus the
-               root itself, so 1 + sum(code_length[k]) is an exact upper bound.
-               The arena is sized once, up front, and never reallocated -- a
-               mid-build realloc could move the block and invalidate
-               already-issued node pointers (root_node, curr_node->left/right). */
-            node_arena_capacity = 1;
-            for (k = 0; k < num_leaves; k++)
-                node_arena_capacity += code_length[k];
-
-            if (node_arena_capacity > SIZE_MAX / sizeof(prc_huff_node))
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Huffman tree node count overflow\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                prc_free(ctx, code_length);
-                prc_free(ctx, code_values);
-                return NULL;
-            }
-
-            node_arena = (prc_huff_node *)prc_calloc(ctx, (size_t)node_arena_capacity, sizeof(prc_huff_node));
-            if (node_arena == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of huffman node_arena\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                prc_free(ctx, code_length);
-                prc_free(ctx, code_values);
-                return NULL;
-            }
-
-            /* Build the tree.  The idea here is to only construct the path to each leaf */
-            root_node = &node_arena[node_arena_used++];
-
-            for (k = 0; k < num_leaves; k++)
-            {
-                /* Traverse current tree. Adding nodes as need to get to leaf */
-                curr_node = root_node;
-                for (j = code_length[k] - 1; j >= 0; j--)
-                {
-                    bit_mask = 1 << j;
-                    bit = code_values[k] & bit_mask;
-                    if (bit == 0)
-                    {
-                        /* Go left */
-                        if (curr_node->left == NULL)
-                        {
-                            if (node_arena_used >= node_arena_capacity)
-                            {
-                                prc_error(ctx, PRC_ERROR_INTERNAL, "Huffman node arena exhausted\n");
-                                prc_free(ctx, huffman_array);
-                                prc_free(ctx, leaf_values);
-                                prc_free(ctx, code_length);
-                                prc_free(ctx, code_values);
-                                prc_free(ctx, node_arena);
-                                return NULL;
-                            }
-                            curr_node->left = &node_arena[node_arena_used++];
-                        }
-                        curr_node = curr_node->left;
-                    }
-                    else
-                    {
-                        /* Go right */
-                        if (curr_node->right == NULL)
-                        {
-                            if (node_arena_used >= node_arena_capacity)
-                            {
-                                prc_error(ctx, PRC_ERROR_INTERNAL, "Huffman node arena exhausted\n");
-                                prc_free(ctx, huffman_array);
-                                prc_free(ctx, leaf_values);
-                                prc_free(ctx, code_length);
-                                prc_free(ctx, code_values);
-                                prc_free(ctx, node_arena);
-                                return NULL;
-                            }
-                            curr_node->right = &node_arena[node_arena_used++];
-                        }
-                        curr_node = curr_node->right;
-                    }
-                }
-                /* At a leaf */
-                curr_node->is_leaf = 1;
-                curr_node->value = leaf_values[k];
-            }
-
-            /* Now get the number of data values that were encoded */
-            num_values = prc_bitread_huff_data(ctx, &huff_state, 32);
-            num_bits_read += 32;
-
-            /* Each decoded value consumes at least one bit; reject a count that
-               could not possibly be backed by the remaining data. */
-            if (huff_state.overrun || (uint64_t)num_values > (uint64_t)max_bits)
-            {
-                prc_error(ctx, PRC_ERROR_PARSE, "huffman num_values is invalid\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                prc_free(ctx, code_length);
-                prc_free(ctx, code_values);
-                prc_free(ctx, node_arena);
-                return NULL;
-            }
-
-            data = (uint8_t*)prc_calloc(ctx, num_values, sizeof(uint8_t));
-            if (data == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error of huffman data\n");
-                prc_free(ctx, huffman_array);
-                prc_free(ctx, leaf_values);
-                prc_free(ctx, code_length);
-                prc_free(ctx, code_values);
-                prc_free(ctx, node_arena);
-                return NULL;
-            }
-
-            /* And finally the encoded values */
-            index = 0;
-            curr_node = root_node;
-            while (index < num_values)
-            {
-                bit = prc_bitread_huff_bit(ctx, &huff_state);
-                num_bits_read += 1;
-                if (bit == 0)
-                {
-                    curr_node = curr_node->left;
-                }
-                else
-                {
-                    curr_node = curr_node->right;
-                }
-                if (curr_node == NULL || huff_state.overrun)
-                {
-                    /* A crafted/incomplete code table can walk into an unbuilt
-                       branch, or the substream can run dry before num_values is
-                       reached. Fail cleanly instead of dereferencing NULL. */
-                    prc_error(ctx, PRC_ERROR_HUFFMAN, "Invalid huffman code encountered while decoding\n");
-                    prc_free(ctx, huffman_array);
-                    prc_free(ctx, leaf_values);
-                    prc_free(ctx, code_length);
-                    prc_free(ctx, code_values);
-                    prc_free(ctx, data);
-                    prc_free(ctx, node_arena);
-                    return NULL;
-                }
-                if (curr_node->is_leaf)
-                {
-                    data[index] = curr_node->value;
-                    index += 1;
-                    curr_node = root_node;
-                }
-            }
-            *data_size = num_values;
-
-            prc_free(ctx, huffman_array);
-            prc_free(ctx, leaf_values);
-            prc_free(ctx, code_length);
-            prc_free(ctx, code_values);
-            prc_free(ctx, node_arena);
-
+            /* Shared with prc_huffman_data_decoder -- see prc_huffman_decode_core. */
+            data = (uint8_t *)prc_huffman_decode_core(ctx, state, num_bits, huffman_array_size, sizeof(uint8_t), data_size);
             return data;
         }
         else
