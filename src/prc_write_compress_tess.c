@@ -1015,6 +1015,8 @@ prc_encode_preprocess(prc_context *ctx,
                                 prc_free(ctx, vtri_count); prc_free(ctx, vtri_start); prc_free(ctx, vtri_list);
                                 prc_free(ctx, vedge_count); prc_free(ctx, vedge_start); prc_free(ctx, vedge_list);
                                 prc_free(ctx, vparent); prc_free(ctx, vfan_new_vertex);
+                                if (tri_local != NULL) prc_free(ctx, tri_local);
+                                if (tri_local_stamp != NULL) prc_free(ctx, tri_local_stamp);
                                 ret = PRC_ERROR_MEMORY;
                                 goto fail;
                             }
