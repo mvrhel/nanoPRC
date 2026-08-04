@@ -16,6 +16,7 @@
 
 #include <string.h>
 #include <prc_context.h>
+#include "prc_diag_env.h"
 
 extern prc_hooks prc_hooks_default;
 
@@ -38,8 +39,8 @@ prc_new_context(const prc_hooks *hooks)
 
     ctx->internal.reader_version = 10001; /* PRC ISO Standard Version Number */
 
-    ctx->trace_reversed = (getenv("PRC_TRACE_REVERSED") != NULL);
-    ctx->trace_normals = (getenv("PRC_TRACE_NORMALS") != NULL);
+    ctx->trace_reversed = (prc_diag_getenv("PRC_TRACE_REVERSED") != NULL);
+    ctx->trace_normals = (prc_diag_getenv("PRC_TRACE_NORMALS") != NULL);
 
 #if PRC_DEBUG_MEMORY
     ctx->debug_memory = calloc(PRC_DEBUG_MEMORY_SIZE, sizeof(prc_debug_memory));

@@ -76,6 +76,18 @@ can be written as uncompressed triangles, wire geometry, or the fully compressed
 always tessellated before writing -- PRC also supports writing exact NURBS/B-Rep surfaces directly, but
 nanoPRC does not do that yet. Materials/colors/styles are not yet exposed through the write API either.
 
+### Diagnostic Environment-Variable Hooks
+
+Various internal `PRC_DIAG_*`/`PRC_TRACE_*`/`PRC_FUZZ_*` environment variables gate development-only
+tracing and behavior overrides used while debugging specific issues (see inline comments at each call
+site in `src/`/`demos/stl_import/` for what an individual one does). By default these hooks don't exist
+in the compiled binary at all -- not just inert, actually absent, so there's no runtime cost and no
+discoverable/settable surface in a normal build. Enable them at configure time if you need to use one:
+
+```bash
+cmake -S . -B build -DPRC_ENABLE_DIAG_ENV=ON
+```
+
 ### Deterministic Unzipped-Section Fuzzing
 
 For robustness testing of parser error paths, you can fuzz only the unzipped PRC section buffers

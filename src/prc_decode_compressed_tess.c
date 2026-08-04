@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include "prc_vector_util.h"
 #include "prc_huff.h"
+#include "prc_diag_env.h"
 #include <stdio.h>
 //#include "prc_json_debug.h"  /* Used for debug */
 
@@ -60,9 +61,9 @@ prc_debug_hooks_init(void)
     if (prc_debug_hooks_read)
         return;
     prc_debug_hooks_read = 1;
-    v = getenv("PRC_DEBUG_DISABLE_ORIENT_FLIP");
+    v = prc_diag_getenv("PRC_DEBUG_DISABLE_ORIENT_FLIP");
     prc_debug_disable_orient_flip = (v != NULL && v[0] != '\0' && v[0] != '0');
-    v = getenv("PRC_DEBUG_DISABLE_INDEX_SWAP");
+    v = prc_diag_getenv("PRC_DEBUG_DISABLE_INDEX_SWAP");
     prc_debug_disable_index_swap = (v != NULL && v[0] != '\0' && v[0] != '0');
 }
 

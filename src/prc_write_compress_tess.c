@@ -24,6 +24,7 @@
 #include "prc_parse_common.h"
 #include "prc_decode_compressed_tess.h"
 #include "prc_huff.h"
+#include "prc_diag_env.h"
 
 typedef struct
 {
@@ -175,7 +176,7 @@ prc_encode_position_jitter(double x, double y, double z, double magnitude, uint6
     memcpy(in + 8, &fz, 4);
     prc_md5_12bytes(in, digest);
 
-    if (getenv("PRC_DIAG_MD5_SELFTEST") != NULL)
+    if (prc_diag_getenv("PRC_DIAG_MD5_SELFTEST") != NULL)
     {
         int di;
         fprintf(stderr, "PRC_DIAG_MD5_SELFTEST digest=");
@@ -331,7 +332,7 @@ prc_encode_preprocess(prc_context *ctx,
         (out->bbox[5] - out->bbox[2]) * (out->bbox[5] - out->bbox[2]));
     tol = prc_write_tol_resolve(ctx, tolerance, diagonal);
     {
-        const char *ov = getenv("PRC_DIAG_FORCE_TOLERANCE_MM");
+        const char *ov = prc_diag_getenv("PRC_DIAG_FORCE_TOLERANCE_MM");
         if (ov != NULL)
             tol = atof(ov);
     }
@@ -374,11 +375,11 @@ prc_encode_preprocess(prc_context *ctx,
                own mitigation. NOT a default: stacking with demos/stl_import's own mitigation
                double-jitters and has been confirmed to produce a DIFFERENT (still-failing)
                result than either mitigation alone. */
-            uint8_t do_jitter = (getenv("PRC_DIAG_ENABLE_POSITION_JITTER") != NULL);
+            uint8_t do_jitter = (prc_diag_getenv("PRC_DIAG_ENABLE_POSITION_JITTER") != NULL);
             double jitter_magnitude = tol * PRC_ENCODE_JITTER_TOLERANCE_FACTOR;
             uint64_t jitter_seed = 0;
-            const char *seed_env = getenv("PRC_DIAG_JITTER_SEED");
-            const char *factor_env = getenv("PRC_DIAG_JITTER_TOLERANCE_FACTOR");
+            const char *seed_env = prc_diag_getenv("PRC_DIAG_JITTER_SEED");
+            const char *factor_env = prc_diag_getenv("PRC_DIAG_JITTER_TOLERANCE_FACTOR");
 
             if (seed_env != NULL)
                 jitter_seed = (uint64_t)strtoull(seed_env, NULL, 10);
@@ -481,7 +482,7 @@ prc_encode_preprocess(prc_context *ctx,
            PRC_DIAG_SLIVER_SIN_THRESHOLD overrides this default (e.g. "0" to
            disable entirely for diagnostic comparison, or another positive
            value to tune) but is not required for normal operation. */
-        const char *sliver_env = getenv("PRC_DIAG_SLIVER_SIN_THRESHOLD");
+        const char *sliver_env = prc_diag_getenv("PRC_DIAG_SLIVER_SIN_THRESHOLD");
         double sliver_sin_threshold = sliver_env != NULL ? atof(sliver_env) : 0.01;
         uint32_t sliver_removed = 0;
 
@@ -536,7 +537,7 @@ prc_encode_preprocess(prc_context *ctx,
         }
         out->num_triangles = clean_tris;
         (void)removed;
-        if (sliver_removed > 0 && getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+        if (sliver_removed > 0 && prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
             printf("PRC_DIAG_SLIVER_SIN_THRESHOLD=%.6g: removed %u sliver triangles (of %u total removed)\n",
                 sliver_sin_threshold, sliver_removed, removed);
 
@@ -569,7 +570,7 @@ prc_encode_preprocess(prc_context *ctx,
        scan data can contain near-collinear/near-zero-area slivers that
        exact-duplicate-vertex filtering doesn't catch. Read-only, does not
        affect encoder output. */
-    if (clean_tris > 0 && getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+    if (clean_tris > 0 && prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
     {
         double min_edge_len = 1e300, min_cross_len = 1e300;
         double min_edge_len_rel = 1e300, min_cross_len_rel = 1e300;
@@ -714,7 +715,7 @@ prc_encode_preprocess(prc_context *ctx,
                             excess_tri[num_excess] = i;
                             excess_slot[num_excess] = e;
                             num_excess++;
-                            if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+                            if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
                             {
                                 prc_nonmanifold_edge_count_diag++;
                                 printf("PRC_DIAG_MESH_QUALITY: nonmanifold edge v0=%u v1=%u tri0=%d tri1=%d extra_tri=%u "
@@ -723,7 +724,7 @@ prc_encode_preprocess(prc_context *ctx,
                                     out->edges[s->edge_index].tri0 >= 0 ? (int)out->tri_orig_index[out->edges[s->edge_index].tri0] : -1,
                                     out->edges[s->edge_index].tri1 >= 0 ? (int)out->tri_orig_index[out->edges[s->edge_index].tri1] : -1,
                                     out->tri_orig_index[i]);
-                                if (getenv("PRC_DIAG_DUMP_NONMANIFOLD_REGION") != NULL)
+                                if (prc_diag_getenv("PRC_DIAG_DUMP_NONMANIFOLD_REGION") != NULL)
                                 {
                                     printf("PRC_DIAG_DUMP_REGION: edge v0=%u pos=(%.17g,%.17g,%.17g) v1=%u pos=(%.17g,%.17g,%.17g)\n",
                                         v0, out->positions[(size_t)v0 * 3 + 0], out->positions[(size_t)v0 * 3 + 1], out->positions[(size_t)v0 * 3 + 2],
@@ -805,7 +806,7 @@ prc_encode_preprocess(prc_context *ctx,
         }
 
         out->num_edges = nedges;
-        if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+        if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
         {
             uint32_t boundary_edges = 0, ei;
             for (ei = 0; ei < nedges; ei++)
@@ -976,7 +977,7 @@ prc_encode_preprocess(prc_context *ctx,
 
             if (vtri_count && vtri_start && vtri_list && vedge_count && vedge_start && vedge_list && vparent && vfan_new_vertex
                 && tri_local && tri_local_stamp
-                && getenv("PRC_DIAG_DISABLE_NONMANIFOLD_SPLIT") == NULL)
+                && prc_diag_getenv("PRC_DIAG_DISABLE_NONMANIFOLD_SPLIT") == NULL)
             {
                 for (vi = 0; vi < orig_num_positions; vi++)
                 {
@@ -1011,14 +1012,14 @@ prc_encode_preprocess(prc_context *ctx,
                     if (ncomp2 < 2) continue;
 
                     nonmanifold_vertices++;
-                    if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+                    if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
                         printf("PRC_DIAG_MESH_QUALITY: nonmanifold VERTEX v=%u incident_triangles=%u (multiple disconnected fans, splitting)\n",
                             vi, deg);
                     /* Diagnostic-only, separately gated (verbose): dump this
                        vertex's own position and every incident triangle's
                        full geometry, enough to reconstruct a minimal
                        synthetic repro of just this fix site by hand. */
-                    if (getenv("PRC_DIAG_DUMP_NONMANIFOLD_REGION") != NULL)
+                    if (prc_diag_getenv("PRC_DIAG_DUMP_NONMANIFOLD_REGION") != NULL)
                     {
                         uint32_t k4;
                         printf("PRC_DIAG_DUMP_REGION: vertex v=%u pos=(%.17g,%.17g,%.17g)\n", vi,
@@ -1093,7 +1094,7 @@ prc_encode_preprocess(prc_context *ctx,
                                -tree bug, independent of the split MECHANISM
                                itself. PRC_DIAG_SPLIT_OFFSET_MULT=N. */
                             {
-                                const char *ov = getenv("PRC_DIAG_SPLIT_OFFSET_MULT");
+                                const char *ov = prc_diag_getenv("PRC_DIAG_SPLIT_OFFSET_MULT");
                                 if (ov != NULL)
                                     offset_mag2 = tol * strtod(ov, NULL);
                             }
@@ -1146,9 +1147,15 @@ prc_encode_preprocess(prc_context *ctx,
                         }
                     }
                 }
+<<<<<<< jitter_scope_fix
                 if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
                     printf("PRC_DIAG_MESH_QUALITY: nonmanifold_vertices=%u vertex_splits=%u corner_touches_preserved=%u (out of %u positions before splitting)\n",
                         nonmanifold_vertices, splits_needed, corner_touches_preserved, orig_num_positions);
+=======
+                if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+                    printf("PRC_DIAG_MESH_QUALITY: nonmanifold_vertices=%u vertex_splits=%u (out of %u positions before splitting)\n",
+                        nonmanifold_vertices, splits_needed, orig_num_positions);
+>>>>>>> main
             }
             out->nonmanifold_vertices = nonmanifold_vertices;
             if (vtri_count != NULL) prc_free(ctx, vtri_count);
@@ -1227,7 +1234,7 @@ prc_encode_preprocess(prc_context *ctx,
         }
         out->num_components = ncomp;
 
-        if (getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+        if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
             printf("PRC_DIAG_MESH_QUALITY: num_components=%u clean_tris=%u num_positions=%u\n",
                 ncomp, clean_tris, out->num_positions);
 
@@ -1282,7 +1289,7 @@ prc_encode_max_chain(void)
     static uint32_t value = PRC_ENCODE_MAX_CHAIN;
     if (!cached)
     {
-        const char *env = getenv("PRC_DIAG_MAX_CHAIN");
+        const char *env = prc_diag_getenv("PRC_DIAG_MAX_CHAIN");
         if (env != NULL)
         {
             long v = strtol(env, NULL, 10);
@@ -1417,7 +1424,7 @@ prc_encode_emit_axis_point(prc_encode_state *st, uint32_t mesh_vtx, prc_vec3 bas
        harmlessly share 2 coordinates for unrelated geometric reasons).
        Opt-in via PRC_DIAG_CHAINSTART_ZERO, zero cost/behavior change when
        unset. */
-    if (getenv("PRC_DIAG_CHAINSTART_ZERO") != NULL &&
+    if (prc_diag_getenv("PRC_DIAG_CHAINSTART_ZERO") != NULL &&
         base.x == st->origin.x && base.y == st->origin.y && base.z == st->origin.z)
     {
         int zeros = (dv[0] == 0) + (dv[1] == 0) + (dv[2] == 0);
@@ -1467,7 +1474,7 @@ prc_encode_use_cramer_basis(void)
 {
     static int cached = -1;
     if (cached < 0)
-        cached = (getenv("PRC_DIAG_USE_CRAMER_BASIS") != NULL) ? 1 : 0;
+        cached = (prc_diag_getenv("PRC_DIAG_USE_CRAMER_BASIS") != NULL) ? 1 : 0;
     return cached;
 }
 
@@ -2116,7 +2123,7 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         out->origin[2] = (double)(float)mesh->bbox[2];
     }
     {
-        const char *ov = getenv("PRC_DIAG_FORCE_ORIGIN");
+        const char *ov = prc_diag_getenv("PRC_DIAG_FORCE_ORIGIN");
         if (ov != NULL)
         {
             double ox, oy, oz;
@@ -2271,7 +2278,7 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                edge). Distinguishes "genuine dead end" from "neighbor exists
                but timing stranded this triangle". Read-only, no behavior
                change. */
-            if (emitted > 0 && getenv("PRC_DIAG_RESTART_REASON") != NULL)
+            if (emitted > 0 && prc_diag_getenv("PRC_DIAG_RESTART_REASON") != NULL)
             {
                 int32_t n0 = st.neighbor[(size_t)cur * 3 + 0];
                 int32_t n1 = st.neighbor[(size_t)cur * 3 + 1];
@@ -2311,7 +2318,7 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
            then push, in one pass) is the whole point. */
         if (st.real_normals != NULL)
         {
-            st.tri_reversed[cur] = getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL ? 0 :
+            st.tri_reversed[cur] = prc_diag_getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL ? 0 :
                 prc_encode_decide_reversed(&st, cur, idx, mv);
             out->triangle_reversed[emitted] = st.tri_reversed[cur];
         }
@@ -2661,7 +2668,7 @@ prc_encode_normals_c1(prc_context *ctx, const prc_encode_mesh *mesh,
        the decoder's own crease-angle smoothing will approximately
        reconstruct) as the stand-in "input normal". Purely additive/read-
        only; does not affect encoder output. */
-    if (input_normals == NULL && getenv("PRC_DIAG_COUNT_REVERSED") != NULL)
+    if (input_normals == NULL && prc_diag_getenv("PRC_DIAG_COUNT_REVERSED") != NULL)
     {
         prc_vec3 *vertex_normal = (prc_vec3 *)prc_calloc(ctx, mesh->num_positions, sizeof(prc_vec3));
         uint32_t growing = 0, would_want_rev = 0;
@@ -3379,7 +3386,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
        stricter reader's array-cardinality validation depends on. */
     {
         uint32_t t_count = trav->edge_status_array_size;
-        uint32_t padded_count = (getenv("PRC_DIAG_NO_EDGE_STATUS_PADDING") != NULL) ? t_count : t_count * 3;
+        uint32_t padded_count = (prc_diag_getenv("PRC_DIAG_NO_EDGE_STATUS_PADDING") != NULL) ? t_count : t_count * 3;
         uint8_t *padded = (uint8_t *)prc_calloc(ctx, padded_count > 0 ? padded_count : 1, sizeof(uint8_t));
 
         if (padded == NULL)
@@ -3740,7 +3747,7 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
     if (!must_recalculate_normals)
     {
         code = prc_encode_normals_c2(ctx, &mesh, &trav, corner_normals, &angles, &acount, &bin, &bsize);
-        if (getenv("PRC_DIAG_C2_FALLBACK") != NULL)
+        if (prc_diag_getenv("PRC_DIAG_C2_FALLBACK") != NULL)
             printf("PRC_DIAG_C2_FALLBACK: prc_encode_normals_c2 code=%d (0=succeeded, nonzero=fell back to C1)\n", code);
         if (code != 0)
         {

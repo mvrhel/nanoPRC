@@ -102,6 +102,13 @@ static uint32_t
 prc_fuzz_read_env_u32(const char *env_name, uint32_t default_value, uint32_t min_value,
                       uint32_t max_value)
 {
+    /* Deliberately plain getenv(), not prc_diag_getenv(): this whole function
+       only exists when PRC_ENABLE_UNZIPPED_FUZZ is on (see the #if guarding
+       this file's fuzz section), which already provides the same
+       compiled-out-by-default guarantee prc_diag_getenv exists for.
+       Double-gating behind PRC_ENABLE_DIAG_ENV too would silently break
+       PRC_FUZZ_SEED/RATE/etc (this README-documented feature) for anyone
+       who only sets PRC_ENABLE_UNZIPPED_FUZZ=ON, since it defaults off. */
     const char *text = getenv(env_name);
     unsigned long parsed;
     char *endptr;
@@ -179,6 +186,7 @@ static uint32_t
 prc_fuzz_read_section_mask(void)
 {
     uint32_t mask_override;
+    /* Plain getenv() -- see prc_fuzz_read_env_u32's comment above. */
     const char *text = getenv("PRC_FUZZ_SECTION");
     char buffer[256];
     char *token;
@@ -229,6 +237,7 @@ prc_fuzz_should_mutate(uint32_t section_mask, uint32_t section_bit)
 static const char*
 prc_fuzz_log_path(void)
 {
+    /* Plain getenv() -- see prc_fuzz_read_env_u32's comment above. */
     const char *path = getenv("PRC_FUZZ_LOG");
     if (path == NULL || *path == '\0')
     {
