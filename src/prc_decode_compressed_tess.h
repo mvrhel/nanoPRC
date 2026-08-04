@@ -71,7 +71,6 @@ struct prc_normal_state_s
     uint32_t angle_index;
     uint8_t *normal_is_reversed;
     decoded_normal_info *multiple_normals;
-    prc_vec3 *actual_normals;
 };
 
 struct edge_entry_s

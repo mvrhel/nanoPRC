@@ -14,8 +14,6 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define VERTEX_DEBUG 0
-
 #include "prc_parse_tess.h"
 #include "prc_parse_common.h"
 #include "prc_decode_compressed_tess.h"
@@ -27,7 +25,6 @@
 #include "prc_huff.h"
 #include "prc_diag_env.h"
 #include <stdio.h>
-//#include "prc_json_debug.h"  /* Used for debug */
 
 /* Diagnostic-only debug hooks (env-var gated, mirrors the PRC_FUZZ_* convention
    in prc_parse_main.c), used to empirically test whether the conditional
@@ -1310,26 +1307,6 @@ prc_decode_normal(prc_context *ctx, prc_tess_3d_compressed *data,
             treated_tri->points[2].x, treated_tri->points[2].y, treated_tri->points[2].z);
     }
 
-#if VERTEX_DEBUG
-    if (debug_tess)
-    {
-        if (normal_state->actual_normals != NULL)
-        {
-            /* Compare the normal to the actual normal */
-            if (fabs(vertex_normal.x - normal_state->actual_normals[normal_state->normals_vertex_count].x) > 0.00000000000000100 ||
-                fabs(vertex_normal.y - normal_state->actual_normals[normal_state->normals_vertex_count].y) > 0.00000000000000100 ||
-                fabs(vertex_normal.z - normal_state->actual_normals[normal_state->normals_vertex_count].z) > 0.00000000000000100)
-            {
-                DEBUG_LOG("ERROR: Normal %d does not match\n", normal_state->normals_vertex_count);
-                DEBUG_LOG("    [%.17f %.17f %.17f]\n", vertex_normal.x, vertex_normal.y, vertex_normal.z);
-                DEBUG_LOG("    [%.17f %.17f %.17f]\n", normal_state->actual_normals[normal_state->normals_vertex_count].x,
-                    normal_state->actual_normals[normal_state->normals_vertex_count].y, normal_state->actual_normals[normal_state->normals_vertex_count].z);
-                //vertex_normal = normal_state->actual_normals[normal_state->normals_vertex_count];
-            }
-        }
-    }
-#endif
-
     normal_state->normals_vertex[normal_state->normals_vertex_count] = vertex_normal;
     normal_state->normals_vertex_count += 1;
     normal_state->normal = vertex_normal; /* This is the normal for the current vertex */
@@ -1927,7 +1904,6 @@ prc_initialize_normal_state(prc_context *ctx, prc_tess_3d_compressed *data,
     normal_state->normals_vertex = normals_vertex;
     normal_state->normal_is_reversed = data->normal_is_reversed;
     normal_state->multiple_normals = multiple_norms;
-    normal_state->actual_normals = NULL;
 }
 
 static int
@@ -2510,40 +2486,6 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         }
     }
 
-#if VERTEX_DEBUG
-
-    /* Load list of vertices that we know exist for this */
-    prc_vec3 *actual_vertices = NULL;
-    prc_vec3 *actual_normals = NULL;
-    uint32_t *actual_indices = NULL;
-    FILE *fid = NULL;
-    FILE *fid2 = NULL;
-
-    if (debug_tess)
-    {
-        code = debug_prc_read_vertices_from_JSON_file(ctx, "Add file here", &actual_vertices, num_points);
-        if (code < 0)
-        {
-            goto cleanup;
-        }
-
-        code = debug_prc_read_vertices_from_JSON_file(ctx, "Add file here", &actual_normals, 1857);
-        if (code < 0)
-        {
-            goto cleanup;
-        }
-
-        /* Open the file */
-        fid = fopen("vertex_difference_CARB.txt", "w");
-        if (fid == NULL)
-        {
-            prc_error(ctx, PRC_ERROR_FILE, "Failed to open vertex difference file\n");
-            code = PRC_ERROR_FILE;
-            goto cleanup;
-        }
-    }
-#endif
-
     /* Go ahead and scale all the compressed values by the tolerance. */
     prc_scale_data_points(ctx, data, point_array_scaled);
 
@@ -2557,16 +2499,6 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     /* Initialize the normal structure */
     prc_initialize_normal_state(ctx, data, &normal_state, normals_vertex, decoded_angles,
         face_normal_decoded, face_normals, multiple_normals, face_normal_indices);
-
-#if VERTEX_DEBUG
-    if (debug_tess)
-    {
-        if (actual_normals != NULL)
-        {
-            normal_state.actual_normals = actual_normals;
-        }
-    }
-#endif
 
     /* Deal with the normal calculation for all the various cases */
     code = prc_handle_normal_calculation(ctx, data, &treated_tri, vertex_normal_indices,
@@ -2832,39 +2764,6 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                 DEBUG_LOG("Next Pt: %d\n", vertex_treatment_count);
                 DEBUG_LOG("    [%.17f %.17f %.17f]\n", new_point.x, new_point.y, new_point.z);
 
-#if VERTEX_DEBUG
-                if (debug_tess)
-                {
-                    /* Compare the new point to the value in actual_vertices */
-                    if (actual_vertices != NULL)
-                    {
-                        if (fabs(new_point.x - actual_vertices[point_array_count].x) > 0.00000100 ||
-                            fabs(new_point.y - actual_vertices[point_array_count].y) > 0.00000100 ||
-                            fabs(new_point.z - actual_vertices[point_array_count].z) > 0.00000100)
-                        {
-                            int zz = 1;
-                            DEBUG_LOG("ERROR: Point %d does not match\n", point_array_count);
-                            DEBUG_LOG("INDEX was %d\n", k)
-                                DEBUG_LOG("    [%1.5f %1.5f %1.5f]\n", new_point.x, new_point.y, new_point.z);
-                            DEBUG_LOG("    [%1.5f %1.5f %1.5f]\n", actual_vertices[point_array_count].x,
-                                actual_vertices[point_array_count].y, actual_vertices[point_array_count].z);
-                        }
-
-                        fprintf(fid, "%d %1.5f %1.5f %1.5f %1.5f %1.5f %1.5f\n", point_array_count,
-                            new_point.x, new_point.y, new_point.z, actual_vertices[point_array_count].x,
-                            actual_vertices[point_array_count].y, actual_vertices[point_array_count].z);
-
-                        /* Lets use the actual value as our new point */
-                        if (k < 0)
-                        {
-                            new_point.x = actual_vertices[point_array_count].x;
-                            new_point.y = actual_vertices[point_array_count].y;
-                            new_point.z = actual_vertices[point_array_count].z;
-                        }
-                    }
-                }
-#endif
-
                 point_array_count++;
                 new_normal_index = vertex_treatment_count;
                 new_indice_index = vertex_treatment_count;
@@ -2908,30 +2807,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                 triangle_style_array, &style_index);
         }
 
-#if VERTEX_DEBUG
-        if (debug_tess)
-        {
-            if (actual_indices != NULL)
-            {
-                fprintf(fid2, "%d %d %d %d %d %d %d\n", point_array_count,
-                    triangle_indices[triangle_indice_count - 3], triangle_indices[triangle_indice_count - 2],
-                    triangle_indices[triangle_indice_count - 1], actual_indices[k * 3],
-                    actual_indices[k * 3 + 1], actual_indices[k * 3 + 2]);
-            }
-        }
-#endif
     }
 
-#if VERTEX_DEBUG
-    if (debug_tess)
-    {
-        if (fid != NULL)
-        {
-            fclose(fid);
-            // fclose(fid2);
-        }
-    }
-#endif
     number_of_normals = normal_state.normals_vertex_count;
 
     data->triangle_indices_prc_compressed_3d = triangle_indices;
@@ -3167,15 +3044,6 @@ cleanup:
         prc_free(ctx, multiple_normals);
     }
 
-#if VERTEX_DEBUG
-    if (debug_tess)
-    {
-        if (actual_vertices != NULL)
-            prc_free(ctx, actual_vertices);
-        if (actual_indices != NULL)
-            prc_free(ctx, actual_indices);
-    }
-#endif
     return status_code;
 }
 

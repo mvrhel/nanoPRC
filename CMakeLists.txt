@@ -66,6 +66,7 @@ set(PRC_CORE_SOURCES
 	"src/prc_tri_primitives_helper_api.c"
 	"src/prc_uncompressed_primitives_api.c"
 	"src/prc_bit.c"
+	"src/prc_bit_debug.c"
 	"src/prc_write_bit.c"
 	"src/prc_write_common.c"
 	"src/prc_write_compress_tess.c"

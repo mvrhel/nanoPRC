@@ -116,9 +116,6 @@ prc_bitread_bit(prc_context *ctx, prc_bit_state *state)
 		return 0;
 }
 
-void prc_debug_view_stream_bounding_box_search(prc_context *ctx, prc_bit_state *state);
-void prc_debug_view_stream_on_byte_boundary(prc_context *ctx, prc_bit_state *state);
-void prc_debug_stream(prc_context *ctx, prc_bit_state *state);
 void prc_init_bit_state(prc_context* ctx, prc_bit_state* state, uint8_t* ptr, size_t byte_count);
 uint8_t prc_bitread_uint8(prc_context* ctx, prc_bit_state* state);
 uint32_t prc_bitread_uint32(prc_context* ctx, prc_bit_state* state);
