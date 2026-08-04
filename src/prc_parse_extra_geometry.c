@@ -2496,6 +2496,60 @@ prc_parse_crv_equation(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
+/* Table 268 Type0HelixData */
+static void
+prc_parse_crv_type0_helix(prc_context *ctx, prc_bit_state *bit_state, prc_type0_helix_data *data)
+{
+    data->origin_0 = prc_bitread_double(ctx, bit_state);
+    data->direction_0 = prc_bitread_double(ctx, bit_state);
+    data->origin_1 = prc_bitread_double(ctx, bit_state);
+    data->direction_1 = prc_bitread_double(ctx, bit_state);
+    data->origin_2 = prc_bitread_double(ctx, bit_state);
+    data->direction_2 = prc_bitread_double(ctx, bit_state);
+    data->pitch = prc_bitread_double(ctx, bit_state);
+    data->radius = prc_bitread_double(ctx, bit_state);
+}
+
+/* Table 269 TypeaHelixData */
+static int
+prc_parse_crv_type1_helix(prc_context *ctx, prc_bit_state *bit_state, prc_type1_helix_data *data)
+{
+    int code;
+
+    data->unit_z0 = prc_bitread_double(ctx, bit_state);
+    data->unit_u0 = prc_bitread_double(ctx, bit_state);
+    data->unit_z1 = prc_bitread_double(ctx, bit_state);
+    data->unit_u1 = prc_bitread_double(ctx, bit_state);
+    data->unit_z2 = prc_bitread_double(ctx, bit_state);
+    data->unit_u2 = prc_bitread_double(ctx, bit_state);
+    data->reserved_double_0 = prc_bitread_double(ctx, bit_state);
+    data->reserved_double_1 = prc_bitread_double(ctx, bit_state);
+    data->reserved_double_2 = prc_bitread_double(ctx, bit_state);
+    data->reserved_double_3 = prc_bitread_double(ctx, bit_state);
+
+    code = prc_parse_math_fct_1d(ctx, bit_state, &data->radius_law);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_math_fct_1d\n");
+        return code;
+    }
+
+    code = prc_parse_math_fct_1d(ctx, bit_state, &data->z_law);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_math_fct_1d\n");
+        return code;
+    }
+
+    code = prc_parse_math_fct_1d(ctx, bit_state, &data->theta_law);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_math_fct_1d\n");
+        return code;
+    }
+    return 0;
+}
+
 /* Table 266 PRC_TYPE_CRV_Helix01 */
 static int
 prc_parse_crv_helix01(prc_context *ctx, prc_bit_state *bit_state,
@@ -2521,6 +2575,29 @@ prc_parse_crv_helix01(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_error(ctx, code, "Parsing error in prc_parse_content_curve\n");
         return code;
+    }
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+    data->type = prc_bitread_uint8(ctx, bit_state);
+    data->orientation = prc_bitread_bit(ctx, bit_state);
+    data->start = prc_parse_3d_vector(ctx, bit_state);
+
+    if (data->type == 0)
+    {
+        prc_parse_crv_type0_helix(ctx, bit_state, &data->type0_helix);
+    }
+    else
+    {
+        code = prc_parse_crv_type1_helix(ctx, bit_state, &data->type1_helix);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Parsing error in prc_parse_crv_type1_helix\n");
+            return code;
+        }
     }
 
     return 0;
@@ -2552,6 +2629,17 @@ prc_parse_crv_hyperbola(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_curve\n");
         return code;
     }
+
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+    data->semi_axis_image = prc_bitread_double(ctx, bit_state); /* Different than spec */
+    data->semi_axis = prc_bitread_double(ctx, bit_state);
+    data->type = prc_bitread_uint32(ctx, bit_state);
 
     return 0;
 }
