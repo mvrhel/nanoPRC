@@ -2804,7 +2804,7 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                cases above is hit) so a chain's point-count is derivable without
                touching that function itself. Zero behavior change when unset. */
             {
-                uint8_t diag_chains = (getenv("PRC_DIAG_CHAIN_BOUNDARIES") != NULL);
+                uint8_t diag_chains = (prc_diag_getenv("PRC_DIAG_CHAIN_BOUNDARIES") != NULL);
                 uint32_t before_count = diag_chains ? point_array_count : 0;
 
                 /* We may need to revisit this and its interaction with the code below it */

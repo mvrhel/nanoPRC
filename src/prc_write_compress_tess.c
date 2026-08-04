@@ -2700,7 +2700,7 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             }
         }
     }
-    if (getenv("PRC_DIAG_PRINT_BBOX_ORIGIN") != NULL)
+    if (prc_diag_getenv("PRC_DIAG_PRINT_BBOX_ORIGIN") != NULL)
     {
         fprintf(stderr, "PRC_DIAG_PRINT_BBOX_ORIGIN: bbox=[%.6f,%.6f,%.6f .. %.6f,%.6f,%.6f] origin=[%.6f,%.6f,%.6f]\n",
             mesh->bbox[0], mesh->bbox[1], mesh->bbox[2],
