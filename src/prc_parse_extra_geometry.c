@@ -5784,7 +5784,13 @@ prc_parse_context_graphics(prc_context *ctx, prc_bit_state *bit_state, prc_conte
     data->number_of_treat_type = prc_bitread_uint32(ctx, bit_state);
     if (data->number_of_treat_type > 0)
     {
-        data->treat_types = (prc_graphics_information *)prc_malloc(ctx, data->number_of_treat_type * sizeof(prc_graphics_information));
+        /* Zero-initialized: if prc_parse_graphics_information fails partway
+           through the loop below, this function returns early and leaves the
+           remaining elements untouched. number_of_treat_type still reports
+           the full count, so release code later walks past the populated
+           elements -- calloc keeps their pointer fields NULL (instead of
+           uninitialized/malloc garbage) so that walk is safe. */
+        data->treat_types = (prc_graphics_information *)prc_calloc(ctx, data->number_of_treat_type, sizeof(prc_graphics_information));
         if (data->treat_types == NULL)
         {
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_context_graphics\n");

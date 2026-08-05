@@ -24,6 +24,7 @@ __pycache__/
 # Local debug build artifacts
 build-debug/
 build_asan/
+build_debugmem/
 python/src/nanoprc_py/_core.pdb
 
 # Generated Doxygen output

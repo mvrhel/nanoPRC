@@ -26,10 +26,12 @@
  * Usage:
  *     nano_prc_stl_import <input.stl> [output.prc] [output.pdf]
  *                          [--original-normals] [--weld-tolerance F]
+ *                          [--quant-tolerance F]
  * Output paths default to the input file's own basename with .stl swapped
- * for .prc/.pdf if omitted. --original-normals and --weld-tolerance are
- * documented where they're used below (stl_options_parse) and in the
- * per-part tessellation build step (stl_import_build_tess_entries).
+ * for .prc/.pdf if omitted. --original-normals, --weld-tolerance, and
+ * --quant-tolerance are documented where they're used below
+ * (stl_options_parse) and in the per-part tessellation build step
+ * (stl_import_build_tess_entries).
  *
  * THE STL FORMAT
  * ---------------------------------------------------------------------
@@ -164,6 +166,24 @@ prc_md5_12bytes(const uint8_t in[12], uint8_t out[16])
  * would mean "always lump, never show separate parts" -- not a useful
  * setting in practice, so this define is not meant to be set to 0. */
 #define STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD 100
+
+/* Default floor for the COMPRESSED entry's own quantization tolerance
+   (--quant-tolerance), used when that flag is omitted -- see quant_
+   tolerance_fraction's resolution in main() below. Value derived (2026-08-02)
+   from an independent commercial PRC encoder's own point_array tolerance on
+   real geometry, back-computed as a bbox-diagonal-relative fraction
+   (independent_tolerance_mm / (nanoPRC_default_tolerance_mm / 1e-6)); see
+   project memory project_point_array_bitwidth_and_prcdb_analysis_2026-08-02.md
+   for the derivation and validation. Real-Acrobat-confirmed safe (UK_original/
+   Walnut/QCD_Leinweber, each with its own correct weld/jitter configuration
+   otherwise unchanged) and corpus-validated (146 real-world files, zero
+   write/decode regressions, ~20% smaller point_array payload on average,
+   worst-case bit-length 23->20) PROVIDED vertex welding and pre-weld jitter
+   magnitude are computed from a separate, unwidened tolerance -- which is
+   exactly what --weld-tolerance (default 1e-6, untouched by this constant)
+   still governs. Never used to make quantization TIGHTER than the mesh's
+   actual weld tolerance -- see the max() in main()'s resolution logic. */
+#define STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION 6.826086758455277e-6
 
 /* Multiplies `count * elem_size`, checking for size_t overflow first.
    Every allocation in this file that scales with a value read from (or
@@ -992,6 +1012,136 @@ uf_union(uint32_t *parent, uint8_t *rank, uint32_t a, uint32_t b)
         rank[a]++;
 }
 
+/* --- 2c: does this file's pre-weld jitter need per-triangle scope? ---
+ *
+ * The per-triangle jitter-magnitude fix (2026-07-29, commit 9076dd0) targets
+ * a specific fragility: mixed COMPRESSED+TRIANGLES trees are sensitive to
+ * over-jittering in a way same-kind trees aren't (see the jitter block's own
+ * comment in main() for the full mechanism/evidence). But it collapses the
+ * jitter magnitude far below the file's own weld tolerance for any file made
+ * of many small triangles relative to its whole bounding box -- confirmed
+ * real-Acrobat-regressive on UK_original.stl (460017 triangles, per-triangle
+ * magnitude ~378x smaller than the pre-fix whole-mesh magnitude that used to
+ * work for it). Mixed-kind trees can only arise when MULTIPLE separate
+ * tessellation entries are written (a single lumped entry never mixes with a
+ * sibling) AND at least one of those entries would contain a non-manifold
+ * vertex (triggering the TRIANGLES fallback) while at least one other
+ * wouldn't. This function estimates that via a throwaway trial weld of the
+ * RAW (un-jittered) positions -- real jitter and the real weld both still run
+ * afterward, unaffected by this trial; the only cost is one extra O(n) weld
+ * pass. Conservative on any ambiguity or allocation failure: returns 1 (use
+ * the finer, proven-safe-for-mixed-kind magnitude) rather than risk
+ * reintroducing the mixed-kind regression the 2026-07-29 fix exists to
+ * prevent. */
+static uint8_t
+stl_import_jitter_needs_per_triangle_scope(const stl_mesh *mesh, double weld_tolerance_fraction, double diagonal)
+{
+    weld_grid trial_grid;
+    uint32_t *trial_weld_index = NULL;
+    uint32_t *trial_parent = NULL;
+    uint8_t *trial_rank = NULL;
+    uint32_t *trial_component_of_root = NULL;
+    uint32_t num_components = 0;
+    uint8_t result = 1; /* conservative default */
+    uint32_t i, t;
+    uint8_t ok = 0;
+    double abs_tol = weld_tolerance_fraction * diagonal;
+
+    memset(&trial_grid, 0, sizeof(trial_grid));
+
+    if (mesh->num_triangles == 0)
+        return 0;
+
+    if (weld_grid_init(&trial_grid, abs_tol, mesh->num_triangles * 3) != 0)
+        return 1;
+
+    trial_weld_index = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)mesh->num_triangles * 3);
+    if (trial_weld_index == NULL)
+    {
+        weld_grid_free(&trial_grid);
+        return 1;
+    }
+
+    for (i = 0; i < mesh->num_triangles * 3; i++)
+    {
+        uint32_t wv = weld_grid_lookup_or_insert(&trial_grid, &mesh->raw_positions[(size_t)i * 3], abs_tol);
+        if (wv == UINT32_MAX)
+            goto done;
+        trial_weld_index[i] = wv;
+    }
+
+    trial_parent = (uint32_t *)malloc(sizeof(uint32_t) * trial_grid.count);
+    trial_rank = (uint8_t *)calloc(trial_grid.count, sizeof(uint8_t));
+    if (trial_parent == NULL || trial_rank == NULL)
+        goto done;
+    for (i = 0; i < trial_grid.count; i++)
+        trial_parent[i] = i;
+    for (t = 0; t < mesh->num_triangles; t++)
+    {
+        uf_union(trial_parent, trial_rank, trial_weld_index[t * 3 + 0], trial_weld_index[t * 3 + 1]);
+        uf_union(trial_parent, trial_rank, trial_weld_index[t * 3 + 1], trial_weld_index[t * 3 + 2]);
+    }
+    trial_component_of_root = (uint32_t *)malloc(sizeof(uint32_t) * trial_grid.count);
+    if (trial_component_of_root == NULL)
+        goto done;
+    for (i = 0; i < trial_grid.count; i++)
+        trial_component_of_root[i] = UINT32_MAX;
+    for (i = 0; i < trial_grid.count; i++)
+    {
+        uint32_t r = uf_find(trial_parent, i);
+        if (trial_component_of_root[r] == UINT32_MAX)
+            trial_component_of_root[r] = num_components++;
+    }
+    ok = 1;
+
+done:
+    if (!ok)
+    {
+        free(trial_weld_index); free(trial_parent); free(trial_rank); free(trial_component_of_root);
+        weld_grid_free(&trial_grid);
+        return 1;
+    }
+
+    if (num_components <= 1)
+    {
+        result = 0; /* only one part -- nothing to mix with */
+    }
+    else
+    {
+        uint8_t force_lump = 0;
+        static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
+        size_t bi;
+        for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
+            if (num_components == known_bad_tess_counts[bi]) { force_lump = 1; break; }
+
+        if (num_components > STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD || force_lump)
+        {
+            result = 0; /* forced into a single lumped entry -- no sibling to mix with */
+        }
+        else
+        {
+            /* Multiple genuinely separate entries will be written. Check
+               whether ANY non-manifold vertex exists anywhere in the file:
+               if none, every part will be COMPRESSED (homogeneous, safe for
+               the coarser magnitude); if at least one exists, at least one
+               part risks being written as TRIANGLES alongside COMPRESSED
+               siblings -- conservatively keep result=1 (mixed-kind risk). */
+            prc_context *check_ctx = prc_api_new_context(NULL);
+            if (check_ctx != NULL)
+            {
+                int has_nm = prc_api_mesh_has_nonmanifold_fans(check_ctx, trial_grid.positions, trial_grid.count,
+                    trial_weld_index, mesh->num_triangles, prc_write_tol_relative(weld_tolerance_fraction));
+                prc_api_release_context(check_ctx);
+                result = (has_nm > 0) ? 1 : 0;
+            }
+        }
+    }
+
+    free(trial_weld_index); free(trial_parent); free(trial_rank); free(trial_component_of_root);
+    weld_grid_free(&trial_grid);
+    return result;
+}
+
 /* ---------------------------------------------------------------------
  * Section 3: normal-index deduplication for --original-normals.
  *
@@ -1257,7 +1407,8 @@ stl_parts_free(stl_parts *parts)
 static int
 stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_positions, uint32_t num_welded,
     const uint32_t *weld_index, int original_normals, const uint32_t *global_normal_index,
-    const double *dedup_normals, double weld_tolerance_fraction, int check_nonmanifold, stl_parts *parts)
+    const double *dedup_normals, double weld_tolerance_fraction, double quant_tolerance_fraction,
+    int check_nonmanifold, stl_parts *parts)
 {
     uint32_t *combined_tri_indices = NULL;
     double *combined_positions = NULL;
@@ -1360,7 +1511,25 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
                validated real-file output at the unhalved tolerance) is
                unaffected; kept as a diagnostic in case a narrower
                investigation wants it later. */
-            double effective_fraction = weld_tolerance_fraction;
+            /* --quant-tolerance (2026-08-02): the COMPRESSED entry's own
+               tolerance (quantization step + internal re-weld) is governed
+               by quant_tolerance_fraction, independent of
+               weld_tolerance_fraction -- which still alone drives this
+               importer's STL-level pre-weld radius (Section 2a) and the
+               pre-weld jitter magnitude below. Motivated by a real-Acrobat
+               finding: widening weld_tolerance_fraction itself to shrink
+               point_array bit-lengths also scaled UK_original.stl's
+               automatic jitter magnitude by the same factor (it's a direct
+               multiple of weld_tolerance_fraction), pushing it out of the
+               narrow, empirically-validated window that escapes the
+               mixed_chains Acrobat collision family -- see project memory
+               project_nonmanifold_split_rootcause_2026-07-31.md.
+               quant_tolerance_fraction defaults to weld_tolerance_fraction
+               (main() resolves the sentinel before either function here is
+               called), so omitting --quant-tolerance is a no-op. Real-
+               Acrobat-validated at 6.826e-6 (vs. nanoPRC's 1e-6 default) on
+               the UK_original/Walnut/QCD_Leinweber regression set. */
+            double effective_fraction = quant_tolerance_fraction;
             if (prc_diag_getenv("PRC_DIAG_HALVE_LUMPED_TOLERANCE") != NULL)
                 effective_fraction *= 0.5;
             tess->tolerance = prc_write_tol_relative(effective_fraction);
@@ -1533,7 +1702,7 @@ static int
 stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uint32_t num_welded,
     const uint32_t *weld_index, const uint32_t *component_of_welded, uint32_t num_components,
     int original_normals, const uint32_t *global_normal_index, const double *dedup_normals,
-    double weld_tolerance_fraction, stl_parts *parts)
+    double weld_tolerance_fraction, double quant_tolerance_fraction, stl_parts *parts)
 {
     uint32_t *component_of_triangle = NULL;
     uint32_t *tri_count_per_component = NULL;
@@ -1585,8 +1754,18 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
         }
         if (num_components > lump_threshold || force_lump)
         {
+            /* DIAGNOSTIC (2026-07-28): allow forcing the non-manifold-fan
+               check even when lumping was triggered by PRC_DIAG_LUMP_THRESHOLD
+               rather than the {3,7,14} count bug, so a manually-forced-small
+               threshold test isolates "does lumping alone help" from "did
+               this also lose non-manifold protection". Zero effect unless
+               PRC_DIAG_LUMP_THRESHOLD is also set (this env var alone does
+               nothing since force_lump already covers the real, non-diagnostic
+               path). */
+            uint8_t check_nm = (uint8_t)(force_lump || getenv("PRC_DIAG_FORCE_LUMP_NONMANIFOLD_CHECK") != NULL);
             ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
-                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction, force_lump, parts);
+                original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction,
+                quant_tolerance_fraction, check_nm, parts);
             goto cleanup;
         }
     }
@@ -1770,7 +1949,11 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
 
         {
             prc_api_write_tessellation *tess = &parts->tess_entries[c];
-            prc_write_tolerance comp_tolerance = prc_write_tol_relative(weld_tolerance_fraction);
+            /* --quant-tolerance: see the matching comment at this function's
+               other tess->tolerance assignment site (the lump path, in
+               stl_import_build_single_lumped_model) -- same parameter, same
+               rationale, applied here for the per-component path. */
+            prc_write_tolerance comp_tolerance = prc_write_tol_relative(quant_tolerance_fraction);
             /* COMPRESSED (not TRIANGLES): welding, degenerate-triangle
                removal, and EdgeBreaker-style traversal compression are all
                built in, giving meaningfully smaller output than TRIANGLES
@@ -2011,7 +2194,8 @@ print_usage(const char *prog)
 {
     fprintf(stderr,
         "Usage: %s <input.stl> [output.prc] [output.pdf] [--original-normals]\n"
-        "                          [--weld-tolerance F] [--verify|--no-verify]\n\n"
+        "                          [--weld-tolerance F] [--quant-tolerance F]\n"
+        "                          [--verify|--no-verify]\n\n"
         "  input.stl            Binary or ASCII STL file to import.\n"
         "  output.prc/.pdf      Default to input's own basename with .stl swapped for .prc/.pdf.\n"
         "  --original-normals   Use the STL file's own stored per-facet normals (flat\n"
@@ -2019,7 +2203,22 @@ print_usage(const char *prog)
         "                       normals at all, letting the reader compute smooth\n"
         "                       per-vertex normals from the welded geometry.\n"
         "  --weld-tolerance F   Vertex-welding tolerance, as a fraction of the mesh's\n"
-        "                       bounding-box diagonal. Default 1e-6.\n"
+        "                       bounding-box diagonal. Default 1e-6. Also sets the\n"
+        "                       pre-weld jitter magnitude (an Acrobat-compatibility\n"
+        "                       mitigation, see the code comment where it's computed) --\n"
+        "                       widening this value changes jitter too, which can\n"
+        "                       reopen an already-escaped Acrobat collision on some\n"
+        "                       files. Use --quant-tolerance instead if you only want\n"
+        "                       smaller COMPRESSED output, not coarser welding.\n"
+        "  --quant-tolerance F  COMPRESSED tessellations' own quantization tolerance\n"
+        "                       (same bounding-box-diagonal-fraction convention as\n"
+        "                       --weld-tolerance), independent of vertex welding and\n"
+        "                       jitter magnitude, both of which stay governed by\n"
+        "                       --weld-tolerance alone. Defaults to the wider of\n"
+        "                       --weld-tolerance's own value and %.6g (nanoPRC's\n"
+        "                       validated default, real-Acrobat- and corpus-tested --\n"
+        "                       see project notes) when omitted, so quantization is\n"
+        "                       never tighter than actual welding by default.\n"
         "  --verify              Force the read-back self-check (see below) even on a\n"
         "                       large mesh where it's skipped by default.\n"
         "  --no-verify           Skip the read-back self-check even on a small mesh\n"
@@ -2029,7 +2228,7 @@ print_usage(const char *prog)
         "                       large COMPRESSED tessellation back can take far\n"
         "                       longer than writing it -- see --verify's own note\n"
         "                       printed at import time when this applies).\n",
-        prog, (unsigned)STL_VERIFY_DEFAULT_TRIANGLE_LIMIT);
+        prog, STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION, (unsigned)STL_VERIFY_DEFAULT_TRIANGLE_LIMIT);
 }
 
 /* Splits `input_path` into just its filename, without directory or
@@ -2100,6 +2299,11 @@ main(int argc, char *argv[])
     const char *pdf_path = NULL;
     int original_normals = 0;
     double weld_tolerance_fraction = 1e-6;
+    /* Negative sentinel: "not given on the command line" -- resolved to
+       weld_tolerance_fraction's own final value below, once both flags have
+       been parsed, so --quant-tolerance defaults to matching whatever
+       --weld-tolerance ends up being (including a non-default one). */
+    double quant_tolerance_fraction = -1.0;
     int verify_mode = 0; /* 0 = auto (size-based default), 1 = force on, -1 = force off */
     int positional = 0;
     int i;
@@ -2146,6 +2350,16 @@ main(int argc, char *argv[])
             weld_tolerance_fraction = atof(argv[++i]);
             continue;
         }
+        if (strcmp(argv[i], "--quant-tolerance") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+            quant_tolerance_fraction = atof(argv[++i]);
+            continue;
+        }
         if (strcmp(argv[i], "--verify") == 0)
         {
             verify_mode = 1;
@@ -2180,6 +2394,23 @@ main(int argc, char *argv[])
     if (weld_tolerance_fraction <= 0.0)
     {
         fprintf(stderr, "Error: --weld-tolerance must be positive\n");
+        return 1;
+    }
+    if (quant_tolerance_fraction < 0.0)
+    {
+        /* Default (2026-08-03): the wider of weld_tolerance_fraction and
+           STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION -- see that constant's
+           own comment for the full derivation/validation. The max() keeps
+           quantization from defaulting to something TIGHTER than whatever
+           weld tolerance the caller actually chose (pointless: it would
+           spend bits on precision the weld pass already discarded) if
+           --weld-tolerance was itself set coarser than this default. */
+        quant_tolerance_fraction = (weld_tolerance_fraction > STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION)
+            ? weld_tolerance_fraction : STL_IMPORT_DEFAULT_QUANT_TOLERANCE_FRACTION;
+    }
+    else if (quant_tolerance_fraction == 0.0)
+    {
+        fprintf(stderr, "Error: --quant-tolerance must be positive\n");
         return 1;
     }
 
@@ -2313,40 +2544,91 @@ main(int argc, char *argv[])
     {
         uint8_t preweld_disabled = (prc_diag_getenv("PRC_DIAG_DISABLE_PREWELD_JITTER") != NULL);
         const char *preweld_env = prc_diag_getenv("PRC_DIAG_PREWELD_JITTER_MAG");
+        /* FIX (2026-07-29, mixed-kind-tree Acrobat blank-tree investigation; SCOPED 2026-07-31,
+           UK_original.stl jitter regression): per-triangle magnitude is only actually needed for
+           files that risk producing a mixed COMPRESSED+TRIANGLES tree -- the specific fragility
+           this fix targets (see the loop body's own comment below for the mechanism/evidence).
+           For any other file, the coarser, historically-validated whole-mesh-scoped magnitude
+           (this importer's original behavior, pre-9076dd0) is used instead: per-triangle scaling
+           collapses the jitter far below the file's own weld tolerance for meshes made of many
+           small triangles relative to their whole bounding box, confirmed real-Acrobat-regressive
+           on UK_original.stl (460017 triangles, per-triangle magnitude ~378x smaller than the
+           whole-mesh magnitude that used to work for it, unrelated to the mixed-kind mechanism
+           since that file is homogeneous/single-kind). See
+           stl_import_jitter_needs_per_triangle_scope's own comment for how this is decided. */
+        uint8_t use_per_triangle = preweld_disabled ? 0 :
+            stl_import_jitter_needs_per_triangle_scope(&mesh, weld_tolerance_fraction, diagonal);
         if (!preweld_disabled)
         {
-            double mag = (preweld_env != NULL) ? atof(preweld_env) : (weld_tolerance_fraction * diagonal * 8.65969267656085);
-            uint32_t vi;
-            for (vi = 0; vi < mesh.num_triangles * 3; vi++)
+            uint32_t ti;
+            for (ti = 0; ti < mesh.num_triangles; ti++)
             {
-                double *pv = &mesh.raw_positions[(size_t)vi * 3];
-                float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
-                uint8_t in[12], digest[16];
-                uint32_t hx, hy, hz;
+                /* Each triangle's own 3-vertex bbox diagonal is a cheap, purely local scale proxy
+                   that needs no connectivity pre-pass (component membership isn't known until
+                   AFTER welding, which must run AFTER jitter -- see this block's own header
+                   comment on why jitter has to see raw, pre-weld positions). This errs toward
+                   UNDER-scaling for a part made of many triangles spanning more area than any one
+                   of them, which is the safe direction when it IS needed: nothing in this
+                   investigation ever found insufficient jitter to cause new breakage, only to
+                   occasionally fail to escape an existing collision -- see
+                   stl_import_jitter_needs_per_triangle_scope for when this finer scope applies
+                   instead of the coarser whole-mesh one. */
+                double mag;
+                if (preweld_env != NULL)
+                {
+                    mag = atof(preweld_env);
+                }
+                else if (!use_per_triangle)
+                {
+                    mag = weld_tolerance_fraction * diagonal * 8.65969267656085;
+                }
+                else
+                {
+                    double tri_bbox_min[3], tri_bbox_max[3], tri_ext[3], tri_diag;
+                    int c, a;
+                    bbox_reset(tri_bbox_min, tri_bbox_max);
+                    for (c = 0; c < 3; c++)
+                        bbox_expand(tri_bbox_min, tri_bbox_max, &mesh.raw_positions[(size_t)(ti * 3 + c) * 3]);
+                    for (a = 0; a < 3; a++) tri_ext[a] = tri_bbox_max[a] - tri_bbox_min[a];
+                    tri_diag = sqrt(tri_ext[0] * tri_ext[0] + tri_ext[1] * tri_ext[1] + tri_ext[2] * tri_ext[2]);
+                    if (tri_diag < 1e-9) tri_diag = diagonal; /* degenerate guard: fall back to whole-mesh scale */
+                    mag = weld_tolerance_fraction * tri_diag * 8.65969267656085;
+                }
+                {
+                    int c;
+                    for (c = 0; c < 3; c++)
+                    {
+                        uint32_t vi = ti * 3 + (uint32_t)c;
+                        double *pv = &mesh.raw_positions[(size_t)vi * 3];
+                        float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
+                        uint8_t in[12], digest[16];
+                        uint32_t hx, hy, hz;
 
-                memcpy(in + 0, &fx, 4);
-                memcpy(in + 4, &fy, 4);
-                memcpy(in + 8, &fz, 4);
-                prc_md5_12bytes(in, digest);
-                hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
-                hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
-                hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
-                pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                /* Truncate to float32: an earlier, externally-scripted version of this
-                   mitigation wrote the jittered result back into a binary STL file (float32-
-                   only storage) before nanoPRC ever read it, so the value actually used was
-                   float32-rounded, not full double precision. Confirmed empirically to matter:
-                   without this truncation, the exact same hash/magnitude/application-point
-                   combination (verified byte-identical to the working script's own computation
-                   before this rounding step) still failed on beetle_1000000.stl. */
-                pv[0] = (double)(float)pv[0];
-                pv[1] = (double)(float)pv[1];
-                pv[2] = (double)(float)pv[2];
-                if (vi == 0 && prc_diag_getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
-                    fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
-                        (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
+                        memcpy(in + 0, &fx, 4);
+                        memcpy(in + 4, &fy, 4);
+                        memcpy(in + 8, &fz, 4);
+                        prc_md5_12bytes(in, digest);
+                        hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
+                        hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
+                        hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
+                        pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        /* Truncate to float32: an earlier, externally-scripted version of this
+                           mitigation wrote the jittered result back into a binary STL file (float32-
+                           only storage) before nanoPRC ever read it, so the value actually used was
+                           float32-rounded, not full double precision. Confirmed empirically to matter:
+                           without this truncation, the exact same hash/magnitude/application-point
+                           combination (verified byte-identical to the working script's own computation
+                           before this rounding step) still failed on beetle_1000000.stl. */
+                        pv[0] = (double)(float)pv[0];
+                        pv[1] = (double)(float)pv[1];
+                        pv[2] = (double)(float)pv[2];
+                        if (vi == 0 && prc_diag_getenv("PRC_DIAG_JITTER_DEBUG") != NULL)
+                            fprintf(stderr, "PRC_DIAG_JITTER_DEBUG orig=(%.17g,%.17g,%.17g) jittered=(%.17g,%.17g,%.17g)\n",
+                                (double)fx, (double)fy, (double)fz, pv[0], pv[1], pv[2]);
+                    }
+                }
             }
         }
     }
@@ -2375,6 +2657,8 @@ main(int argc, char *argv[])
         weld_index[i] = wv;
     }
     printf("Welded to %u vertices (tolerance %.3g x bbox diagonal)\n", (unsigned)grid.count, weld_tolerance_fraction);
+    if (quant_tolerance_fraction != weld_tolerance_fraction)
+        printf("COMPRESSED quantization tolerance %.3g x bbox diagonal (independent of welding)\n", quant_tolerance_fraction);
 
     parent = (uint32_t *)malloc(sizeof(uint32_t) * grid.count);
     rank = (uint8_t *)calloc(grid.count, sizeof(uint8_t));
@@ -2529,7 +2813,8 @@ main(int argc, char *argv[])
 
     /* Step 4: build the per-part tessellations + tree nodes (Section 4). */
     if (stl_import_build_parts(&mesh, grid.positions, grid.count, weld_index, component_of_welded, num_components,
-            original_normals, global_normal_index, nd.normals, weld_tolerance_fraction, &parts) != 0)
+            original_normals, global_normal_index, nd.normals, weld_tolerance_fraction,
+            quant_tolerance_fraction, &parts) != 0)
         goto cleanup;
     have_parts = 1;
 
