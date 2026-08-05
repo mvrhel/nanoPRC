@@ -181,6 +181,26 @@ prc_write_main_header_size(uint32_t section_count)
     return layout.total_size;
 }
 
+/* Every section_offset[]/start_offset/end_offset field in the PRC main
+   header is a plain uint32_t (Table 5/35), so the format itself cannot
+   address a file whose sections sum to 4GiB or more -- there's no way to
+   write such a file correctly regardless of how the offsets are computed.
+   Without this check, a size_t compressed-section length beyond
+   UINT32_MAX silently truncates on the (uint32_t) cast at each addition
+   below, producing a wrapped, undersized `total_size` while the later
+   memcpy calls still use the real, untruncated lengths -- an undersized
+   allocation combined with full-length memcpy's is a heap buffer
+   overflow, not just a corrupt file. Fail loudly instead. */
+static int
+prc_write_offset_add(uint32_t base, size_t add, uint32_t *out)
+{
+    uint64_t sum = (uint64_t)base + (uint64_t)add;
+    if (sum > (uint64_t)UINT32_MAX)
+        return -1;
+    *out = (uint32_t)sum;
+    return 0;
+}
+
 static void
 prc_write_main_header_bytes(uint8_t *out, uint32_t section_count, const uint32_t *section_offsets,
     uint32_t start_offset, uint32_t end_offset)
@@ -373,11 +393,11 @@ prc_write_prc_buffer(prc_context *ctx,
     prc_write_file_struct_header_bytes(file_struct_header, prc_write_diag_min_vers_for_read(), prc_write_diag_auth_vers());
 
     section_offsets[0] = (uint32_t)header_size;
-    section_offsets[1] = section_offsets[0] + (uint32_t)sizeof(file_struct_header);
-    section_offsets[2] = section_offsets[1] + (uint32_t)schema_comp_len;
-    section_offsets[3] = section_offsets[2] + (uint32_t)tree_comp_len;
-    section_offsets[4] = section_offsets[3] + (uint32_t)tess_comp_len;
-    section_offsets[5] = section_offsets[4] + (uint32_t)geom_comp_len;
+    if (prc_write_offset_add(section_offsets[0], sizeof(file_struct_header), &section_offsets[1]) != 0) goto too_large;
+    if (prc_write_offset_add(section_offsets[1], schema_comp_len, &section_offsets[2]) != 0) goto too_large;
+    if (prc_write_offset_add(section_offsets[2], tree_comp_len, &section_offsets[3]) != 0) goto too_large;
+    if (prc_write_offset_add(section_offsets[3], tess_comp_len, &section_offsets[4]) != 0) goto too_large;
+    if (prc_write_offset_add(section_offsets[4], geom_comp_len, &section_offsets[5]) != 0) goto too_large;
     /* The model section is addressed via start_offset/end_offset directly,
        not through section_offset[] -- see prc_parse_main.c's "the model
        file is defined special" handling -- but it must still be placed
@@ -390,8 +410,8 @@ prc_write_prc_buffer(prc_context *ctx,
        regular section's end as the model's start_offset, so placing the
        model section anywhere else produces a bogus (tiny) "end" for the
        real last regular section. */
-    start_offset = section_offsets[5] + (uint32_t)extra_geom_comp_len;
-    end_offset = start_offset + (uint32_t)model_comp_len;
+    if (prc_write_offset_add(section_offsets[5], extra_geom_comp_len, &start_offset) != 0) goto too_large;
+    if (prc_write_offset_add(start_offset, model_comp_len, &end_offset) != 0) goto too_large;
     total_size = (size_t)end_offset;
 
     buf = (uint8_t *)prc_malloc(ctx, total_size);
@@ -414,6 +434,12 @@ prc_write_prc_buffer(prc_context *ctx,
     *out_size = total_size;
     buf = NULL;
     ret = 0;
+    goto cleanup;
+
+too_large:
+    prc_error(ctx, PRC_ERROR_INTERNAL,
+        "prc_write_prc_buffer: total output size exceeds the PRC main header's 32-bit offset fields\n");
+    ret = PRC_ERROR_INTERNAL;
 
 cleanup:
     if (buf != NULL) prc_free(ctx, buf);
