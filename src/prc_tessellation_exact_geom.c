@@ -132,7 +132,6 @@ prc_evaluate_ellipse(prc_context *ctx, void *params, double input)
 }
 
 /* Evaluate a helix at a single point */
-#if 0
 static prc_vec3
 prc_evaluate_helix(prc_context *ctx, void *params, double input)
 {
@@ -142,24 +141,61 @@ prc_evaluate_helix(prc_context *ctx, void *params, double input)
 
     if (type == 0)
     {
-        double radius = helix->type0_helix.radius;
+        double radius_evolution = helix->type0_helix.radius;
+        double radius;
         double pitch = helix->type0_helix.pitch;
-        prc_vec3 origin;
+        prc_vec3 origin, z_axis, start, origin_on_axis, b, x_axis;
+        double temp1;
 
         origin.x = helix->type0_helix.origin_0;
         origin.y = helix->type0_helix.origin_1;
         origin.z = helix->type0_helix.origin_2;
 
+        z_axis.x = helix->type0_helix.direction_0;
+        z_axis.y = helix->type0_helix.direction_1;
+        z_axis.z = helix->type0_helix.direction_2;
 
+        start = helix->start;
 
+        /* Project the start onto the z axis which is defined
+           by the origin and direction */
+        temp1 = prc_vec_dot_product(z_axis, z_axis);
+        if (temp1 == 0.0)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid helix direction in prc_evaluate_helix\n");
+            return output;
+        }
+        prc_vec_sub(start, origin, &b);
+        temp1 = prc_vec_dot_product(b, z_axis) / temp1;
+        prc_vec_scale(temp1, &z_axis);
+        prc_vec_add(origin, z_axis, &origin_on_axis);
+
+        prc_vec_sub(start, origin_on_axis, &x_axis);
+        radius = prc_vec_length(x_axis) + input * radius_evolution;
+
+        if (helix->orientation == 1)
+        {
+            output.x = radius * cos(input);
+            output.y = radius * sin(input);
+            output.z = pitch * input;
+        }
+        else
+        {
+            output.x = radius * cos(-input);
+            output.y = radius * sin(-input);
+            output.z = pitch * input;
+        }
     }
     else
     {
-
+        /* Todo implement this */
+        output.x = 0;
+        output.y = 0;
+        output.z = 0;
     }
 
+    return output;
 }
-#endif
 
 static int
 prc_sample_curve(prc_context *ctx, prc_data *data, prc_content_wire_edge *curve)
@@ -240,8 +276,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, prc_content_wire_edge *curve)
             break;
         }
 
-        /* Disable this one for now */
-#if 0
         case PRC_TYPE_CRV_Helix01:
         {
             prc_crv_helix01 *helix = curve->ptr_curve.crv_helix01;
@@ -253,7 +287,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, prc_content_wire_edge *curve)
             num_samples = CURVE_SAMPLES;
             break;
         }
-#endif
+
         default:
             data->exact_geom_tess[geom_count].type = PRC_EXACT_GEOM_UNKNOWN;
             return 0;
