@@ -14,10 +14,13 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
-#ifndef PRC_CONTEXT_H
-#define PRC_CONTEXT_H
+#ifndef PRC_BIT_DEBUG_H
+#define PRC_BIT_DEBUG_H
 
-int debug_prc_read_vertices_from_JSON_file(prc_context *ctx, const char *file_name, prc_vec3 **vertices, uint32_t num_points);
-int debug_prc_read_indices_from_JSON_file(prc_context *ctx, const char *file_name, int **indices, uint32_t num_points);
+/* Manual, breakpoint-only bitstream search aids -- not called anywhere in
+   the normal parse path. See prc_bit_debug.c for usage. */
+void prc_debug_stream(prc_context *ctx, prc_bit_state *state);
+void prc_debug_view_stream_bounding_box_search(prc_context *ctx, prc_bit_state *state);
+void prc_debug_view_stream_on_byte_boundary(prc_context *ctx, prc_bit_state *state);
 
 #endif
