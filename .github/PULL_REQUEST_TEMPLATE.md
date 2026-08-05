@@ -2,6 +2,13 @@
 
 Describe the change and motivation.
 
+## Commits
+
+<!-- List each commit as `- <short-hash> <subject>`, oldest first. Handy for reviewers and stays
+     accurate if the branch gets rebased before merge (unlike relying on GitHub's own commit list,
+     which can go stale after a force-push). Generate with:
+     git log <base>..HEAD --reverse --format="- %h %s" -->
+
 ## Validation
 
 Describe build/test steps used.
