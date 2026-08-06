@@ -1717,6 +1717,23 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
                 k, data[k], bit_lengths[k]);
     }
 
+    /* PRC_DIAG_MESH_QUALITY reporting only, see PRC_DIAG_WIDEN_BITLENGTHS_PROBE's
+       own comment below: a compact per-call histogram of how many entries in
+       this specific compressed-integer array (point_array, or occasionally a
+       smaller array reusing this same writer) sit in the 21-24 bit "danger
+       neighborhood" around the already-documented 22-bit trigger, so the
+       probe's effect size can be sanity-checked against the array size
+       before spending an Acrobat test on it. */
+    if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+    {
+        uint32_t hist[4] = { 0, 0, 0, 0 };
+        for (k = 0; k < data_size; k++)
+            if (bit_lengths[k] >= 21 && bit_lengths[k] <= 24)
+                hist[bit_lengths[k] - 21]++;
+        printf("PRC_DIAG_MESH_QUALITY: compressed_integer_array data_size=%u bits21=%u bits22=%u "
+            "bits23=%u bits24=%u\n", data_size, hist[0], hist[1], hist[2], hist[3]);
+    }
+
     /* WORKAROUND (2026-07-25, mixed_chains/fan8 Acrobat blank-tree bug --
        see mixed_chains_fan8_boundary_investigation-24July.md and the
        memory writeup's "fresh bisection directly on UK_original.stl" /
@@ -1746,10 +1763,28 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
        component (UK_original.stl's smallest failing part) survives this
        fix too and remains an open, unresolved case -- see the
        investigation writeup for its own bisection trail. */
-    for (k = 0; k < data_size; k++)
+    /* PROBE (2026-08-05), mixed_chains investigation continued: the fix above
+       only widens the exact bit_length==22 case, based on the specific cases
+       that motivated it (a synthetic fan8 repro, two UK_original.stl
+       components). Testing whether the real trigger is broader -- ANY
+       point_array value sitting near a power-of-two magnitude boundary, not
+       exactly 22 bits -- by widening a small neighborhood around it instead.
+       Lossless either way (the reader only ever consumes however many bits
+       this table declares); gated behind PRC_DIAG_WIDEN_BITLENGTHS_PROBE so
+       default behavior (the exact-22-only patch) is unaffected when unset. */
+    if (prc_diag_getenv("PRC_DIAG_WIDEN_BITLENGTHS_PROBE") != NULL)
     {
-        if (bit_lengths[k] == 22)
-            bit_lengths[k] = 23;
+        for (k = 0; k < data_size; k++)
+            if (bit_lengths[k] >= 21 && bit_lengths[k] <= 24)
+                bit_lengths[k]++;
+    }
+    else
+    {
+        for (k = 0; k < data_size; k++)
+        {
+            if (bit_lengths[k] == 22)
+                bit_lengths[k] = 23;
+        }
     }
 
     /* matches: bit_lengths = prc_bitread_character_array(ctx, state, &size,
