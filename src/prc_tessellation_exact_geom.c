@@ -115,6 +115,63 @@ prc_evaluate_circle(prc_context *ctx, void *params, double input)
     return output;
 }
 
+/* Evaluate a polyline at a single point */
+static prc_vec3
+prc_evaluate_polyline(prc_context *ctx, void *params, double input)
+{
+    prc_vec3 output;
+    prc_crv_polyline *polyline = (prc_crv_polyline *)params;
+    uint32_t num_points = polyline->number_of_points;
+    uint8_t is_3d = polyline->curve_data.is_3d_flag;
+
+    if (num_points < 2)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid polyline with less than 2 points in prc_evaluate_polyline\n");
+        return output;
+    }
+
+    /* Clamp input to the range of the polyline */
+    if (input < 0.0)
+        input = 0.0;
+    if (input > (double)(num_points - 1))
+        input = (double)(num_points - 1);
+    uint32_t index = (uint32_t)input;
+    double t = input - (double)index;
+    if (index >= num_points - 1)
+    {
+        if (is_3d)
+        {
+            output = polyline->points[num_points - 1].point_3d;
+        }
+        else
+        {
+            output.x = polyline->points[num_points - 1].point_2d.x;
+            output.y = polyline->points[num_points - 1].point_2d.y;
+            output.z = 0.0;
+        }
+    }
+    else
+    {
+        if (is_3d)
+        {
+            prc_vec3 p0 = polyline->points[index].point_3d;
+            prc_vec3 p1 = polyline->points[index + 1].point_3d;
+            output.x = (1.0 - t) * p0.x + t * p1.x;
+            output.y = (1.0 - t) * p0.y + t * p1.y;
+            output.z = (1.0 - t) * p0.z + t * p1.z;
+        }
+        else
+        {
+            prc_vec2 p0 = polyline->points[index].point_2d;
+            prc_vec2 p1 = polyline->points[index + 1].point_2d;
+            output.x = (1.0 - t) * p0.x + t * p1.x;
+            output.y = (1.0 - t) * p0.y + t * p1.y;
+            output.z = 0.0;
+        }
+    }
+    return output;
+}
+
 /* Evaluate an ellipse at a single point */
 static prc_vec3
 prc_evaluate_ellipse(prc_context *ctx, void *params, double input)
@@ -285,6 +342,18 @@ prc_sample_curve(prc_context *ctx, prc_data *data, prc_content_wire_edge *curve)
             curve_params = (void *)helix;
             curve_eval_func = prc_evaluate_helix;
             num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        /* A series of straight line segments */
+        case PRC_TYPE_CRV_PolyLine:
+        {
+            prc_crv_polyline *polyline = curve->ptr_curve.crv_polyline;
+            start = 0.0;
+            end = (double)(polyline->number_of_points - 1);
+            curve_params = (void *)polyline;
+            curve_eval_func = prc_evaluate_polyline;
+            num_samples = polyline->number_of_points;
             break;
         }
 
