@@ -2558,11 +2558,126 @@ main(int argc, char *argv[])
            stl_import_jitter_needs_per_triangle_scope's own comment for how this is decided. */
         uint8_t use_per_triangle = preweld_disabled ? 0 :
             stl_import_jitter_needs_per_triangle_scope(&mesh, weld_tolerance_fraction, diagonal);
+        /* PROBE (2026-08-07, PRC_DIAG_JITTER_TRIANGLE_LIST=<path>): chain-bisection
+           tooling for beetle_1000000.stl's still-unexplained jitter-dependence
+           (see project notes RESULT 48-50 -- two earlier attempts at a POST-quantization
+           point_array-value nudge, scoped by chain, both failed real Acrobat even applied
+           to every chain, diagnosed as unable to substitute for jitter's real, upstream
+           effect on raw pre-weld positions). This restricts the REAL, unmodified jitter
+           mechanism above/below to only the triangle indices listed in the given file
+           (one 0-based raw STL triangle index per line, matching this loop's own `ti`,
+           the same index space PRC_DIAG_DUMP_ALLTRI's mesh_tri column uses when the
+           encoder doesn't reorder/drop triangles) -- every other triangle's raw vertex
+           positions are left completely untouched, byte-identical to jitter fully off.
+           Zero cost/behavior change when unset. */
+        uint8_t *jitter_triangle_allow = NULL;
+        {
+            const char *list_path = prc_diag_getenv("PRC_DIAG_JITTER_TRIANGLE_LIST");
+            if (list_path != NULL && !preweld_disabled)
+            {
+                FILE *lf = fopen(list_path, "r");
+                if (lf != NULL)
+                {
+                    unsigned long idx;
+                    jitter_triangle_allow = (uint8_t *)calloc((size_t)mesh.num_triangles, sizeof(uint8_t));
+                    if (jitter_triangle_allow != NULL)
+                    {
+                        while (fscanf(lf, "%lu", &idx) == 1)
+                        {
+                            if (idx < (unsigned long)mesh.num_triangles)
+                                jitter_triangle_allow[idx] = 1;
+                        }
+                    }
+                    fclose(lf);
+                }
+                else
+                {
+                    fprintf(stderr, "Warning: PRC_DIAG_JITTER_TRIANGLE_LIST=%s could not be opened, "
+                        "jitter applying to ALL triangles (no restriction)\n", list_path);
+                }
+            }
+        }
+        /* PROBE (2026-08-07): PRC_DIAG_JITTER_TRIANGLE_LIST above restricts by raw
+           TRIANGLE index, but STL storage is unwelded triangle soup -- two triangles
+           sharing a physical vertex each hold their OWN copy of it. Restricting jitter
+           per-triangle can therefore jitter one copy of a shared vertex while leaving
+           its neighbor's copy untouched, creating a "seam": the two copies, previously
+           within weld tolerance of each other, can end up pushed apart enough to weld
+           into DIFFERENT points -- fracturing mesh topology (extra connected parts) or
+           even triggering the non-manifold-vertex uncompressed-write fallback right at
+           the boundary of whatever region is being tested. Empirically confirmed across
+           a beetle_1000000.stl chain-bisection sweep (rounds 1-10, ALL contaminated:
+           1270 spurious connected parts on the very first, whole-mesh-scale round, down
+           to 1-3 spurious parts plus repeated uncompressed-fallback triggers at
+           finer/thousands-of-triangles granularity), not just a fine-grained-only
+           effect. Fix: promote the per-triangle allowlist to a per-CORNER allowlist
+           where a corner is allowed iff ANY corner sharing its trial-weld group (a
+           throwaway, pre-jitter spatial-hash weld at the SAME tolerance the real weld
+           below will use -- reusing weld_grid/weld_grid_lookup_or_insert, no new
+           infrastructure) belongs to an allowed triangle. This guarantees every raw
+           corner-copy of the same physical vertex gets the identical in/out decision,
+           never split across a seam. jitter_corner_allow is NULL (no restriction) both
+           when PRC_DIAG_JITTER_TRIANGLE_LIST is unset and as a graceful degrade if this
+           trial-weld pass itself fails (falls back to the coarser, seam-prone
+           per-triangle check rather than aborting). */
+        uint8_t *jitter_corner_allow = NULL;
+        if (jitter_triangle_allow != NULL)
+        {
+            weld_grid trial_grid;
+            uint32_t *trial_weld_index = NULL;
+            double abs_tol = weld_tolerance_fraction * diagonal;
+            uint32_t vi2;
+            uint8_t ok = 0;
+
+            memset(&trial_grid, 0, sizeof(trial_grid));
+            if (weld_grid_init(&trial_grid, abs_tol, mesh.num_triangles * 3) == 0)
+            {
+                trial_weld_index = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)mesh.num_triangles * 3);
+                if (trial_weld_index != NULL)
+                {
+                    ok = 1;
+                    for (vi2 = 0; vi2 < mesh.num_triangles * 3; vi2++)
+                    {
+                        uint32_t wv = weld_grid_lookup_or_insert(&trial_grid,
+                            &mesh.raw_positions[(size_t)vi2 * 3], abs_tol);
+                        if (wv == UINT32_MAX) { ok = 0; break; }
+                        trial_weld_index[vi2] = wv;
+                    }
+                    if (ok)
+                    {
+                        uint8_t *group_allow = (uint8_t *)calloc(trial_grid.count, sizeof(uint8_t));
+                        if (group_allow != NULL)
+                        {
+                            uint32_t ti2;
+                            jitter_corner_allow = (uint8_t *)calloc((size_t)mesh.num_triangles * 3, sizeof(uint8_t));
+                            if (jitter_corner_allow != NULL)
+                            {
+                                for (ti2 = 0; ti2 < mesh.num_triangles; ti2++)
+                                {
+                                    if (!jitter_triangle_allow[ti2])
+                                        continue;
+                                    group_allow[trial_weld_index[ti2 * 3 + 0]] = 1;
+                                    group_allow[trial_weld_index[ti2 * 3 + 1]] = 1;
+                                    group_allow[trial_weld_index[ti2 * 3 + 2]] = 1;
+                                }
+                                for (vi2 = 0; vi2 < mesh.num_triangles * 3; vi2++)
+                                    jitter_corner_allow[vi2] = group_allow[trial_weld_index[vi2]];
+                            }
+                            free(group_allow);
+                        }
+                    }
+                    free(trial_weld_index);
+                }
+            }
+            weld_grid_free(&trial_grid);
+        }
         if (!preweld_disabled)
         {
             uint32_t ti;
             for (ti = 0; ti < mesh.num_triangles; ti++)
             {
+                if (jitter_corner_allow == NULL && jitter_triangle_allow != NULL && !jitter_triangle_allow[ti])
+                    continue;
                 /* Each triangle's own 3-vertex bbox diagonal is a cheap, purely local scale proxy
                    that needs no connectivity pre-pass (component membership isn't known until
                    AFTER welding, which must run AFTER jitter -- see this block's own header
@@ -2599,8 +2714,13 @@ main(int argc, char *argv[])
                     for (c = 0; c < 3; c++)
                     {
                         uint32_t vi = ti * 3 + (uint32_t)c;
-                        double *pv = &mesh.raw_positions[(size_t)vi * 3];
-                        float fx = (float)pv[0], fy = (float)pv[1], fz = (float)pv[2];
+                        double *pv;
+                        float fx, fy, fz;
+
+                        if (jitter_corner_allow != NULL && !jitter_corner_allow[vi])
+                            continue;
+                        pv = &mesh.raw_positions[(size_t)vi * 3];
+                        fx = (float)pv[0]; fy = (float)pv[1]; fz = (float)pv[2];
                         uint8_t in[12], digest[16];
                         uint32_t hx, hy, hz;
 
@@ -2631,6 +2751,10 @@ main(int argc, char *argv[])
                 }
             }
         }
+        if (jitter_triangle_allow != NULL)
+            free(jitter_triangle_allow);
+        if (jitter_corner_allow != NULL)
+            free(jitter_corner_allow);
     }
 
     if (weld_grid_init(&grid, weld_tolerance_fraction * diagonal, mesh.num_triangles * 3) != 0)
