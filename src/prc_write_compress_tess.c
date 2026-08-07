@@ -40,6 +40,44 @@ typedef struct
     uint8_t used;
 } prc_edge_slot;
 
+/* EXPERIMENT (2026-08-06), mixed_chains/QCD_Leinweber connectivity-gap investigation:
+   an alternative to this file's default hash-grid vertex dedup (prc_vtx_hash below),
+   modeled on a described-but-unseen independent encoder's own weld algorithm (project
+   notes: "Missing-Weld-Algorithm-Conjecture"). The hash-grid approach quantizes each
+   coordinate via llround(v/tol) and requires an EXACT post-quantization key match --
+   two genuinely-within-tolerance points straddling a quantization cell boundary (one
+   rounds down, one rounds up) are silently never merged, with no neighbor-cell search
+   to catch it (unlike demos/stl_import's own external weld_grid, which does search a
+   3x3x3 neighborhood -- this internal pass does not). The sort-based alternative:
+   sort every vertex lexicographically by (Z, Y, X), then walk the sorted array
+   comparing each point ONLY to its immediate predecessor in sort order (per-axis
+   fabs(a-b) <= tolerance, not Euclidean distance) -- points within tolerance of their
+   neighbor join the same group (transitively: a gradually-drifting run of points can
+   all collapse into one group even if the first and last members are more than
+   `tolerance` apart from each other directly). Gated behind PRC_DIAG_WELD_SORT_METHOD;
+   default (unset) behavior is completely unchanged. */
+typedef struct
+{
+    double x, y, z;
+    uint32_t orig_index;
+} prc_weldsort_vtx;
+
+static int
+prc_weldsort_cmp(const void *pa, const void *pb)
+{
+    const prc_weldsort_vtx *a = (const prc_weldsort_vtx *)pa;
+    const prc_weldsort_vtx *b = (const prc_weldsort_vtx *)pb;
+    if (a->z < b->z) return -1;
+    if (a->z > b->z) return 1;
+    if (a->y < b->y) return -1;
+    if (a->y > b->y) return 1;
+    if (a->x < b->x) return -1;
+    if (a->x > b->x) return 1;
+    if (a->orig_index < b->orig_index) return -1;
+    if (a->orig_index > b->orig_index) return 1;
+    return 0;
+}
+
 static size_t
 prc_next_pow2(size_t v)
 {
@@ -356,6 +394,72 @@ prc_encode_preprocess(prc_context *ctx,
             goto fail;
         }
 
+        if (prc_diag_getenv("PRC_DIAG_WELD_SORT_METHOD") != NULL)
+        {
+            /* See prc_weldsort_vtx's own comment above for the full rationale.
+               EXTENDED (2026-08-06): RG's own real Walnut file keeps 65 separate
+               chains where this method (merge tolerance == the wire/quantization
+               tolerance, same as the old hash-grid dedup did) collapses the same
+               file to 15-24 -- RG's own weld is LESS aggressive than any method
+               tried so far, not more. The wire tolerance is a decoder-visible
+               quantization value; nothing requires an encoder's own internal
+               merge decision to use that same number -- RG is free to (and
+               plausibly does) weld at a much TIGHTER radius while still quantizing
+               at its own coarser wire tolerance. PRC_DIAG_WELD_SORT_TOLERANCE_MM
+               lets the merge radius be set independently of `tol` (which continues
+               to govern quantization only); defaults to `tol` (old behavior)
+               when unset. */
+            prc_weldsort_vtx *sorted = (prc_weldsort_vtx *)prc_malloc(ctx,
+                (size_t)num_positions * sizeof(prc_weldsort_vtx));
+            uint32_t group;
+            double weld_tol = tol;
+            const char *weld_tol_env = prc_diag_getenv("PRC_DIAG_WELD_SORT_TOLERANCE_MM");
+            if (weld_tol_env != NULL)
+                weld_tol = atof(weld_tol_env);
+
+            if (sorted == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_preprocess weld-sort\n");
+                ret = PRC_ERROR_MEMORY;
+                goto fail;
+            }
+            for (i = 0; i < num_positions; i++)
+            {
+                sorted[i].x = positions[(size_t)i * 3 + 0];
+                sorted[i].y = positions[(size_t)i * 3 + 1];
+                sorted[i].z = positions[(size_t)i * 3 + 2];
+                sorted[i].orig_index = i;
+            }
+            qsort(sorted, num_positions, sizeof(prc_weldsort_vtx), prc_weldsort_cmp);
+
+            group = 0;
+            out->positions[0] = sorted[0].x;
+            out->positions[1] = sorted[0].y;
+            out->positions[2] = sorted[0].z;
+            remap[sorted[0].orig_index] = 0;
+            for (i = 1; i < num_positions; i++)
+            {
+                double dz = fabs(sorted[i].z - sorted[i - 1].z);
+                double dy = fabs(sorted[i].y - sorted[i - 1].y);
+                double dx = fabs(sorted[i].x - sorted[i - 1].x);
+
+                if (dz <= weld_tol && dy <= weld_tol && dx <= weld_tol)
+                {
+                    remap[sorted[i].orig_index] = group;
+                }
+                else
+                {
+                    group++;
+                    out->positions[(size_t)group * 3 + 0] = sorted[i].x;
+                    out->positions[(size_t)group * 3 + 1] = sorted[i].y;
+                    out->positions[(size_t)group * 3 + 2] = sorted[i].z;
+                    remap[sorted[i].orig_index] = group;
+                }
+            }
+            ndedup = group + 1;
+            prc_free(ctx, sorted);
+        }
+        else
         {
             /* MITIGATION (2026-07-26/27), OPT-IN ONLY: jitter must be applied BEFORE this
                dedup loop's own quantization/hashing, not after -- confirmed empirically via a
@@ -1344,6 +1448,40 @@ typedef struct
     uint8_t *tri_reversed;
     const double *real_normals; /* mesh->num_triangles*9 entries (3 per corner, MESH order,
                                     same layout as corner_normals); NULL == disabled */
+    /* PRC_DIAG_MESH_QUALITY reporting only, see prc_encode_refuse_alternate_basis_grow's
+       own comment: how often a grow-op's basis needed the ambiguous fallback, and how
+       many of those were refused (become chain starts instead) vs. grown anyway. */
+    uint32_t alt_basis_count;
+    uint32_t alt_basis_refused_count;
+    /* PRC_DIAG_MESH_QUALITY reporting only: per chain-start triangle (the
+       num_refs==0 case, RESULT 12's V0+V2 mechanism), how far the
+       RECONSTRUCTED (decoded) triangle normal tilts away from the TRUE
+       (original mesh, full double precision) normal -- 1-dot(true,
+       reconstructed), 0 = perfect match. A direct, orientation-independent
+       generalization of the normal-tilt signal RESULT 12's own manual
+       cross-product analysis found correlated with the V0+V2 failure mode
+       on a minimal synthetic repro; this measures it automatically across
+       every chain-start triangle in a real file. */
+    uint32_t chain_start_count;
+    double chain_start_tilt_max;
+    uint32_t chain_start_tilt_gt_1e_6;
+    uint32_t chain_start_tilt_gt_1e_4;
+    uint32_t chain_start_tilt_gt_1e_2;
+    /* PRC_DIAG_MESH_QUALITY reporting only: longest single chain (grow-run) ever
+       reached, to check whether an unusually long chain (as opposed to just an
+       unusual chain COUNT) correlates with anything. */
+    uint32_t max_chain_len;
+    /* PRC_DIAG_MESH_QUALITY reporting only: per-triangle (ALL triangles, not just
+       chain-starts) true-vs-reconstructed normal tilt, bucketed by how deep into
+       its own chain the triangle sits -- tests whether reconstruction error
+       accumulates/drifts progressively along a very long chain (each grow-step's
+       basis is built from the PREVIOUS step's already-quantized position, so a
+       small per-step bias could compound over hundreds of thousands of steps in
+       a way RESULT 12's one-shot chain-start-only V0+V2 mechanism never captured). */
+    double alltri_tilt_max;
+    uint32_t alltri_tilt_max_tri;
+    uint32_t alltri_tilt_max_offset;
+    double bucket_tilt_max[6]; /* offset ranges: [0,10) [10,100) [100,1000) [1000,10000) [10000,100000) [100000,inf) */
 } prc_encode_state;
 
 /* Chain bookkeeping only this phase: reconstructed_position stays zeroed
@@ -1474,6 +1612,32 @@ prc_encode_use_cramer_basis(void)
     return cached;
 }
 
+/* EXPERIMENT (2026-08-05), mixed_chains investigation: prc_encode_edge_basis's
+   use_alternate_basis fallback (near-collinear edge/opposite-vertex triple,
+   primary cross-product z-axis underflows normalize) picks an axis via
+   prc_vec_make_orth_basis's own nearest-world-axis heuristic, then a
+   handedness sign flip on vectors that are themselves near-degenerate for a
+   sliver triangle -- unlike the primary path, nothing about this fallback's
+   OUTCOME is written to the stream; a real decoder must re-derive the exact
+   same choice from reconstructed geometry alone. nanoPRC's own decoder shares
+   this code so it always agrees with itself, but an independent decoder
+   (Acrobat) implementing the same ambiguous fallback slightly differently
+   would silently reconstruct a DIFFERENT basis, corrupting every point in
+   that grow op and cascading into whatever chains off it. Gated behind
+   PRC_DIAG_REFUSE_ALTERNATE_BASIS_GROW so default behavior is unaffected;
+   when set, an edge whose basis needed the fallback is treated exactly like
+   a basis-computation failure (grow refused, neighbor becomes its own chain
+   start instead, which uses the fallback-free origin-relative axis
+   encoding). */
+static int
+prc_encode_refuse_alternate_basis_grow(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = (prc_diag_getenv("PRC_DIAG_REFUSE_ALTERNATE_BASIS_GROW") != NULL) ? 1 : 0;
+    return cached;
+}
+
 static void
 prc_encode_cramer_decompose(prc_vec3 diff, prc_vec3 x, prc_vec3 y, prc_vec3 z,
     double *out_x, double *out_y, double *out_z)
@@ -1586,7 +1750,8 @@ prc_encode_emit_basis_point(prc_encode_state *st, uint32_t mesh_vtx,
    convention (v1-v0) and lacks the y-dot-w flip, so it cannot be used here. */
 static int
 prc_encode_edge_basis(prc_vec3 E0, prc_vec3 E1, prc_vec3 E3,
-    prc_vec3 *x_out, prc_vec3 *y_out, prc_vec3 *z_out, prc_vec3 *origin_out)
+    prc_vec3 *x_out, prc_vec3 *y_out, prc_vec3 *z_out, prc_vec3 *origin_out,
+    uint8_t *out_used_alternate)
 {
     prc_vec3 x, z, z_temp, w, origin;
     prc_vec3 y = { 0.0, 0.0, 0.0 }; /* always overwritten before use; silences a
@@ -1597,6 +1762,7 @@ prc_encode_edge_basis(prc_vec3 E0, prc_vec3 E1, prc_vec3 E3,
     int code;
     uint8_t use_alternate_basis = 0;
 
+    *out_used_alternate = 0;
     prc_vec_avg(E0, E1, &origin);
     prc_vec_sub(E0, E1, &x);
     code = prc_vec_normalize(&x);
@@ -1619,6 +1785,7 @@ prc_encode_edge_basis(prc_vec3 E0, prc_vec3 E1, prc_vec3 E3,
 
     if (use_alternate_basis)
     {
+        *out_used_alternate = 1;
         basis.X = x;
         code = prc_vec_make_orth_basis(&basis);
         if (code < 0)
@@ -1725,6 +1892,40 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
         code = prc_encode_emit_axis_point(st, mv[2], temp, &idx[2]);
         if (code < 0)
             return code;
+
+        /* PROBE (2026-08-05), mixed_chains investigation continued: see
+           chain_start_tilt_max's own comment on prc_encode_state. Computed
+           unconditionally whenever PRC_DIAG_MESH_QUALITY is set, cheap
+           relative to everything else this function already does per
+           triangle. */
+        if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+        {
+            const double *p0 = st->mesh->positions + (size_t)mv[0] * 3;
+            const double *p1 = st->mesh->positions + (size_t)mv[1] * 3;
+            const double *p2 = st->mesh->positions + (size_t)mv[2] * 3;
+            prc_vec3 tp0, tp1, tp2, e1, e2, true_n, r_e1, r_e2, rec_n;
+
+            tp0.x = p0[0]; tp0.y = p0[1]; tp0.z = p0[2];
+            tp1.x = p1[0]; tp1.y = p1[1]; tp1.z = p1[2];
+            tp2.x = p2[0]; tp2.y = p2[1]; tp2.z = p2[2];
+            prc_vec_sub(tp1, tp0, &e1);
+            prc_vec_sub(tp2, tp0, &e2);
+            prc_vec_cross(e1, e2, &true_n);
+            prc_vec_sub(st->decoded_pos[idx[1]], st->decoded_pos[idx[0]], &r_e1);
+            prc_vec_sub(st->decoded_pos[idx[2]], st->decoded_pos[idx[0]], &r_e2);
+            prc_vec_cross(r_e1, r_e2, &rec_n);
+
+            if (prc_vec_normalize(&true_n) == 0 && prc_vec_normalize(&rec_n) == 0)
+            {
+                double tilt = 1.0 - prc_vec_dot_product(true_n, rec_n);
+                st->chain_start_count++;
+                if (tilt > st->chain_start_tilt_max)
+                    st->chain_start_tilt_max = tilt;
+                if (tilt > 1e-6) st->chain_start_tilt_gt_1e_6++;
+                if (tilt > 1e-4) st->chain_start_tilt_gt_1e_4++;
+                if (tilt > 1e-2) st->chain_start_tilt_gt_1e_2++;
+            }
+        }
     }
     else if (num_refs == 1)
     {
@@ -2003,15 +2204,21 @@ prc_encode_edge_status(prc_encode_state *st, uint32_t tri,
         if (growable)
         {
             prc_encode_grow_op op;
+            uint8_t used_alternate = 0;
 
             code = prc_encode_edge_basis(st->decoded_pos[ex[e]],
                 st->decoded_pos[ey[e]], st->decoded_pos[ez[e]],
-                &op.x_basis, &op.y_basis, &op.z_basis, &op.origin);
-            if (code < 0)
+                &op.x_basis, &op.y_basis, &op.z_basis, &op.origin, &used_alternate);
+            if (used_alternate)
+                st->alt_basis_count++;
+            if (code < 0 ||
+                (used_alternate && prc_encode_refuse_alternate_basis_grow()))
             {
                 /* Degenerate edge: the decoder would fail computing this
                    basis, so leave the edge un-grown; the neighbor is reached
                    later as its own chain start. */
+                if (code == 0 && used_alternate)
+                    st->alt_basis_refused_count++;
                 growable = 0;
             }
             else
@@ -2117,6 +2324,35 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         out->origin[0] = (double)(float)mesh->bbox[0];
         out->origin[1] = (double)(float)mesh->bbox[1];
         out->origin[2] = (double)(float)mesh->bbox[2];
+    }
+    /* EXPERIMENT (2026-08-05), mixed_chains investigation continued: RG (an
+       independent, real-world PRC encoder used throughout this project as a
+       comparison oracle) resolves its own origin to something close to the
+       mesh's overall vertex average, not any single triangle's centroid --
+       confirmed on QCD_Leinweber, whose default (triangle-0-centroid) origin
+       here lands near a mesh EXTREME (Z~0) while RG's sits centrally
+       (Z~18.24 on a mesh spanning roughly that range). A poorly-centered
+       origin inflates every chain-start's V0 delta magnitude, directly
+       feeding RESULT 12's V0+V2 reconstruction-error mechanism. Testing the
+       arithmetic mean of every DEDUPLICATED mesh vertex (mesh->positions,
+       already exactly the array the rest of this function operates on --
+       not the raw un-welded STL triangle soup, and not weighted by how many
+       triangles touch each vertex) as a direct replacement candidate, gated
+       behind PRC_DIAG_ORIGIN_VERTEX_AVERAGE so default behavior is
+       unaffected while this is still a probe, not a validated fix. */
+    if (prc_diag_getenv("PRC_DIAG_ORIGIN_VERTEX_AVERAGE") != NULL && mesh->num_positions > 0)
+    {
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        uint32_t vi;
+        for (vi = 0; vi < mesh->num_positions; vi++)
+        {
+            sx += mesh->positions[(size_t)vi * 3 + 0];
+            sy += mesh->positions[(size_t)vi * 3 + 1];
+            sz += mesh->positions[(size_t)vi * 3 + 2];
+        }
+        out->origin[0] = (double)(float)(sx / (double)mesh->num_positions);
+        out->origin[1] = (double)(float)(sy / (double)mesh->num_positions);
+        out->origin[2] = (double)(float)(sz / (double)mesh->num_positions);
     }
     {
         const char *ov = prc_diag_getenv("PRC_DIAG_FORCE_ORIGIN");
@@ -2249,6 +2485,8 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             st.visited[cur] = 1;
             st.pending[cur] = 0;
             st.chain_len++;
+            if (st.chain_len > st.max_chain_len)
+                st.max_chain_len = st.chain_len;
         }
         else
         {
@@ -2304,6 +2542,64 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         out->triangle_point_indices[(size_t)emitted * 3 + 1] = idx[1];
         out->triangle_point_indices[(size_t)emitted * 3 + 2] = idx[2];
         out->triangle_mesh_order[emitted] = cur;
+
+        /* PROBE (2026-08-06): see alltri_tilt_max's own comment on prc_encode_state.
+           Computed for EVERY triangle (chain-start or grow), not just chain-starts. */
+        if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+        {
+            const double *p0 = mesh->positions + (size_t)mv[0] * 3;
+            const double *p1 = mesh->positions + (size_t)mv[1] * 3;
+            const double *p2 = mesh->positions + (size_t)mv[2] * 3;
+            prc_vec3 tp0, tp1, tp2, e1, e2, true_n, r_e1, r_e2, rec_n;
+
+            tp0.x = p0[0]; tp0.y = p0[1]; tp0.z = p0[2];
+            tp1.x = p1[0]; tp1.y = p1[1]; tp1.z = p1[2];
+            tp2.x = p2[0]; tp2.y = p2[1]; tp2.z = p2[2];
+            prc_vec_sub(tp1, tp0, &e1);
+            prc_vec_sub(tp2, tp0, &e2);
+            prc_vec_cross(e1, e2, &true_n);
+            prc_vec_sub(st.decoded_pos[idx[1]], st.decoded_pos[idx[0]], &r_e1);
+            prc_vec_sub(st.decoded_pos[idx[2]], st.decoded_pos[idx[0]], &r_e2);
+            prc_vec_cross(r_e1, r_e2, &rec_n);
+
+            if (prc_vec_normalize(&true_n) == 0 && prc_vec_normalize(&rec_n) == 0)
+            {
+                double tilt = 1.0 - prc_vec_dot_product(true_n, rec_n);
+                uint32_t offset = st.chain_offset > 0 ? st.chain_offset - 1 : 0;
+                int bucket = offset < 10 ? 0 : offset < 100 ? 1 : offset < 1000 ? 2 :
+                    offset < 10000 ? 3 : offset < 100000 ? 4 : 5;
+
+                /* DIAGNOSTIC (2026-08-06, PRC_DIAG_TRACE_TRI=<mesh_tri_index>): full
+                   detail dump for one specific triangle, to inspect an outlier found
+                   via alltri_tilt_max without flooding output for the whole mesh. */
+                {
+                    const char *trace_tri_env = prc_diag_getenv("PRC_DIAG_TRACE_TRI");
+                    if (trace_tri_env != NULL && cur == (uint32_t)strtoul(trace_tri_env, NULL, 10))
+                    {
+                        fprintf(stderr, "PRC_DIAG_TRACE_TRI: mesh_tri=%u chain_offset=%u tilt=%.9e "
+                            "mv=(%u,%u,%u) idx=(%d,%d,%d)\n"
+                            "  true p0=(%.17g,%.17g,%.17g) p1=(%.17g,%.17g,%.17g) p2=(%.17g,%.17g,%.17g)\n"
+                            "  decoded p0=(%.17g,%.17g,%.17g) p1=(%.17g,%.17g,%.17g) p2=(%.17g,%.17g,%.17g)\n"
+                            "  true_n=(%.9g,%.9g,%.9g) rec_n=(%.9g,%.9g,%.9g)\n",
+                            cur, offset, tilt, mv[0], mv[1], mv[2], idx[0], idx[1], idx[2],
+                            p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2],
+                            st.decoded_pos[idx[0]].x, st.decoded_pos[idx[0]].y, st.decoded_pos[idx[0]].z,
+                            st.decoded_pos[idx[1]].x, st.decoded_pos[idx[1]].y, st.decoded_pos[idx[1]].z,
+                            st.decoded_pos[idx[2]].x, st.decoded_pos[idx[2]].y, st.decoded_pos[idx[2]].z,
+                            true_n.x, true_n.y, true_n.z, rec_n.x, rec_n.y, rec_n.z);
+                    }
+                }
+
+                if (tilt > st.bucket_tilt_max[bucket])
+                    st.bucket_tilt_max[bucket] = tilt;
+                if (tilt > st.alltri_tilt_max)
+                {
+                    st.alltri_tilt_max = tilt;
+                    st.alltri_tilt_max_tri = cur;
+                    st.alltri_tilt_max_offset = offset;
+                }
+            }
+        }
 
         /* Decide normal_was_reversed for THIS triangle now, using idx[]/mv[]
            as just finalized above -- i.e. the triangle's true final vertex
@@ -2412,6 +2708,81 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         st.analysis = NULL;
         if (analysis_count_out != NULL)
             *analysis_count_out = out->num_decoded_points;
+    }
+
+    if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+    {
+        printf("PRC_DIAG_MESH_QUALITY: alt_basis_count=%u alt_basis_refused_count=%u "
+            "(refuse_alternate_basis_grow=%d)\n",
+            st.alt_basis_count, st.alt_basis_refused_count,
+            prc_encode_refuse_alternate_basis_grow());
+        printf("PRC_DIAG_MESH_QUALITY: chain_start_count=%u chain_start_tilt_max=%.9e "
+            "tilt_gt_1e-6=%u tilt_gt_1e-4=%u tilt_gt_1e-2=%u max_chain_len=%u\n",
+            st.chain_start_count, st.chain_start_tilt_max,
+            st.chain_start_tilt_gt_1e_6, st.chain_start_tilt_gt_1e_4, st.chain_start_tilt_gt_1e_2,
+            st.max_chain_len);
+        printf("PRC_DIAG_MESH_QUALITY: alltri_tilt_max=%.9e at mesh_tri=%u chain_offset=%u "
+            "bucket_tilt_max[0-10)=%.9e [10-100)=%.9e [100-1e3)=%.9e [1e3-1e4)=%.9e "
+            "[1e4-1e5)=%.9e [1e5+)=%.9e\n",
+            st.alltri_tilt_max, st.alltri_tilt_max_tri, st.alltri_tilt_max_offset,
+            st.bucket_tilt_max[0], st.bucket_tilt_max[1], st.bucket_tilt_max[2],
+            st.bucket_tilt_max[3], st.bucket_tilt_max[4], st.bucket_tilt_max[5]);
+    }
+
+    /* PROBE (2026-08-05), mixed_chains investigation continued: scans this
+       entry's own DECODED (reconstructed) positions -- computed exactly as a
+       compliant decoder would reconstruct them -- for any two DIFFERENT point
+       indices (never merged/deduplicated upstream, so structurally meant to
+       represent distinct vertices) that land in the same quantization cell
+       anyway. That's a genuine, decoder-visible anomaly regardless of who's
+       reading the file: two "different" vertices reconstructing to the
+       identical position can produce degenerate (zero-length) edges/
+       triangles and ambiguous vertex-normal-averaging groups downstream --
+       a plausible trigger for a strict decoder's own robustness check.
+       Reuses the same quantize-and-hash technique as the vertex dedup pass
+       near the top of this file (prc_vtx_hash), just applied to the
+       RECONSTRUCTED positions of an already-built traversal instead of raw
+       input positions. Read-only report, PRC_DIAG_MESH_QUALITY-gated, no
+       behavior change. */
+    if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL && out->num_decoded_points > 0)
+    {
+        uint32_t dup_pairs = 0;
+        size_t cap = prc_next_pow2((size_t)out->num_decoded_points * 2);
+        prc_vtx_slot *dtable = (prc_vtx_slot *)prc_calloc(ctx, cap, sizeof(prc_vtx_slot));
+        if (dtable != NULL)
+        {
+            uint32_t i;
+            for (i = 0; i < out->num_decoded_points; i++)
+            {
+                double px = out->decoded_positions[(size_t)i * 3 + 0];
+                double py = out->decoded_positions[(size_t)i * 3 + 1];
+                double pz = out->decoded_positions[(size_t)i * 3 + 2];
+                int64_t kx = (int64_t)llround(px / tolerance_mm);
+                int64_t ky = (int64_t)llround(py / tolerance_mm);
+                int64_t kz = (int64_t)llround(pz / tolerance_mm);
+                size_t slot = (size_t)(prc_vtx_hash(kx, ky, kz) & (uint64_t)(cap - 1));
+                for (;;)
+                {
+                    prc_vtx_slot *s = &dtable[slot];
+                    if (!s->used)
+                    {
+                        s->used = 1;
+                        s->key[0] = kx; s->key[1] = ky; s->key[2] = kz;
+                        s->index = i;
+                        break;
+                    }
+                    if (s->key[0] == kx && s->key[1] == ky && s->key[2] == kz)
+                    {
+                        dup_pairs++;
+                        break;
+                    }
+                    slot = (slot + 1) & (cap - 1);
+                }
+            }
+            prc_free(ctx, dtable);
+            printf("PRC_DIAG_MESH_QUALITY: decoded_position_collisions=%u (out of %u decoded points)\n",
+                dup_pairs, out->num_decoded_points);
+        }
     }
 
     ret = 0;
