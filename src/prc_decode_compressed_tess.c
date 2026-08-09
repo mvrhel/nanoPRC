@@ -2172,6 +2172,45 @@ prc_store_triangle_style(prc_context *ctx, prc_tess_3d_compressed *data,
 	}
 }
 
+/* PROBE (2026-08-06): see PRC_DIAG_DUMP_HOP_DEPTH's own comment at hop_depth's allocation
+   site. Generic, decoder-internal-logic-oblivious hop-depth computation: for a just-
+   finalized triangle's 3 global point indices, any index not yet assigned a hop_depth is
+   set to 1 + the max hop_depth of whichever OTHER of this triangle's 3 corners are
+   already assigned (an origin-anchored point, with no already-assigned corner to compare
+   against, gets 0). Processing corners in a fixed 0/1/2 order and skipping already-
+   assigned ones reproduces the encoder's own V0/V1/V2 and grow-apex dependency structure
+   exactly for every case except a chain-start whose ONLY reference is index 1 or 2 (V0 is
+   still origin-relative there, not reference-relative, but this generic rule would treat
+   it as relative to whichever reference already has a hop_depth) -- a narrow, rare,
+   boundedly-conservative overcount, not a correctness issue for THIS diagnostic's own
+   purpose (measuring whether reconstruction error compounds with hop depth) since nothing
+   here feeds back into the actual decoded values. */
+static void
+prc_diag_track_hop_depth(int32_t *hop_depth, const int treated_index[3])
+{
+    int k, j;
+    for (k = 0; k < 3; k++)
+    {
+        int idx = treated_index[k];
+        if (idx < 0 || hop_depth[idx] >= 0)
+            continue;
+        {
+            int32_t base = -1;
+            for (j = 0; j < 3; j++)
+            {
+                if (j == k)
+                    continue;
+                {
+                    int oidx = treated_index[j];
+                    if (oidx >= 0 && hop_depth[oidx] > base)
+                        base = hop_depth[oidx];
+                }
+            }
+            hop_depth[idx] = base + 1; /* base==-1 -> 0, i.e. origin-anchored */
+        }
+    }
+}
+
 /* This handles all the cases. With and without faces, calculating normals or
    just decoding normals */
 int
@@ -2195,6 +2234,27 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     prc_triangle_stack stack;
     prc_vec3 new_point;
     prc_vec3 *vertices_out = NULL;
+    int32_t *hop_depth = NULL; /* see PRC_DIAG_DUMP_HOP_DEPTH's own comment below */
+    /* PROBE (2026-08-06): ground-truth per-triangle reference flag, read-side
+       counterpart to the encoder's own st->tri_is_ref (prc_write_compress_
+       tess.c) -- captures the SAME points_is_reference_array bit this
+       decoder already reads to reconstruct geometry, indexed by final
+       triangle order (triangle_indice_count/3) instead of inferring
+       reference status from a hop_depth arithmetic pattern. -1 = chain-start
+       (stack-was-empty) triangle, not classified this way; 0/1 = ordinary
+       grow-step, apex resolved fresh/reference. Only allocated (parallel to
+       hop_depth) when PRC_DIAG_DUMP_HOP_DEPTH is set. */
+    int8_t *tri_is_ref = NULL;
+    /* PROBE (2026-08-06): read-side counterpart to the encoder's own
+       st->tri_zbasis -- see that field's own comment. z_basis is spec-
+       mandated/deterministic from already-decoded geometry (RESULT 17's own
+       finding for the alternate-basis fallback), so re-deriving it via this
+       decoder on an ARBITRARY file (including one nanoPRC never wrote) gives
+       the actual basis its own encoder used, without needing that encoder's
+       internals. Zeroed (not a real unit basis) for chain-start triangles,
+       which don't use an edge basis. Only allocated when
+       PRC_DIAG_DUMP_HOP_DEPTH is set. */
+    prc_vec3 *tri_zbasis = NULL;
     uint32_t *vertex_normal_indices = NULL;
     int vertex_count;
     int current_bits_zero[4] = {0, 0, 0, 0};
@@ -2360,6 +2420,45 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         goto cleanup;
     }
 
+    /* PROBE (2026-08-06, PRC_DIAG_DUMP_HOP_DEPTH=<path>): read-side counterpart to the
+       encoder's own hop_depth tracking (prc_write_compress_tess.c) -- lets the SAME
+       "how many unbroken relative-encoding steps from an origin anchor" metric be
+       measured on an ARBITRARY real PRC file's own bitstream, including one nanoPRC
+       never wrote (e.g. an independent encoder's output), to check whether that
+       encoder's own chains show the same error-compounding-depth pattern nanoPRC's
+       does. Zero allocation/behavior change when unset. */
+    if (prc_diag_getenv("PRC_DIAG_DUMP_HOP_DEPTH") != NULL)
+    {
+        int hi;
+        hop_depth = (int32_t *)prc_malloc(ctx, sizeof(int32_t) * (size_t)num_points);
+        if (hop_depth == NULL)
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate hop_depth in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
+        for (hi = 0; hi < num_points; hi++)
+            hop_depth[hi] = -1;
+
+        tri_is_ref = (int8_t *)prc_malloc(ctx, sizeof(int8_t) * (size_t)num_triangles);
+        if (tri_is_ref == NULL)
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate tri_is_ref in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
+        for (hi = 0; hi < num_triangles; hi++)
+            tri_is_ref[hi] = -1;
+
+        tri_zbasis = (prc_vec3 *)prc_calloc(ctx, (size_t)num_triangles, sizeof(prc_vec3));
+        if (tri_zbasis == NULL)
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate tri_zbasis in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
+    }
+
     /* The normal vectors that we index. Number of angles divided by 2 */
     /* Or if we have to compute them, it is the number of triangles times three. */
     normals_vertex = (prc_vec3 *)prc_calloc(ctx, sizeof(prc_vec3), num_triangles * 3);
@@ -2492,6 +2591,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
     /* Compute the vertices of the first triangle. */
     prc_compute_first_triangle(ctx, data, point_array_scaled,
                                     &point_array_count, &treated_tri);
+    if (hop_depth != NULL)
+        prc_diag_track_hop_depth(hop_depth, treated_tri.treated_index);
 
     /* Store the vertices of the first triangle */
     prc_store_vertices(ctx, treated_tri, vertices_out, &vertex_treatment_count);
@@ -2648,6 +2749,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                 if (diag_chains)
                     fprintf(stderr, "PRC_DIAG_CHAIN_BOUNDARIES: chain_start_point_index=%u chain_start_points_consumed=%u\n",
                         before_count, point_array_count - before_count);
+                if (hop_depth != NULL)
+                    prc_diag_track_hop_depth(hop_depth, treated_tri.treated_index);
             }
 			stack_was_empty = 1;
         }
@@ -2691,6 +2794,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
                                 prc_error(ctx, code, "Failed in prc_handle_empty_stack_decode\n");
                                 goto cleanup;
                             }
+                            if (hop_depth != NULL)
+                                prc_diag_track_hop_depth(hop_depth, treated_tri.treated_index);
                         }
                         else
                         {
@@ -2723,6 +2828,11 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             }
 
             /* Only one point is a reference.. */
+            if (tri_is_ref != NULL && (triangle_indice_count / 3) < num_triangles)
+                tri_is_ref[triangle_indice_count / 3] =
+                    (int8_t)(data->points_is_reference_array[points_is_reference_index] == 1 ? 1 : 0);
+            if (tri_zbasis != NULL && (triangle_indice_count / 3) < num_triangles)
+                tri_zbasis[triangle_indice_count / 3] = treated_details.z_basis;
             if (data->points_is_reference_array[points_is_reference_index] == 1)
             {
                 int32_t ref_value;
@@ -2801,6 +2911,8 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
 
             /* One point in this case */
             points_is_reference_index++;
+            if (hop_depth != NULL)
+                prc_diag_track_hop_depth(hop_depth, treated_tri.treated_index);
         }
 
         /* With the above decode process, if the normal is reversed we store
@@ -2896,6 +3008,38 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         DEBUG_LOG("%d, ", triangle_indices[k]);
     }
     DEBUG_LOG(" ]\n");
+
+    /* PROBE (2026-08-06): dump hop_depth[] alongside triangle_indices[]'s already-final
+       (post normal-reversal-reorder) values and vertices_out[]'s own decoded positions --
+       hop_depth is keyed by point index, so it's unaffected by which of a triangle's 3
+       slots got reordered. One line per triangle: idx0 idx1 idx2 hop0 hop1 hop2 then each
+       vertex's x y z, letting an offline script compute per-triangle sin(angle) and
+       correlate directly against hop_depth with no cross-tool index matching needed. */
+    if (hop_depth != NULL)
+    {
+        const char *dump_path = prc_diag_getenv("PRC_DIAG_DUMP_HOP_DEPTH");
+        FILE *dump_f = dump_path != NULL ? fopen(dump_path, "w") : NULL;
+        if (dump_f != NULL)
+        {
+            for (k = 0; k < num_triangles; k++)
+            {
+                int i0 = triangle_indices[k * 3 + 0];
+                int i1 = triangle_indices[k * 3 + 1];
+                int i2 = triangle_indices[k * 3 + 2];
+                prc_vec3 zb = tri_zbasis != NULL ? tri_zbasis[k] : (prc_vec3){0,0,0};
+                fprintf(dump_f, "%d %d %d %d %d %d %d %d "
+                    "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                    "%.17g %.17g %.17g\n",
+                    k, i0, i1, i2, hop_depth[i0], hop_depth[i1], hop_depth[i2],
+                    tri_is_ref != NULL ? (int)tri_is_ref[k] : -1,
+                    vertices_out[i0].x, vertices_out[i0].y, vertices_out[i0].z,
+                    vertices_out[i1].x, vertices_out[i1].y, vertices_out[i1].z,
+                    vertices_out[i2].x, vertices_out[i2].y, vertices_out[i2].z,
+                    zb.x, zb.y, zb.z);
+            }
+            fclose(dump_f);
+        }
+    }
 
     DEBUG_LOG("\nNormal Indices: [ ");
     for (k = 0; k <num_triangles * 3; k++)
@@ -3045,6 +3189,12 @@ cleanup:
     prc_free(ctx, normals_vertex);
     prc_free(ctx, point_array_scaled);
     prc_free(ctx, vertices_out);
+    if (hop_depth != NULL)
+        prc_free(ctx, hop_depth);
+    if (tri_is_ref != NULL)
+        prc_free(ctx, tri_is_ref);
+    if (tri_zbasis != NULL)
+        prc_free(ctx, tri_zbasis);
     if (decoded_angles != NULL)
         prc_free(ctx, decoded_angles);
     if (face_normal_decoded != NULL)

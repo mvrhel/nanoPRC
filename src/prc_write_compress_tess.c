@@ -1418,6 +1418,17 @@ typedef struct
     prc_vec3 origin;
     int32_t *vtx_map;         /* mesh vertex -> decoder point index, -1 unseen */
     prc_vec3 *decoded_pos;    /* decoder-exact reconstructed positions */
+    /* PRC_DIAG_MESH_QUALITY reporting only: number of un-broken relative-encoding
+       steps separating each decoder point from the nearest origin-anchored point
+       (0 = a chain-start's own V0, encoded directly against the global origin;
+       every other point's hop_depth = 1 + the max hop_depth of whatever point(s)
+       its own encoding was measured relative to). A point_reference_array
+       reference reuses an existing point's hop_depth unchanged -- it doesn't
+       create a new hop, but also doesn't reset anyone else's. Tests whether
+       reconstruction error compounds with hop depth specifically (not just raw
+       chain position, which conflates depth with mere triangle count). Indexed
+       exactly like decoded_pos, same allocation lifetime. */
+    uint32_t *hop_depth;
     uint32_t n_points;
     uint8_t *visited;
     uint8_t *pending;         /* triangle has a live grow op on the stack */
@@ -1482,6 +1493,58 @@ typedef struct
     uint32_t alltri_tilt_max_tri;
     uint32_t alltri_tilt_max_offset;
     double bucket_tilt_max[6]; /* offset ranges: [0,10) [10,100) [100,1000) [1000,10000) [10000,100000) [100000,inf) */
+    /* PRC_DIAG_MESH_QUALITY reporting only: same tilt data, bucketed by hop_depth
+       instead of raw chain offset -- isolates "how many un-broken relative-
+       encoding steps from an origin anchor" from "how many triangles into the
+       chain", which conflate whenever references are sparse (see hop_depth's
+       own comment). Buckets: 0-1, 2-3, 4-7, 8-15, 16-31, 32+. */
+    double hopbucket_tilt_max[6];
+    uint32_t hopbucket_count[6];
+    /* PRC_DIAG_MESH_QUALITY reporting only: max deviation from perfect orthonormality
+       (|dot(x,y)|, |dot(y,z)|, |dot(x,z)|, ||x|-1|, ||y|-1|, ||z|-1|) of every grow-op
+       basis actually used, bucketed by the growing edge's own hop_depth. Tests whether
+       the basis itself measurably loses orthonormality with depth -- a truly orthonormal
+       transform can't amplify error, so if this stays flat, error growth must come from
+       somewhere else (e.g. the quantization/re-snap step itself), not basis drift. */
+    double orthobucket_dev_max[6];
+    uint32_t orthobucket_count[6];
+    /* PRC_DIAG_MESH_QUALITY reporting only: raw per-point positional reconstruction
+       error (|true - decoded|, not normal tilt), bucketed by chain_offset, computed
+       directly where both are already in hand (emit_axis_point/emit_basis_point) --
+       cheaper and more direct than the per-triangle tilt scan, isolates whether
+       POSITION error itself grows with depth (independent of any triangle-shape
+       amplification). */
+    double posbucket_err_max[6];
+    uint32_t posbucket_count[6];
+    /* PRC_DIAG_DUMP_ALLTRI=<path>: opened/closed around the whole traversal
+       when set, one line per triangle written from the same per-triangle
+       tilt-scan block that already computes true/decoded positions and
+       hop_depth -- lets an offline script do a DISTRIBUTIONAL (not
+       single-anecdote) out-of-plane-vs-in-plane error decomposition across
+       every triangle in a real file, mirroring the decode side's own
+       PRC_DIAG_DUMP_HOP_DEPTH. */
+    FILE *alltri_dump;
+    /* PROBE (2026-08-06): ground-truth reference count per mesh triangle (NOT
+       an hop_depth-arithmetic proxy) -- chain_start sets this to num_refs
+       (0-3, how many of its 3 corners were st->vtx_map hits); grow_triangle
+       sets it to 0 or 1 (whether its one new corner resolved via
+       st->vtx_map, the exact same condition that drives
+       out->points_is_reference_array for that step). Lets an offline script
+       classify "did this triangle involve a real point_reference_array
+       reference" directly instead of inferring it from a hop_depth pattern
+       (which conflates ordinary active-boundary continuation with genuine
+       reference reuse). Included in the PRC_DIAG_DUMP_ALLTRI dump. */
+    uint8_t *tri_is_ref;
+    /* PROBE (2026-08-06): the grow-op edge-basis z_basis actually used to
+       decode this triangle's apex, captured at pop/grow time (chain-start
+       triangles, which don't use an edge basis, leave this zeroed -- a real
+       basis is always unit length, so (0,0,0) is an unambiguous "not set"
+       sentinel). Lets an offline script measure step-to-step ORIENTATION
+       stability of the local quantization frame (distinct from the
+       orthonormality/VALIDITY check orthobucket_dev_max already does) by
+       comparing consecutive grow-triangles' z_basis directions -- included
+       in the PRC_DIAG_DUMP_ALLTRI dump. */
+    prc_vec3 *tri_zbasis;
 } prc_encode_state;
 
 /* Chain bookkeeping only this phase: reconstructed_position stays zeroed
@@ -1521,6 +1584,56 @@ prc_encode_quantize(prc_context *ctx, double v, double tol, int32_t *dv)
     return 0;
 }
 
+/* PROBE (2026-08-06, PRC_DIAG_NUDGE_ZERO_DELTAS): targeted causal test for
+   whether point_array deltas with 2+ exact-zero components (RESULT 12's
+   original V0+V2 chain-start trigger pattern, generalized here to EVERY
+   point role, not just chain-start -- beetle_1000000.stl's own jitter-off
+   encode shows a real point_array-wide 2+-zero-component rate roughly 2x
+   higher than jitter-on) are the actual causal mechanism, independent of
+   full-mesh jitter's many OTHER side effects (Huffman table shape included
+   -- already tested and falsified separately). Nudges just enough of the
+   zero components (by the minimal possible perturbation, 1 quantization
+   unit) to bring any point's zero-count down to at most 1, leaving every
+   other point_array value, and the resulting Huffman table, as close to the
+   unperturbed encode as possible. Zero cost/behavior change when unset. */
+static void
+prc_diag_nudge_zero_delta(int32_t dv[3])
+{
+    if (prc_diag_getenv("PRC_DIAG_NUDGE_ZERO_DELTAS") == NULL)
+        return;
+    {
+        int zeros = (dv[0] == 0) + (dv[1] == 0) + (dv[2] == 0);
+        int k;
+        if (zeros < 2)
+            return;
+        for (k = 0; k < 3 && zeros > 1; k++)
+        {
+            if (dv[k] == 0)
+            {
+                dv[k] = 1;
+                zeros--;
+            }
+        }
+    }
+}
+
+/* PROBE (2026-08-06): see posbucket_err_max's own comment on prc_encode_state. */
+static void
+prc_diag_track_pos_error(prc_encode_state *st, const double *p, prc_vec3 rec)
+{
+    if (prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+    {
+        double dx = p[0] - rec.x, dy = p[1] - rec.y, dz = p[2] - rec.z;
+        double err = sqrt(dx * dx + dy * dy + dz * dz);
+        uint32_t offset = st->chain_offset;
+        int bucket = offset < 10 ? 0 : offset < 100 ? 1 : offset < 1000 ? 2 :
+            offset < 10000 ? 3 : offset < 100000 ? 4 : 5;
+        if (err > st->posbucket_err_max[bucket])
+            st->posbucket_err_max[bucket] = err;
+        st->posbucket_count[bucket]++;
+    }
+}
+
 /* Emit a new point predicted along the global axes: DV = round((P - base)/tol),
    reconstructed exactly like the decoder's prc_vec_add(point_array_scaled, base). */
 static int
@@ -1541,6 +1654,8 @@ prc_encode_emit_axis_point(prc_encode_state *st, uint32_t mesh_vtx, prc_vec3 bas
     code = prc_encode_quantize(st->ctx, p[2] - base.z, st->tol, &dv[2]);
     if (code < 0)
         return code;
+
+    prc_diag_nudge_zero_delta(dv);
 
     if (st->ctx->trace_reversed)
         fprintf(stderr, "ENC_AXISPOINT mesh_vtx=%u base=(%.17g,%.17g,%.17g) p=(%.17g,%.17g,%.17g) "
@@ -1576,6 +1691,7 @@ prc_encode_emit_axis_point(prc_encode_state *st, uint32_t mesh_vtx, prc_vec3 bas
     scaled.y = ((double)dv[1]) * st->tol;
     scaled.z = ((double)dv[2]) * st->tol;
     prc_vec_add(scaled, base, &rec);
+    prc_diag_track_pos_error(st, p, rec);
 
     st->decoded_pos[st->n_points] = rec;
     st->vtx_map[mesh_vtx] = (int32_t)st->n_points;
@@ -1705,6 +1821,8 @@ prc_encode_emit_basis_point(prc_encode_state *st, uint32_t mesh_vtx,
     if (code < 0)
         return code;
 
+    prc_diag_nudge_zero_delta(dv);
+
     if (st->ctx->trace_reversed)
         fprintf(stderr, "ENC_BASISPOINT mesh_vtx=%u op_origin=(%.17g,%.17g,%.17g) p=(%.17g,%.17g,%.17g) "
             "diff=(%.17g,%.17g,%.17g) x_basis=(%.17g,%.17g,%.17g) y_basis=(%.17g,%.17g,%.17g) "
@@ -1733,6 +1851,7 @@ prc_encode_emit_basis_point(prc_encode_state *st, uint32_t mesh_vtx,
     prc_vec_add(op->origin, x, &temp);
     prc_vec_add(temp, y, &temp2);
     prc_vec_add(temp2, z, &rec);
+    prc_diag_track_pos_error(st, p, rec);
 
     st->decoded_pos[st->n_points] = rec;
     st->vtx_map[mesh_vtx] = (int32_t)st->n_points;
@@ -1871,6 +1990,8 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
         out->points_is_reference_array[out->points_is_reference_array_size] = r[k];
         out->points_is_reference_array_size++;
     }
+    if (st->tri_is_ref != NULL)
+        st->tri_is_ref[tri] = (uint8_t)num_refs;
     if (st->ctx->trace_reversed)
     {
         fprintf(stderr, "ENC_CHAINSTART tri=%u mv=(%u,%u,%u) r=(%u,%u,%u) num_refs=%u "
@@ -1885,13 +2006,17 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
         code = prc_encode_emit_axis_point(st, mv[0], st->origin, &idx[0]);
         if (code < 0)
             return code;
+        st->hop_depth[idx[0]] = 0;
         code = prc_encode_emit_axis_point(st, mv[1], st->decoded_pos[idx[0]], &idx[1]);
         if (code < 0)
             return code;
+        st->hop_depth[idx[1]] = st->hop_depth[idx[0]] + 1;
         prc_vec_avg(st->decoded_pos[idx[0]], st->decoded_pos[idx[1]], &temp);
         code = prc_encode_emit_axis_point(st, mv[2], temp, &idx[2]);
         if (code < 0)
             return code;
+        st->hop_depth[idx[2]] = (st->hop_depth[idx[0]] > st->hop_depth[idx[1]] ?
+            st->hop_depth[idx[0]] : st->hop_depth[idx[1]]) + 1;
 
         /* PROBE (2026-08-05), mixed_chains investigation continued: see
            chain_start_tilt_max's own comment on prc_encode_state. Computed
@@ -1937,10 +2062,13 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[1], st->decoded_pos[idx[0]], &idx[1]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[1]] = st->hop_depth[idx[0]] + 1;
             prc_vec_avg(st->decoded_pos[idx[0]], st->decoded_pos[idx[1]], &temp);
             code = prc_encode_emit_axis_point(st, mv[2], temp, &idx[2]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[2]] = (st->hop_depth[idx[0]] > st->hop_depth[idx[1]] ?
+                st->hop_depth[idx[0]] : st->hop_depth[idx[1]]) + 1;
         }
         else if (r[1])
         {
@@ -1949,10 +2077,13 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[0], st->origin, &idx[0]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[0]] = 0;
             prc_vec_avg(st->decoded_pos[idx[1]], st->decoded_pos[idx[0]], &temp);
             code = prc_encode_emit_axis_point(st, mv[2], temp, &idx[2]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[2]] = (st->hop_depth[idx[0]] > st->hop_depth[idx[1]] ?
+                st->hop_depth[idx[0]] : st->hop_depth[idx[1]]) + 1;
         }
         else
         {
@@ -1961,9 +2092,11 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[0], st->origin, &idx[0]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[0]] = 0;
             code = prc_encode_emit_axis_point(st, mv[1], st->decoded_pos[idx[0]], &idx[1]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[1]] = st->hop_depth[idx[0]] + 1;
         }
     }
     else if (num_refs == 2)
@@ -1978,6 +2111,7 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[0], st->origin, &idx[0]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[0]] = 0;
         }
         else if (!r[1])
         {
@@ -1988,6 +2122,7 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[1], st->decoded_pos[idx[0]], &idx[1]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[1]] = st->hop_depth[idx[0]] + 1;
         }
         else
         {
@@ -1999,6 +2134,8 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
             code = prc_encode_emit_axis_point(st, mv[2], temp, &idx[2]);
             if (code < 0)
                 return code;
+            st->hop_depth[idx[2]] = (st->hop_depth[idx[0]] > st->hop_depth[idx[1]] ?
+                st->hop_depth[idx[0]] : st->hop_depth[idx[1]]) + 1;
         }
     }
     else
@@ -2053,13 +2190,24 @@ prc_encode_grow_triangle(prc_encode_state *st, const prc_encode_grow_op *op,
         out->points_is_reference_array[out->points_is_reference_array_size++] = 1;
         idx[2] = st->vtx_map[third];
         out->point_reference_array[out->point_reference_array_size++] = idx[2];
+        if (st->tri_is_ref != NULL)
+            st->tri_is_ref[t] = 1;
     }
     else
     {
         out->points_is_reference_array[out->points_is_reference_array_size++] = 0;
+        if (st->tri_is_ref != NULL)
+            st->tri_is_ref[t] = 0;
         code = prc_encode_emit_basis_point(st, third, op, &idx[2]);
         if (code < 0)
             return code;
+        /* PROBE (2026-08-06): see hop_depth's own comment on prc_encode_state.
+           This apex point's own basis was built from op->index0/index1 (the
+           edge just grown across), so its hop depth is one more than whichever
+           of those two carries the deeper (more error-compounding-prone)
+           chain. */
+        st->hop_depth[idx[2]] = (st->hop_depth[op->index0] > st->hop_depth[op->index1] ?
+            st->hop_depth[op->index0] : st->hop_depth[op->index1]) + 1;
     }
 
     idx[0] = op->index0;
@@ -2211,6 +2359,28 @@ prc_encode_edge_status(prc_encode_state *st, uint32_t tri,
                 &op.x_basis, &op.y_basis, &op.z_basis, &op.origin, &used_alternate);
             if (used_alternate)
                 st->alt_basis_count++;
+            if (code == 0 && prc_diag_getenv("PRC_DIAG_MESH_QUALITY") != NULL)
+            {
+                double dxy = prc_vec_dot_product(op.x_basis, op.y_basis);
+                double dyz = prc_vec_dot_product(op.y_basis, op.z_basis);
+                double dxz = prc_vec_dot_product(op.x_basis, op.z_basis);
+                double lx = sqrt(prc_vec_dot_product(op.x_basis, op.x_basis)) - 1.0;
+                double ly = sqrt(prc_vec_dot_product(op.y_basis, op.y_basis)) - 1.0;
+                double lz = sqrt(prc_vec_dot_product(op.z_basis, op.z_basis)) - 1.0;
+                double dev = fabs(dxy);
+                uint32_t edge_hop = st->hop_depth[ex[e]] > st->hop_depth[ey[e]] ?
+                    st->hop_depth[ex[e]] : st->hop_depth[ey[e]];
+                int obucket = edge_hop < 10 ? 0 : edge_hop < 100 ? 1 : edge_hop < 1000 ? 2 :
+                    edge_hop < 10000 ? 3 : edge_hop < 100000 ? 4 : 5;
+                if (fabs(dyz) > dev) dev = fabs(dyz);
+                if (fabs(dxz) > dev) dev = fabs(dxz);
+                if (fabs(lx) > dev) dev = fabs(lx);
+                if (fabs(ly) > dev) dev = fabs(ly);
+                if (fabs(lz) > dev) dev = fabs(lz);
+                if (dev > st->orthobucket_dev_max[obucket])
+                    st->orthobucket_dev_max[obucket] = dev;
+                st->orthobucket_count[obucket]++;
+            }
             if (code < 0 ||
                 (used_alternate && prc_encode_refuse_alternate_basis_grow()))
             {
@@ -2262,6 +2432,12 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     }
     memset(out, 0, sizeof(*out));
     memset(&st, 0, sizeof(st));
+
+    {
+        const char *alltri_dump_path = prc_diag_getenv("PRC_DIAG_DUMP_ALLTRI");
+        if (alltri_dump_path != NULL)
+            st.alltri_dump = fopen(alltri_dump_path, "w");
+    }
 
     if (analysis_out != NULL)
         *analysis_out = NULL;
@@ -2407,14 +2583,19 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     st.neighbor = (int32_t *)prc_malloc(ctx, (size_t)num_tris * 3 * sizeof(int32_t));
     st.vtx_map = (int32_t *)prc_malloc(ctx, (size_t)num_pos * sizeof(int32_t));
     st.decoded_pos = (prc_vec3 *)prc_malloc(ctx, (size_t)num_pos * sizeof(prc_vec3));
+    st.hop_depth = (uint32_t *)prc_calloc(ctx, num_pos, sizeof(uint32_t));
     st.tri_reversed = (uint8_t *)prc_calloc(ctx, num_tris, sizeof(uint8_t));
+    st.tri_is_ref = (uint8_t *)prc_malloc(ctx, (size_t)num_tris * sizeof(uint8_t));
+    if (st.tri_is_ref != NULL)
+        memset(st.tri_is_ref, 0xFF, (size_t)num_tris * sizeof(uint8_t));
+    st.tri_zbasis = (prc_vec3 *)prc_calloc(ctx, num_tris, sizeof(prc_vec3));
     if (out->point_array == NULL || out->edge_status_array == NULL ||
         out->triangle_face_array == NULL || out->points_is_reference_array == NULL ||
         out->point_reference_array == NULL || out->triangle_point_indices == NULL ||
         out->triangle_mesh_order == NULL || out->point_mesh_vertex == NULL ||
         out->decoded_positions == NULL || out->triangle_reversed == NULL ||
         st.visited == NULL || st.pending == NULL || st.neighbor == NULL ||
-        st.vtx_map == NULL || st.decoded_pos == NULL || st.tri_reversed == NULL)
+        st.vtx_map == NULL || st.decoded_pos == NULL || st.hop_depth == NULL || st.tri_reversed == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_traversal\n");
         ret = PRC_ERROR_MEMORY;
@@ -2482,6 +2663,8 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                 goto fail;
             }
             cur = op.target_tri;
+            if (st.tri_zbasis != NULL)
+                st.tri_zbasis[cur] = op.z_basis;
             st.visited[cur] = 1;
             st.pending[cur] = 0;
             st.chain_len++;
@@ -2551,6 +2734,29 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             const double *p1 = mesh->positions + (size_t)mv[1] * 3;
             const double *p2 = mesh->positions + (size_t)mv[2] * 3;
             prc_vec3 tp0, tp1, tp2, e1, e2, true_n, r_e1, r_e2, rec_n;
+            /* PROBE (2026-08-08): a real reader renders this triangle's
+               vertex order as idx[0],idx[1],idx[2] UNCHANGED when
+               prc_encode_decide_reversed is true, but SWAPPED (idx[0],
+               idx[2],idx[1]) when it's false -- prc_decode_compressed_
+               tess.c's own decoder does this at store-time (~line 480-492).
+               Found via a 213-file corpus sweep: without this swap, every
+               triangle whose reversed decision is false gets an artificially
+               EXACT-INVERTED (tilt=2.0) rec_n here -- comparing against the
+               wrong winding, not a real reconstruction defect. Uses the same
+               pure decision function called again below for the real
+               encoding purpose (idx[]/mv[] are already finalized at this
+               point in the loop either way, so no ordering dependency).
+               MUST mirror the real call site's own st->real_normals != NULL
+               guard: when real_normals is unavailable, st->tri_reversed[cur]
+               is never explicitly set and stays at its calloc'd default of
+               0, so the WRITTEN normal_is_reversed bit is 0/false, which is
+               exactly the "swap" case at decode time -- default to that,
+               not to calling prc_encode_decide_reversed unguarded (it reads
+               st->real_normals[...] with no null check of its own). */
+            uint8_t tilt_scan_reversed = st.real_normals != NULL ?
+                prc_encode_decide_reversed(&st, cur, idx, mv) : 0;
+            int32_t ridx1 = tilt_scan_reversed ? idx[1] : idx[2];
+            int32_t ridx2 = tilt_scan_reversed ? idx[2] : idx[1];
 
             tp0.x = p0[0]; tp0.y = p0[1]; tp0.z = p0[2];
             tp1.x = p1[0]; tp1.y = p1[1]; tp1.z = p1[2];
@@ -2558,8 +2764,8 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             prc_vec_sub(tp1, tp0, &e1);
             prc_vec_sub(tp2, tp0, &e2);
             prc_vec_cross(e1, e2, &true_n);
-            prc_vec_sub(st.decoded_pos[idx[1]], st.decoded_pos[idx[0]], &r_e1);
-            prc_vec_sub(st.decoded_pos[idx[2]], st.decoded_pos[idx[0]], &r_e2);
+            prc_vec_sub(st.decoded_pos[ridx1], st.decoded_pos[idx[0]], &r_e1);
+            prc_vec_sub(st.decoded_pos[ridx2], st.decoded_pos[idx[0]], &r_e2);
             prc_vec_cross(r_e1, r_e2, &rec_n);
 
             if (prc_vec_normalize(&true_n) == 0 && prc_vec_normalize(&rec_n) == 0)
@@ -2568,6 +2774,12 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                 uint32_t offset = st.chain_offset > 0 ? st.chain_offset - 1 : 0;
                 int bucket = offset < 10 ? 0 : offset < 100 ? 1 : offset < 1000 ? 2 :
                     offset < 10000 ? 3 : offset < 100000 ? 4 : 5;
+                uint32_t max_hop = st.hop_depth[idx[0]];
+                int hopbucket;
+                if (st.hop_depth[idx[1]] > max_hop) max_hop = st.hop_depth[idx[1]];
+                if (st.hop_depth[idx[2]] > max_hop) max_hop = st.hop_depth[idx[2]];
+                hopbucket = max_hop < 10 ? 0 : max_hop < 100 ? 1 : max_hop < 1000 ? 2 :
+                    max_hop < 10000 ? 3 : max_hop < 100000 ? 4 : 5;
 
                 /* DIAGNOSTIC (2026-08-06, PRC_DIAG_TRACE_TRI=<mesh_tri_index>): full
                    detail dump for one specific triangle, to inspect an outlier found
@@ -2577,11 +2789,12 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                     if (trace_tri_env != NULL && cur == (uint32_t)strtoul(trace_tri_env, NULL, 10))
                     {
                         fprintf(stderr, "PRC_DIAG_TRACE_TRI: mesh_tri=%u chain_offset=%u tilt=%.9e "
-                            "mv=(%u,%u,%u) idx=(%d,%d,%d)\n"
+                            "mv=(%u,%u,%u) idx=(%d,%d,%d) hop_depth=(%u,%u,%u)\n"
                             "  true p0=(%.17g,%.17g,%.17g) p1=(%.17g,%.17g,%.17g) p2=(%.17g,%.17g,%.17g)\n"
                             "  decoded p0=(%.17g,%.17g,%.17g) p1=(%.17g,%.17g,%.17g) p2=(%.17g,%.17g,%.17g)\n"
                             "  true_n=(%.9g,%.9g,%.9g) rec_n=(%.9g,%.9g,%.9g)\n",
                             cur, offset, tilt, mv[0], mv[1], mv[2], idx[0], idx[1], idx[2],
+                            st.hop_depth[idx[0]], st.hop_depth[idx[1]], st.hop_depth[idx[2]],
                             p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2],
                             st.decoded_pos[idx[0]].x, st.decoded_pos[idx[0]].y, st.decoded_pos[idx[0]].z,
                             st.decoded_pos[idx[1]].x, st.decoded_pos[idx[1]].y, st.decoded_pos[idx[1]].z,
@@ -2590,8 +2803,32 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                     }
                 }
 
+                /* DIAGNOSTIC (2026-08-06, PRC_DIAG_DUMP_ALLTRI=<path>): same
+                   fields as PRC_DIAG_TRACE_TRI above, but for every triangle,
+                   written to a file instead of stderr for one -- see
+                   alltri_dump's own comment on prc_encode_state. */
+                if (st.alltri_dump != NULL)
+                {
+                    prc_vec3 zb = st.tri_zbasis != NULL ? st.tri_zbasis[cur] : (prc_vec3){0,0,0};
+                    fprintf(st.alltri_dump, "%u %u %.9e %u %u %u %d "
+                        "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                        "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                        "%.17g %.17g %.17g %u\n",
+                        cur, offset, tilt,
+                        st.hop_depth[idx[0]], st.hop_depth[idx[1]], st.hop_depth[idx[2]],
+                        st.tri_is_ref != NULL ? (int)st.tri_is_ref[cur] : -1,
+                        p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2],
+                        st.decoded_pos[idx[0]].x, st.decoded_pos[idx[0]].y, st.decoded_pos[idx[0]].z,
+                        st.decoded_pos[idx[1]].x, st.decoded_pos[idx[1]].y, st.decoded_pos[idx[1]].z,
+                        st.decoded_pos[idx[2]].x, st.decoded_pos[idx[2]].y, st.decoded_pos[idx[2]].z,
+                        zb.x, zb.y, zb.z, st.current_chain);
+                }
+
                 if (tilt > st.bucket_tilt_max[bucket])
                     st.bucket_tilt_max[bucket] = tilt;
+                if (tilt > st.hopbucket_tilt_max[hopbucket])
+                    st.hopbucket_tilt_max[hopbucket] = tilt;
+                st.hopbucket_count[hopbucket]++;
                 if (tilt > st.alltri_tilt_max)
                 {
                     st.alltri_tilt_max = tilt;
@@ -2727,6 +2964,30 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             st.alltri_tilt_max, st.alltri_tilt_max_tri, st.alltri_tilt_max_offset,
             st.bucket_tilt_max[0], st.bucket_tilt_max[1], st.bucket_tilt_max[2],
             st.bucket_tilt_max[3], st.bucket_tilt_max[4], st.bucket_tilt_max[5]);
+        printf("PRC_DIAG_MESH_QUALITY: hopbucket_tilt_max[0-10)=%.9e(n=%u) [10-100)=%.9e(n=%u) "
+            "[100-1e3)=%.9e(n=%u) [1e3-1e4)=%.9e(n=%u) [1e4-1e5)=%.9e(n=%u) [1e5+)=%.9e(n=%u)\n",
+            st.hopbucket_tilt_max[0], st.hopbucket_count[0],
+            st.hopbucket_tilt_max[1], st.hopbucket_count[1],
+            st.hopbucket_tilt_max[2], st.hopbucket_count[2],
+            st.hopbucket_tilt_max[3], st.hopbucket_count[3],
+            st.hopbucket_tilt_max[4], st.hopbucket_count[4],
+            st.hopbucket_tilt_max[5], st.hopbucket_count[5]);
+        printf("PRC_DIAG_MESH_QUALITY: orthobucket_dev_max[0-10)=%.9e(n=%u) [10-100)=%.9e(n=%u) "
+            "[100-1e3)=%.9e(n=%u) [1e3-1e4)=%.9e(n=%u) [1e4-1e5)=%.9e(n=%u) [1e5+)=%.9e(n=%u)\n",
+            st.orthobucket_dev_max[0], st.orthobucket_count[0],
+            st.orthobucket_dev_max[1], st.orthobucket_count[1],
+            st.orthobucket_dev_max[2], st.orthobucket_count[2],
+            st.orthobucket_dev_max[3], st.orthobucket_count[3],
+            st.orthobucket_dev_max[4], st.orthobucket_count[4],
+            st.orthobucket_dev_max[5], st.orthobucket_count[5]);
+        printf("PRC_DIAG_MESH_QUALITY: posbucket_err_max[0-10)=%.9e(n=%u) [10-100)=%.9e(n=%u) "
+            "[100-1e3)=%.9e(n=%u) [1e3-1e4)=%.9e(n=%u) [1e4-1e5)=%.9e(n=%u) [1e5+)=%.9e(n=%u)\n",
+            st.posbucket_err_max[0], st.posbucket_count[0],
+            st.posbucket_err_max[1], st.posbucket_count[1],
+            st.posbucket_err_max[2], st.posbucket_count[2],
+            st.posbucket_err_max[3], st.posbucket_count[3],
+            st.posbucket_err_max[4], st.posbucket_count[4],
+            st.posbucket_err_max[5], st.posbucket_count[5]);
     }
 
     /* PROBE (2026-08-05), mixed_chains investigation continued: scans this
@@ -2792,6 +3053,8 @@ fail:
     prc_encode_traversal_free(ctx, out);
 
 cleanup:
+    if (st.alltri_dump != NULL)
+        fclose(st.alltri_dump);
     if (st.analysis != NULL)
         prc_free(ctx, st.analysis);
     if (st.visited != NULL)
@@ -2804,6 +3067,12 @@ cleanup:
         prc_free(ctx, st.vtx_map);
     if (st.decoded_pos != NULL)
         prc_free(ctx, st.decoded_pos);
+    if (st.hop_depth != NULL)
+        prc_free(ctx, st.hop_depth);
+    if (st.tri_is_ref != NULL)
+        prc_free(ctx, st.tri_is_ref);
+    if (st.tri_zbasis != NULL)
+        prc_free(ctx, st.tri_zbasis);
     if (st.tri_reversed != NULL)
         prc_free(ctx, st.tri_reversed);
     if (st.stack != NULL)

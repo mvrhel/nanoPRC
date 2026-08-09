@@ -14,6 +14,7 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <stdio.h>
 #include <string.h>
 #include "prc_write_file_structure.h"
 #include "prc_write_tess_3d.h"
@@ -53,6 +54,8 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
     const prc_write_tess_entry *entries, uint32_t num_entries)
 {
     uint32_t i;
+    uint8_t *skip = NULL;
+    uint32_t surviving_count = num_entries;
 
     if (ctx == NULL || s == NULL || (entries == NULL && num_entries > 0))
     {
@@ -60,14 +63,72 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
         return PRC_ERROR_INTERNAL;
     }
 
+    /* FIX (2026-08-08, prc-db 310-file corpus sweep): a COMPRESSED entry
+       whose own weld/degenerate-triangle-removal (prc_encode_preprocess)
+       leaves zero surviving triangles used to hard-abort the ENTIRE
+       tessellation section -- confirmed on 6 real-world multi-part
+       assemblies (each split into dozens of connected-part entries by the
+       caller, at least one degenerating to nothing after weld). By the time
+       prc_write_compress_tess_entry's own error surfaces, this function has
+       already committed tess_count (line below, historically) to the
+       stream, so a later entry can't be skipped without corrupting what's
+       already written -- the fix has to happen in a pre-pass, BEFORE
+       tess_count is written, not in the main loop. Re-runs
+       prc_encode_preprocess a second time for each COMPRESSED entry (the
+       real per-entry write below does its own, unavoidable given
+       prc_write_compress_tess_entry doesn't accept a pre-built mesh) --
+       an acceptable cost for a rare-in-practice case, not a hot path. */
+    if (num_entries > 0)
+    {
+        skip = (uint8_t *)prc_calloc(ctx, num_entries, sizeof(uint8_t));
+        if (skip == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_tessellation_section_to_stream\n");
+            return PRC_ERROR_MEMORY;
+        }
+        for (i = 0; i < num_entries; i++)
+        {
+            const prc_write_tess_entry *e = &entries[i];
+            prc_write_tolerance tol;
+            prc_encode_mesh mesh;
+            int code;
+
+            if (e->kind != PRC_WRITE_TESS_KIND_COMPRESSED)
+                continue;
+
+            tol = (e->tolerance.value > 0.0) ? e->tolerance : prc_write_tol_relative(1e-6);
+            code = prc_encode_preprocess(ctx, e->positions, e->num_positions,
+                e->tri_indices, e->num_triangles, tol, &mesh);
+            if (code == 0)
+            {
+                if (mesh.num_triangles == 0)
+                {
+                    printf("Note: a COMPRESSED tessellation entry has zero surviving triangles "
+                        "after welding (entry %u of %u) -- skipping it rather than aborting the "
+                        "whole file.\n", i, num_entries);
+                    skip[i] = 1;
+                    surviving_count--;
+                }
+                prc_encode_preprocess_free(ctx, &mesh);
+            }
+            /* A real error here (not just "welded to nothing") is left for
+               the real per-entry call below to report/fail on, same as
+               before this fix -- this pre-pass only ever removes entries,
+               never masks a genuine error. */
+        }
+    }
+
     if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_ASM_FileStructureTessellation) != 0) goto fail;
     if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail; /* base.attribute_count */
     if (prc_bitwrite_bit(ctx, s, 1) != 0) goto fail;     /* base.name.same */
 
-    if (prc_bitwrite_uint32(ctx, s, num_entries) != 0) goto fail; /* tess_count */
+    if (prc_bitwrite_uint32(ctx, s, surviving_count) != 0) goto fail; /* tess_count */
     for (i = 0; i < num_entries; i++)
     {
         const prc_write_tess_entry *e = &entries[i];
+
+        if (skip != NULL && skip[i])
+            continue;
 
         if (e->kind == PRC_WRITE_TESS_KIND_3D)
         {
@@ -99,9 +160,13 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
         }
     }
 
+    if (skip != NULL)
+        prc_free(ctx, skip);
     return 0;
 
 fail:
+    if (skip != NULL)
+        prc_free(ctx, skip);
     return s->error ? PRC_ERROR_MEMORY : PRC_ERROR_INTERNAL;
 }
 
