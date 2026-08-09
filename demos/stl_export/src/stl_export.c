@@ -281,7 +281,16 @@ int main(int argc, char *argv[])
 
         prc_api_tess_vertex_buffer *vertex_buf = (tess->type == PRC_API_TESS_3D_Compressed) ? &tess->tess_vertices : NULL;
 
-        for (size_t f = 0; f < tess->num_faces; f++)
+        /* COMPRESSED tessellations don't partition geometry by face: every
+           face_index's primitive returns the SAME complete mesh (see
+           prc_api_get_tessellation_vertices's own comment on this, in
+           src/prc_tri_primitives_api.c) -- face_index only carries meaning
+           for per-face STYLE lookup there, never for geometry. Walking every
+           face and accumulating its "primitive" here would therefore re-emit
+           the whole mesh once per face instead of once total. */
+        uint32_t num_faces_to_walk = (tess->type == PRC_API_TESS_3D_Compressed) ? 1 : tess->num_faces;
+
+        for (size_t f = 0; f < num_faces_to_walk; f++)
         {
             prc_api_face *face = &tess->tess_faces[f];
             if (tess->type == PRC_API_TESS_3D)
