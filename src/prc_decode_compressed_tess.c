@@ -4081,6 +4081,9 @@ prc_compressed_tess_apply_crease_angle(prc_context *ctx, prc_tess_3d_compressed 
             code = prc_vec_normalize(&sum);
             if (code < 0)
             {
+                if (prc_diag_getenv("PRC_DIAG_ZERO_NORMAL_FALLBACK") != NULL)
+                    printf("PRC_DIAG_ZERO_NORMAL_FALLBACK: vertex=%u smoothing sum degenerate (comp_count=%u), "
+                        "dominant_normal_set=%u\n", k, comp_count, dominant_normal_set);
                 if (!dominant_normal_set)
                 {
                     prc_free(ctx, edge_list.edge);
