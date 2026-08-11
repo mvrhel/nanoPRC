@@ -208,6 +208,52 @@ safe_mul_size(size_t count, size_t elem_size, size_t *out)
     return 0;
 }
 
+/* Sort key for PRC_DIAG_JITTER_SKIP_REPEATED_AXES's per-axis exact-value-repeat
+   detection: sorting is O(n log n) vs. the O(n^2) linear-scan frequency table
+   the prototype originally used, which only scaled to tiny (11-33 vertex) repros. */
+typedef struct
+{
+    double val;
+    uint32_t vi;
+} prc_diag_axis_val_t;
+
+static int
+prc_diag_axis_val_cmp(const void *a, const void *b)
+{
+    double da = ((const prc_diag_axis_val_t *)a)->val;
+    double db = ((const prc_diag_axis_val_t *)b)->val;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
+}
+
+/* Exact-position dedup key for the same probe: a raw (unwelded) STL corner
+   trivially shares its own position with every OTHER corner of the same
+   mesh vertex (any vertex touched by 2+ triangles), which is nearly all of
+   them on a real connected mesh -- that duplication is NOT the "intentional
+   CAD-flat axis alignment between DISTINCT vertices" signal the probe wants.
+   This key groups corners by exact (x,y,z) first so the per-axis repeat
+   check runs over one representative per distinct position, not per corner. */
+typedef struct
+{
+    double x, y, z;
+    uint32_t vi;
+} prc_diag_corner_xyz_t;
+
+static int
+prc_diag_corner_xyz_cmp(const void *a, const void *b)
+{
+    const prc_diag_corner_xyz_t *pa = (const prc_diag_corner_xyz_t *)a;
+    const prc_diag_corner_xyz_t *pb = (const prc_diag_corner_xyz_t *)b;
+    if (pa->x < pb->x) return -1;
+    if (pa->x > pb->x) return 1;
+    if (pa->y < pb->y) return -1;
+    if (pa->y > pb->y) return 1;
+    if (pa->z < pb->z) return -1;
+    if (pa->z > pb->z) return 1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------------
  * Section 1: STL parsing (binary + ASCII). Nothing in this section
  * touches nanoPRC's API -- it just turns a file on disk into a flat
@@ -2671,6 +2717,132 @@ main(int argc, char *argv[])
             }
             weld_grid_free(&trial_grid);
         }
+        /* DEFAULT (promoted 2026-08-11, was PRC_DIAG_JITTER_SKIP_REPEATED_AXES probe):
+           avoids jitter's real Acrobat-blank-tree risk (RESULT 9-13 of the
+           hand.stl/chains_3 investigation -- a chain-start's V0/V2
+           reconstruction becomes Acrobat-sensitive when perturbed away from
+           an EXACT value real, unjittered coordinates happen to share) by
+           simply not jittering a coordinate AXIS whose raw value repeats
+           across multiple DISTINCT mesh vertices -- the empirical signature
+           of intentional CAD-precise flatness/alignment (e.g. every vertex
+           of a planar sub-mesh sharing the exact same Z). Per axis, sorts
+           one representative position per distinct (x,y,z) vertex group
+           (O(n log n), practical at real mesh scale) and marks any value
+           occurring 2+ times as a run; an axis is skipped for a given
+           corner if its distinct vertex's value is part of such a run
+           anywhere in the mesh. The dedup-to-distinct-groups step matters:
+           an earlier version operated on raw (unwelded) corners directly,
+           which trivially "repeats" for every OTHER corner of any vertex
+           touched by 2+ triangles (nearly all vertices in any connected
+           mesh) and swamped the real flatness signal -- confirmed on
+           beetle_1000000.stl, where the raw-corner version flagged 100% of
+           corners (i.e. degenerated into global jitter-off in disguise,
+           already known to fail that file).
+
+           Validated (real Adobe Acrobat) before promotion: hand.stl 11-
+           triangle repro (fixed -- neither the tilt-inheritance fix nor the
+           origin-choice fix alone resolved it), beetle_1000000.stl and
+           UK_original.stl (both previously required broad per-triangle
+           jitter and do NOT regress with this targeted version), and 12/20
+           (60%) of a real, independently-reviewed "empty model tree"
+           failure sample from a 185-file corpus batch, zero regressions
+           observed across every file tested (see project memory
+           project_jitter_skip_repeated_axes_2026-08-11 for the full
+           evidence table). PRC_DIAG_JITTER_DISABLE_SKIP_REPEATED_AXES
+           overrides back to the old (unscoped) jitter behavior, for
+           comparison/regression testing only. */
+        uint8_t *repeated_axis_vertex_flag[3] = {NULL, NULL, NULL};
+        uint8_t skip_repeated_axes = (prc_diag_getenv("PRC_DIAG_JITTER_DISABLE_SKIP_REPEATED_AXES") == NULL);
+        if (skip_repeated_axes && !preweld_disabled)
+        {
+            uint32_t total_corners = mesh.num_triangles * 3;
+            prc_diag_corner_xyz_t *xyzbuf = (prc_diag_corner_xyz_t *)malloc(sizeof(prc_diag_corner_xyz_t) * total_corners);
+            uint32_t *corner_group = (uint32_t *)malloc(sizeof(uint32_t) * total_corners);
+            uint32_t *group_first_corner = (uint32_t *)malloc(sizeof(uint32_t) * total_corners);
+            uint32_t num_groups = 0;
+            if (xyzbuf != NULL && corner_group != NULL && group_first_corner != NULL)
+            {
+                uint32_t vi3;
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    xyzbuf[vi3].x = mesh.raw_positions[(size_t)vi3 * 3 + 0];
+                    xyzbuf[vi3].y = mesh.raw_positions[(size_t)vi3 * 3 + 1];
+                    xyzbuf[vi3].z = mesh.raw_positions[(size_t)vi3 * 3 + 2];
+                    xyzbuf[vi3].vi = vi3;
+                }
+                qsort(xyzbuf, total_corners, sizeof(prc_diag_corner_xyz_t), prc_diag_corner_xyz_cmp);
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    if (vi3 == 0 || xyzbuf[vi3].x != xyzbuf[vi3 - 1].x ||
+                        xyzbuf[vi3].y != xyzbuf[vi3 - 1].y || xyzbuf[vi3].z != xyzbuf[vi3 - 1].z)
+                    {
+                        group_first_corner[num_groups] = xyzbuf[vi3].vi;
+                        num_groups++;
+                    }
+                    corner_group[xyzbuf[vi3].vi] = num_groups - 1;
+                }
+            }
+            if (xyzbuf != NULL && corner_group != NULL && group_first_corner != NULL && num_groups > 0)
+            {
+                prc_diag_axis_val_t *sortbuf = (prc_diag_axis_val_t *)malloc(sizeof(prc_diag_axis_val_t) * num_groups);
+                uint8_t *group_axis_flag = (uint8_t *)malloc(num_groups);
+                if (sortbuf != NULL && group_axis_flag != NULL)
+                {
+                    int axis;
+                    for (axis = 0; axis < 3; axis++)
+                    {
+                        uint32_t g, vi3;
+                        repeated_axis_vertex_flag[axis] = (uint8_t *)calloc(total_corners, sizeof(uint8_t));
+                        if (repeated_axis_vertex_flag[axis] == NULL)
+                            continue;
+                        memset(group_axis_flag, 0, num_groups);
+                        for (g = 0; g < num_groups; g++)
+                        {
+                            sortbuf[g].val = mesh.raw_positions[(size_t)group_first_corner[g] * 3 + (size_t)axis];
+                            sortbuf[g].vi = g;
+                        }
+                        qsort(sortbuf, num_groups, sizeof(prc_diag_axis_val_t), prc_diag_axis_val_cmp);
+                        {
+                            uint32_t run_start = 0;
+                            while (run_start < num_groups)
+                            {
+                                uint32_t run_end = run_start + 1;
+                                while (run_end < num_groups && sortbuf[run_end].val == sortbuf[run_start].val)
+                                    run_end++;
+                                if (run_end - run_start >= 2)
+                                {
+                                    uint32_t k;
+                                    for (k = run_start; k < run_end; k++)
+                                        group_axis_flag[sortbuf[k].vi] = 1;
+                                }
+                                run_start = run_end;
+                            }
+                        }
+                        for (vi3 = 0; vi3 < total_corners; vi3++)
+                            repeated_axis_vertex_flag[axis][vi3] = group_axis_flag[corner_group[vi3]];
+                    }
+                }
+                if (sortbuf != NULL) free(sortbuf);
+                if (group_axis_flag != NULL) free(group_axis_flag);
+            }
+            if (xyzbuf != NULL) free(xyzbuf);
+            if (corner_group != NULL) free(corner_group);
+            if (group_first_corner != NULL) free(group_first_corner);
+            if (repeated_axis_vertex_flag[0] != NULL && repeated_axis_vertex_flag[1] != NULL && repeated_axis_vertex_flag[2] != NULL)
+            {
+                uint32_t vi3, any_axis = 0, all_axes = 0;
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    int flagged = (repeated_axis_vertex_flag[0][vi3] != 0) + (repeated_axis_vertex_flag[1][vi3] != 0) + (repeated_axis_vertex_flag[2][vi3] != 0);
+                    if (flagged > 0) any_axis++;
+                    if (flagged == 3) all_axes++;
+                }
+                printf("Jitter: %u/%u corners (%.1f%%) skipped on >=1 repeated-value axis, %u (%.1f%%) skipped on all 3 (%u/%u distinct positions)\n",
+                    (unsigned)any_axis, (unsigned)total_corners, 100.0 * any_axis / total_corners,
+                    (unsigned)all_axes, 100.0 * all_axes / total_corners,
+                    (unsigned)num_groups, (unsigned)total_corners);
+            }
+        }
         if (!preweld_disabled)
         {
             uint32_t ti;
@@ -2731,9 +2903,12 @@ main(int argc, char *argv[])
                         hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
                         hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
                         hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
-                        pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                        pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                        pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[0] == NULL || !repeated_axis_vertex_flag[0][vi])
+                            pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[1] == NULL || !repeated_axis_vertex_flag[1][vi])
+                            pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[2] == NULL || !repeated_axis_vertex_flag[2][vi])
+                            pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
                         /* Truncate to float32: an earlier, externally-scripted version of this
                            mitigation wrote the jittered result back into a binary STL file (float32-
                            only storage) before nanoPRC ever read it, so the value actually used was
@@ -2755,6 +2930,13 @@ main(int argc, char *argv[])
             free(jitter_triangle_allow);
         if (jitter_corner_allow != NULL)
             free(jitter_corner_allow);
+        {
+            int axis;
+            for (axis = 0; axis < 3; axis++)
+            {
+                if (repeated_axis_vertex_flag[axis] != NULL) free(repeated_axis_vertex_flag[axis]);
+            }
+        }
     }
 
     if (weld_grid_init(&grid, weld_tolerance_fraction * diagonal, mesh.num_triangles * 3) != 0)
@@ -3002,16 +3184,27 @@ main(int argc, char *argv[])
 
             for (a = 0; a < 3; a++) center[a] = 0.5 * (bbox_min[a] + bbox_max[a]);
 
-            memset(&view, 0, sizeof(view));
-            view.name = "Default";
-            view.eye[0] = center[0] + diagonal * 1.0;
-            view.eye[1] = center[1] - diagonal * 1.3;
-            view.eye[2] = center[2] + diagonal * 0.7;
-            view.target[0] = center[0];
-            view.target[1] = center[1];
-            view.target[2] = center[2];
-            view.up[0] = 0.0; view.up[1] = 0.0; view.up[2] = 1.0;
-            view.is_default = 1;
+            {
+                /* PROBE (2026-08-11): test whether an elongated bbox's default
+                   camera distance is involved in the PDF3D_COMSOL "tree +
+                   geometry present but invisible in canvas" investigation --
+                   temporary, not for production use. */
+                double cam_mult = 1.0;
+                const char *cam_mult_env = prc_diag_getenv("PRC_DIAG_CAMERA_DIST_MULT");
+                if (cam_mult_env != NULL)
+                    cam_mult = atof(cam_mult_env);
+
+                memset(&view, 0, sizeof(view));
+                view.name = "Default";
+                view.eye[0] = center[0] + diagonal * 1.0 * cam_mult;
+                view.eye[1] = center[1] - diagonal * 1.3 * cam_mult;
+                view.eye[2] = center[2] + diagonal * 0.7 * cam_mult;
+                view.target[0] = center[0];
+                view.target[1] = center[1];
+                view.target[2] = center[2];
+                view.up[0] = 0.0; view.up[1] = 0.0; view.up[2] = 1.0;
+                view.is_default = 1;
+            }
 
             memset(&pdf_opts, 0, sizeof(pdf_opts));
             pdf_opts.views = &view;
