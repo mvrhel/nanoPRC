@@ -1320,6 +1320,7 @@ prc_api_initialize_node(prc_context *ctx, prc_data *data, prc_api_product *produ
             prc_error(ctx, code, "Failed in prc_api_initialize_node\n");
             return code;
         }
+        product->children[0].location_set = 0; /* always identity here, nothing to expose */
 
         product->children[0].is_model = 1;
         code = prc_api_initialize_node(ctx, data, product->children,
@@ -1357,6 +1358,16 @@ prc_api_initialize_node(prc_context *ctx, prc_data *data, prc_api_product *produ
                 prc_error(ctx, code, "Failed in prc_api_initialize_node\n");
                 return code;
             }
+            /* FIXED 2026-08-12: this node's own LOCAL (parent-relative)
+               transform was always correctly parsed and stored into
+               .location above, but .location_set (the flag a consumer
+               checks before trusting .location, e.g. demos/json_export)
+               was never set -- every node's real placement transform was
+               silently invisible to every consumer. Only flag non-identity
+               transforms, matching the write side's own documented
+               preference (prc_api_write_node's has_transform doc comment)
+               for omitting/not-flagging identity transforms. */
+            product->children[k].location_set = !product->children[k].location.is_identity;
             product->children[k].is_model = 0;
             code = prc_api_initialize_node(ctx, data, &product->children[k], name,
                 biased_part_index, num_refs, indices, reserve, num_models, num_nodes,
@@ -1482,19 +1493,67 @@ prc_api_set_transform_identity(prc_context* ctx, prc_api_transform* transform)
 PRC_EXPORT void
 prc_api_update_transform(prc_context *ctx, prc_api_transform *concate_transform, prc_api_transform *new_transform)
 {
-    uint32_t j, k;
-    double *left_matrix;
-    double right_matrix[16];
+    /* Real column-major 4x4 concatenation (see the column-first-order note
+       above prc_api_set_transform): concate_transform = concate_transform *
+       new_transform, i.e. new_transform's effect is applied to a point
+       FIRST, then whatever concate_transform already represented -- the
+       standard scene-graph accumulation a caller walking a tree root-to-leaf
+       needs (concate_transform = parent's accumulated world transform,
+       new_transform = this node's own local transform).
+
+       FIXED 2026-08-12: the previous implementation only handled composing
+       identity with a single real transform (a straight copy) and silently
+       did nothing whenever concate_transform was ALREADY non-identity --
+       meaning any 2+-level chain of real transforms was never actually
+       composed, only ever capturing the deepest node's own local transform
+       in isolation. This is the root cause of nanoPRC's read-side API never
+       exposing correct per-instance world-space placement for multi-level
+       assemblies. */
+    double result[16];
+    int col, row, k;
+    (void)ctx;
 
     if (new_transform->is_identity)
         return;
 
-    if (concate_transform->is_identity && !new_transform->is_identity)
+    if (concate_transform->is_identity)
     {
         memcpy(concate_transform->matrix, new_transform->matrix, sizeof(double) * 16);
-        concate_transform->is_identity = false;
+        concate_transform->is_identity = 0;
+        return;
     }
-    return;
+
+    for (col = 0; col < 4; col++)
+    {
+        for (row = 0; row < 4; row++)
+        {
+            double sum = 0.0;
+            for (k = 0; k < 4; k++)
+                sum += concate_transform->matrix[k * 4 + row] * new_transform->matrix[col * 4 + k];
+            result[col * 4 + row] = sum;
+        }
+    }
+    memcpy(concate_transform->matrix, result, sizeof(double) * 16);
+    concate_transform->is_identity = 0;
+}
+
+PRC_EXPORT void
+prc_api_transform_point(const prc_api_transform *transform, const double in[3], double out[3])
+{
+    const double *m;
+
+    if (transform == NULL || transform->is_identity)
+    {
+        out[0] = in[0];
+        out[1] = in[1];
+        out[2] = in[2];
+        return;
+    }
+
+    m = transform->matrix;
+    out[0] = m[0] * in[0] + m[4] * in[1] + m[8]  * in[2] + m[12];
+    out[1] = m[1] * in[0] + m[5] * in[1] + m[9]  * in[2] + m[13];
+    out[2] = m[2] * in[0] + m[6] * in[1] + m[10] * in[2] + m[14];
 }
 
 PRC_EXPORT prc_api_tess*
@@ -2768,6 +2827,14 @@ prc_api_helper_copy_product_details(prc_context *ctx, prc_api_data data,
 #endif
 
     memcpy(&product_tree->location, &incoming_matrix, sizeof(prc_api_transform));
+    /* FIXED 2026-08-12: same missing-location_set bug as prc_api_initialize_
+       node above -- incoming_matrix here is the FULLY prototype-chain-
+       composed transform (see this function's own "Incoming matrix has all
+       the prototype transforms concatenated" comment), so this is actually
+       the more complete of the two tree-building paths' transform data --
+       but with location_set never flagged, no consumer (demos/json_export,
+       demos/stl_export) ever knew real data was sitting right here. */
+    product_tree->location_set = !incoming_matrix.is_identity;
     product_tree->is_model = 0;
     product_tree->type = PRC_API_NODE_PRODUCT;
     product_tree->num_children = 0;

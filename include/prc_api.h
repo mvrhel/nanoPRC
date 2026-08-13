@@ -316,7 +316,17 @@ struct prc_api_product_s
     prc_api_node_type_t type;
     size_t num_children;
     prc_api_product *children;
+    /** 1 if location holds a real (non-identity) transform, 0 if this node
+        has no placement transform (equivalent to identity). */
     uint8_t location_set;
+    /** This node's own placement transform, relative to its PARENT node --
+        NOT a world/global transform. To get a node's world transform,
+        walk the tree from the root, accumulating each node's location into
+        a running transform via prc_api_update_transform (start the
+        accumulator at identity, e.g. via prc_api_set_transform_identity),
+        then apply the result to that node's own geometry (its part's
+        rep-items) via prc_api_transform_point. Only meaningful when
+        location_set is 1; otherwise treat as identity. */
     prc_api_transform location;
     char *name;
     prc_api_part *part;
@@ -437,11 +447,33 @@ PRC_EXPORT void prc_api_set_transform_identity(prc_context *ctx, prc_api_transfo
 /**
  * @brief Concatenate/apply a new transform into an existing transform.
  *
+ * Column-major 4x4 composition: concate_transform = concate_transform *
+ * new_transform. For a caller walking prc_api_product's tree root-to-leaf
+ * and accumulating each node's own LOCAL (parent-relative) prc_api_product::
+ * location into a running world transform, pass the running world transform
+ * as concate_transform and the current node's own location as new_transform
+ * -- the result is the correct world transform for that node (and, applied
+ * via prc_api_transform_point, for any of its own rep-item geometry).
+ *
  * @param ctx Active API context.
  * @param concate_transform In/out accumulated transform.
  * @param new_transform Transform to apply.
  */
 PRC_EXPORT void prc_api_update_transform(prc_context *ctx, prc_api_transform *concate_transform, prc_api_transform *new_transform);
+
+/**
+ * @brief Apply a (column-major, affine) transform to a 3D point.
+ *
+ * out may alias in. If transform is NULL or transform->is_identity, out is
+ * simply set to in (cheap, no matrix math).
+ *
+ * @param transform Transform to apply, or NULL for identity.
+ * @param in Input point (world/parent space is up to the caller's own
+ *           accumulated transform -- this function only applies the ONE
+ *           transform passed in).
+ * @param out Output point, in[3] transformed by transform.
+ */
+PRC_EXPORT void prc_api_transform_point(const prc_api_transform *transform, const double in[3], double out[3]);
 
 /**
  * @brief Get tessellation pointer for a part representation item.
