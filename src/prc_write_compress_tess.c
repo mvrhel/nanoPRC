@@ -4128,9 +4128,29 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
        on disk as zero padding. Writing only T entries (this write
        facility's own prior behavior) round-trips fine through a reader
        that just trusts the stored count, but is not what the format
-       specifies, and was found -- via a decoder cross-checked directly
-       against Adobe Acrobat -- to be one of the load-bearing details a
-       stricter reader's array-cardinality validation depends on. */
+       specifies.
+
+       Despite the wording of an earlier version of this comment, this is
+       NOT a confirmed-causal Acrobat fix -- a later investigation
+       (PRC_DIAG_NO_EDGE_STATUS_PADDING, added to test this exact question
+       against real Acrobat blank-tree repros) found disabling the padding
+       "tested and not causal" for those bugs, and a direct same-geometry
+       A/B test (2026-08-13) found Acrobat accepts unpadded (case-A, 1*T)
+       output too. CR-14 itself, the spec citation this fix leans on, was
+       submitted by a maintainer of this project based on their own earlier
+       observation, not independent external validation, so it isn't
+       corroborating evidence on its own either.
+
+       Padding is kept as the default anyway, for two independent reasons
+       that held up under scrutiny: (1) a broad real-world corpus census
+       (~34,500 COMPRESSED tessellation instances, prc-db) found case-B
+       (3*T) outnumbers case-A (1*T) roughly 3:1 in practice: 76.6% vs
+       23.4%; (2) Adobe's own PRC support is believed to derive from the
+       Tech Soft 3D/HOOPS codebase lineage (the dominant case-B writer
+       family), meaning Acrobat's own parser may be exercised far more
+       thoroughly against case-B's shape than case-A's, even where both
+       are spec-valid. Neither is proof case-A is unsafe, but both point
+       the same direction, so case-B stays the lower-risk default. */
     {
         uint32_t t_count = trav->edge_status_array_size;
         uint32_t padded_count = (prc_diag_getenv("PRC_DIAG_NO_EDGE_STATUS_PADDING") != NULL) ? t_count : t_count * 3;
