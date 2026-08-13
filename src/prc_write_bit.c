@@ -715,18 +715,6 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
        root) added after the main merge loop, in every case including that
        single-value one. */
     node_capacity = distinct_count * 2 + 4;
-    nodes = (prc_huff_build_node **)prc_calloc(ctx, node_capacity, sizeof(prc_huff_build_node *));
-    active = (prc_huff_build_node **)prc_calloc(ctx, node_capacity, sizeof(prc_huff_build_node *));
-    if (nodes == NULL || active == NULL)
-    {
-        prc_free(ctx, distinct_values);
-        prc_free(ctx, distinct_freqs);
-        prc_free(ctx, nodes);
-        prc_free(ctx, active);
-        return -1;
-    }
-    node_count = 0;
-    active_count = 0;
 
     /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_BREAK_3WAY_TIES): all 6
        possible code-VALUE permutations of a known 3-way frequency tie
@@ -772,184 +760,312 @@ prc_huff_build_tree(prc_context *ctx, const uint32_t *values, uint32_t count,
         }
     }
 
-    for (i = 0; i < distinct_count; i++)
+    /* DIAGNOSTIC (2026-08-13, PRC_DIAG_HUFF_AVOID_LENGTH_TIES): tests a
+       hypothesis PRC_DIAG_HUFF_BREAK_3WAY_TIES above could NOT cleanly
+       test -- that one perturbs raw leaf FREQUENCY to avoid 3+ leaves
+       sharing an exact frequency, but frequency ties and resulting
+       Huffman code-LENGTH ties are not the same thing (distinct
+       frequencies can still land at the same tree depth; confirmed: a
+       real repro's worst code-length tie went from 4-way to 6-way after
+       that diagnostic "fixed" its frequency ties). This diagnostic
+       instead builds the tree, checks the ACTUAL resulting code lengths
+       (via prc_huff_assign_codes, the same function the real caller
+       uses), and if any length is shared by 3+ leaves, nudges frequencies
+       again and rebuilds from scratch, retrying up to a small cap. Naive
+       perturbation (deterministic, increasing, same spirit as the
+       diagnostic above) -- a diagnostic search for "does avoiding 3+-way
+       code-length ties at all fix Acrobat's rejection", not a proposed
+       production algorithm. Zero behavior change when unset: runs the
+       existing single-attempt path exactly as before. */
     {
-        prc_huff_build_node *leaf = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
-        if (leaf == NULL)
+        uint8_t avoid_length_ties = (prc_diag_getenv("PRC_DIAG_HUFF_AVOID_LENGTH_TIES") != NULL);
+        uint32_t max_attempts = avoid_length_ties ? 25u : 1u;
+        uint32_t attempt;
+
+        for (attempt = 0; attempt < max_attempts; attempt++)
         {
-            prc_free(ctx, distinct_values);
-            prc_free(ctx, distinct_freqs);
-            prc_free(ctx, active);
-            *out_nodes = nodes;
-            *out_node_count = node_count;
-            return -1;
+            uint8_t has_bad_length_tie = 0;
+
+            nodes = (prc_huff_build_node **)prc_calloc(ctx, node_capacity, sizeof(prc_huff_build_node *));
+            active = (prc_huff_build_node **)prc_calloc(ctx, node_capacity, sizeof(prc_huff_build_node *));
+            if (nodes == NULL || active == NULL)
+            {
+                prc_free(ctx, distinct_values);
+                prc_free(ctx, distinct_freqs);
+                prc_free(ctx, nodes);
+                prc_free(ctx, active);
+                return -1;
+            }
+            node_count = 0;
+            active_count = 0;
+
+            if (attempt > 0)
+            {
+                /* Mild linear nudging (freq[i] += (i+1)*attempt) turned out
+                   not to be enough to escape a 3+-way code-length tie for a
+                   12-symbol alphabet with small frequencies -- worked out
+                   by hand (2026-08-13) that avoiding EVERY such tie is a
+                   near-unavoidable consequence of moderate alphabet size at
+                   these magnitudes, not simply an artifact of frequency
+                   ties. Switched to a deterministically tie-free
+                   construction instead: freq[di] = 2^di guarantees each
+                   value strictly exceeds the sum of every smaller one
+                   (2^n > 2^0+...+2^(n-1) = 2^n-1), which forces the greedy
+                   min-merge to build a fully degenerate "caterpillar" tree
+                   -- every leaf gets a distinct code length by construction,
+                   at the cost of a much more skewed tree than any real
+                   frequency distribution would produce (a real confound,
+                   not free of side effects, but the only way to cleanly
+                   test the "genuinely zero 3+-way ties" case at all).
+                   Deterministic, so it either fixes it on the very first
+                   perturbed attempt or it was never going to. Capped at
+                   distinct_count<62 to stay inside uint64_t shift range;
+                   falls back to the mild nudge above that range (should
+                   never occur for the field sizes this write facility
+                   handles in practice). */
+                uint32_t di;
+                if (distinct_count < 62)
+                {
+                    for (di = 0; di < distinct_count; di++)
+                        distinct_freqs[di] = (uint64_t)1 << di;
+                }
+                else
+                {
+                    for (di = 0; di < distinct_count; di++)
+                        distinct_freqs[di] += (uint64_t)(di + 1) * attempt;
+                }
+            }
+
+            for (i = 0; i < distinct_count; i++)
+            {
+                prc_huff_build_node *leaf = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
+                if (leaf == NULL)
+                {
+                    prc_free(ctx, distinct_values);
+                    prc_free(ctx, distinct_freqs);
+                    prc_free(ctx, active);
+                    *out_nodes = nodes;
+                    *out_node_count = node_count;
+                    return -1;
+                }
+                leaf->freq = distinct_freqs[i];
+                leaf->value = distinct_values[i];
+                leaf->is_leaf = 1;
+                leaf->left = NULL;
+                leaf->right = NULL;
+                nodes[node_count++] = leaf;
+                active[active_count++] = leaf;
+            }
+
+            if (active_count == 1)
+            {
+                prc_huff_build_node *phantom = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
+                if (phantom == NULL)
+                {
+                    prc_free(ctx, distinct_values);
+                    prc_free(ctx, distinct_freqs);
+                    prc_free(ctx, active);
+                    *out_nodes = nodes;
+                    *out_node_count = node_count;
+                    return -1;
+                }
+                phantom->freq = 0;
+                phantom->value = (active[0]->value == 0) ? 1u : 0u;
+                phantom->is_leaf = 1;
+                phantom->left = NULL;
+                phantom->right = NULL;
+                nodes[node_count++] = phantom;
+                active[active_count++] = phantom;
+            }
+
+            {
+            /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_TIEBREAK_REVERSE): the real
+               encoder's tie-breaking rule for equal-frequency leaves during this
+               merge is still an unresolved KNOWN LOOSE END (see
+               prc_huff_assign_codes' own comment) -- previously believed
+               inconsequential for decodability by any reader including Acrobat,
+               from only 2 synthetic test files that never happened to produce a
+               3-way+ tie. A minimal real repro now exists
+               (E:\Work\nanoPRC_supplementary_files\ISO-SPEC\test-meshes\
+               mixed_chains_minimal_repro_fan8_strip.prc) with a genuine 3-way tie
+               that DOES fail in real Acrobat -- see project_huffman_tiebreak_3way_
+               root_cause memory. Default tie-break (unset) prefers the FIRST
+               (lowest active[] index, i.e. lowest original value pre-merge, since
+               active[] starts value-sorted) node among ties for both min1 and
+               min2 -- via strict `<`. Setting this reverses it to prefer the
+               LAST (`<=`), testing whether that alternative convention matches
+               the real encoder for the known-failing 3-way-tie case. Not yet
+               validated against the previously-confirmed-working real files this
+               write facility was checked against -- do NOT flip the default
+               until that regression check is done. */
+            uint8_t tiebreak_reverse = (prc_diag_getenv("PRC_DIAG_HUFF_TIEBREAK_REVERSE") != NULL);
+            /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_SWAP_LR_ON_TIE): a more
+               surgical alternative to PRC_DIAG_HUFF_TIEBREAK_REVERSE above --
+               leaves WHICH nodes get merged at each step completely unchanged
+               (same tree shape, same code LENGTHS, matching the "does NOT affect
+               code length" observation in prc_huff_assign_codes' own comment),
+               only flips which of the two EXACTLY-TIED-IN-FREQUENCY merged nodes
+               becomes the left (bit 0) vs right (bit 1) child. */
+            uint8_t swap_lr_on_tie = (prc_diag_getenv("PRC_DIAG_HUFF_SWAP_LR_ON_TIE") != NULL);
+            while (active_count > 1)
+            {
+                uint32_t min1, min2, k;
+                prc_huff_build_node *parent;
+                uint8_t this_merge_tied;
+
+                min1 = 0;
+                for (k = 1; k < active_count; k++)
+                    if (tiebreak_reverse ? (active[k]->freq <= active[min1]->freq) : (active[k]->freq < active[min1]->freq))
+                        min1 = k;
+                min2 = (min1 == 0) ? 1 : 0;
+                for (k = 0; k < active_count; k++)
+                    if (k != min1 && (tiebreak_reverse ? (active[k]->freq <= active[min2]->freq) : (active[k]->freq < active[min2]->freq)))
+                        min2 = k;
+
+                parent = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
+                if (parent == NULL)
+                {
+                    prc_free(ctx, distinct_values);
+                    prc_free(ctx, distinct_freqs);
+                    prc_free(ctx, active);
+                    *out_nodes = nodes;
+                    *out_node_count = node_count;
+                    return -1;
+                }
+                parent->freq = active[min1]->freq + active[min2]->freq;
+                parent->is_leaf = 0;
+                parent->value = 0;
+                this_merge_tied = (active[min1]->freq == active[min2]->freq) ? 1 : 0;
+                if (swap_lr_on_tie && this_merge_tied)
+                {
+                    parent->left = active[min2];
+                    parent->right = active[min1];
+                }
+                else
+                {
+                    parent->left = active[min1];
+                    parent->right = active[min2];
+                }
+                nodes[node_count++] = parent;
+
+                active[min1] = parent;
+                active[min2] = active[active_count - 1];
+                active_count--;
+            }
+            }
+
+            /* A real, independently-produced compressed PRC file's Huffman tree for
+               these array fields is always structurally INCOMPLETE in one specific
+               way: every actual leaf code begins with bit 1, and the root's entire
+               0-branch is unused (Kraft sum 0.5, not 1.0) -- confirmed by decoding
+               the real leaf tables for edge_status_array, triangle_face_array's and
+               point_reference_array's bit_lengths sub-arrays (2026-07-10 causal-
+               isolation investigation: swapping only this write facility's own,
+               complete/optimal tree into an otherwise-real, Acrobat-working file
+               reproduces Acrobat's blank-model-tree rejection; the real tree's
+               *codes*, once this extra wrap is added, match hand-verified digit for
+               digit). Reproduce it by wrapping the tree built above (over the real
+               leaves only) with one more merge against an unused phantom leaf,
+               placed as the LEFT (0) child so every real leaf's code gains a
+               leading 1 bit -- matching the real encoder's output exactly, not
+               merely a same-size, differently-shaped valid alternative. */
+            {
+                prc_huff_build_node *phantom_wrap = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
+                prc_huff_build_node *new_root;
+
+                if (phantom_wrap == NULL)
+                {
+                    prc_free(ctx, distinct_values);
+                    prc_free(ctx, distinct_freqs);
+                    prc_free(ctx, active);
+                    *out_root = active[0];
+                    *out_nodes = nodes;
+                    *out_node_count = node_count;
+                    return -1;
+                }
+                /* NOT a leaf: a dead internal node with no children. The real
+                   encoder's leaf table has exactly as many entries as there are
+                   distinct real values (confirmed against the real file: 4 leaves
+                   for edge_status_array, not 5) -- prc_huff_assign_codes only
+                   records a table entry for is_leaf nodes it actually pops, and
+                   this node (is_leaf=0, left=right=NULL) contributes nothing when
+                   popped, exactly mirroring how the decoder's own on-demand tree
+                   walk (prc_huffman_data_decoder / prc_bitread_character_array)
+                   never touches root->left in the first place, since no real
+                   leaf's code starts with bit 0. */
+                phantom_wrap->freq = 0;
+                phantom_wrap->value = 0;
+                phantom_wrap->is_leaf = 0;
+                phantom_wrap->left = NULL;
+                phantom_wrap->right = NULL;
+                nodes[node_count++] = phantom_wrap;
+
+                new_root = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
+                if (new_root == NULL)
+                {
+                    prc_free(ctx, distinct_values);
+                    prc_free(ctx, distinct_freqs);
+                    prc_free(ctx, active);
+                    *out_root = active[0];
+                    *out_nodes = nodes;
+                    *out_node_count = node_count;
+                    return -1;
+                }
+                new_root->freq = active[0]->freq;
+                new_root->is_leaf = 0;
+                new_root->value = 0;
+                new_root->left = phantom_wrap;
+                new_root->right = active[0];
+                nodes[node_count++] = new_root;
+
+                active[0] = new_root;
+            }
+
+            if (avoid_length_ties)
+            {
+                uint32_t leaf_count2 = 0, k2;
+                uint32_t *tmp_leaf_values, *tmp_code_lengths, *tmp_code_values;
+
+                for (k2 = 0; k2 < node_count; k2++)
+                    if (nodes[k2]->is_leaf) leaf_count2++;
+
+                tmp_leaf_values = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * leaf_count2);
+                tmp_code_lengths = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * leaf_count2);
+                tmp_code_values = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * leaf_count2);
+                if (tmp_leaf_values != NULL && tmp_code_lengths != NULL && tmp_code_values != NULL &&
+                    prc_huff_assign_codes(ctx, active[0], leaf_count2, tmp_leaf_values, tmp_code_lengths, tmp_code_values) == 0)
+                {
+                    /* Small alphabet in practice -- O(n^2) run check is fine. */
+                    for (k2 = 0; k2 < leaf_count2 && !has_bad_length_tie; k2++)
+                    {
+                        uint32_t k3, run_len = 1;
+                        for (k3 = 0; k3 < leaf_count2; k3++)
+                            if (k3 != k2 && tmp_code_lengths[k3] == tmp_code_lengths[k2]) run_len++;
+                        if (run_len >= 3) has_bad_length_tie = 1;
+                    }
+                }
+                prc_free(ctx, tmp_leaf_values);
+                prc_free(ctx, tmp_code_lengths);
+                prc_free(ctx, tmp_code_values);
+            }
+
+            if (!has_bad_length_tie || attempt + 1 == max_attempts)
+                break;
+
+            {
+                uint32_t k2;
+                for (k2 = 0; k2 < node_count; k2++)
+                    prc_free(ctx, nodes[k2]);
+                prc_free(ctx, nodes);
+                prc_free(ctx, active);
+                nodes = NULL;
+                active = NULL;
+            }
         }
-        leaf->freq = distinct_freqs[i];
-        leaf->value = distinct_values[i];
-        leaf->is_leaf = 1;
-        leaf->left = NULL;
-        leaf->right = NULL;
-        nodes[node_count++] = leaf;
-        active[active_count++] = leaf;
     }
+
     prc_free(ctx, distinct_values);
     prc_free(ctx, distinct_freqs);
-
-    if (active_count == 1)
-    {
-        prc_huff_build_node *phantom = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
-        if (phantom == NULL)
-        {
-            prc_free(ctx, active);
-            *out_nodes = nodes;
-            *out_node_count = node_count;
-            return -1;
-        }
-        phantom->freq = 0;
-        phantom->value = (active[0]->value == 0) ? 1u : 0u;
-        phantom->is_leaf = 1;
-        phantom->left = NULL;
-        phantom->right = NULL;
-        nodes[node_count++] = phantom;
-        active[active_count++] = phantom;
-    }
-
-    {
-    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_TIEBREAK_REVERSE): the real
-       encoder's tie-breaking rule for equal-frequency leaves during this
-       merge is still an unresolved KNOWN LOOSE END (see
-       prc_huff_assign_codes' own comment) -- previously believed
-       inconsequential for decodability by any reader including Acrobat,
-       from only 2 synthetic test files that never happened to produce a
-       3-way+ tie. A minimal real repro now exists
-       (E:\Work\nanoPRC_supplementary_files\ISO-SPEC\test-meshes\
-       mixed_chains_minimal_repro_fan8_strip.prc) with a genuine 3-way tie
-       that DOES fail in real Acrobat -- see project_huffman_tiebreak_3way_
-       root_cause memory. Default tie-break (unset) prefers the FIRST
-       (lowest active[] index, i.e. lowest original value pre-merge, since
-       active[] starts value-sorted) node among ties for both min1 and
-       min2 -- via strict `<`. Setting this reverses it to prefer the
-       LAST (`<=`), testing whether that alternative convention matches
-       the real encoder for the known-failing 3-way-tie case. Not yet
-       validated against the previously-confirmed-working real files this
-       write facility was checked against -- do NOT flip the default
-       until that regression check is done. */
-    uint8_t tiebreak_reverse = (prc_diag_getenv("PRC_DIAG_HUFF_TIEBREAK_REVERSE") != NULL);
-    /* DIAGNOSTIC (2026-07-24, PRC_DIAG_HUFF_SWAP_LR_ON_TIE): a more
-       surgical alternative to PRC_DIAG_HUFF_TIEBREAK_REVERSE above --
-       leaves WHICH nodes get merged at each step completely unchanged
-       (same tree shape, same code LENGTHS, matching the "does NOT affect
-       code length" observation in prc_huff_assign_codes' own comment),
-       only flips which of the two EXACTLY-TIED-IN-FREQUENCY merged nodes
-       becomes the left (bit 0) vs right (bit 1) child. */
-    uint8_t swap_lr_on_tie = (prc_diag_getenv("PRC_DIAG_HUFF_SWAP_LR_ON_TIE") != NULL);
-    while (active_count > 1)
-    {
-        uint32_t min1, min2, k;
-        prc_huff_build_node *parent;
-        uint8_t this_merge_tied;
-
-        min1 = 0;
-        for (k = 1; k < active_count; k++)
-            if (tiebreak_reverse ? (active[k]->freq <= active[min1]->freq) : (active[k]->freq < active[min1]->freq))
-                min1 = k;
-        min2 = (min1 == 0) ? 1 : 0;
-        for (k = 0; k < active_count; k++)
-            if (k != min1 && (tiebreak_reverse ? (active[k]->freq <= active[min2]->freq) : (active[k]->freq < active[min2]->freq)))
-                min2 = k;
-
-        parent = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
-        if (parent == NULL)
-        {
-            prc_free(ctx, active);
-            *out_nodes = nodes;
-            *out_node_count = node_count;
-            return -1;
-        }
-        parent->freq = active[min1]->freq + active[min2]->freq;
-        parent->is_leaf = 0;
-        parent->value = 0;
-        this_merge_tied = (active[min1]->freq == active[min2]->freq) ? 1 : 0;
-        if (swap_lr_on_tie && this_merge_tied)
-        {
-            parent->left = active[min2];
-            parent->right = active[min1];
-        }
-        else
-        {
-            parent->left = active[min1];
-            parent->right = active[min2];
-        }
-        nodes[node_count++] = parent;
-
-        active[min1] = parent;
-        active[min2] = active[active_count - 1];
-        active_count--;
-    }
-    }
-
-    /* A real, independently-produced compressed PRC file's Huffman tree for
-       these array fields is always structurally INCOMPLETE in one specific
-       way: every actual leaf code begins with bit 1, and the root's entire
-       0-branch is unused (Kraft sum 0.5, not 1.0) -- confirmed by decoding
-       the real leaf tables for edge_status_array, triangle_face_array's and
-       point_reference_array's bit_lengths sub-arrays (2026-07-10 causal-
-       isolation investigation: swapping only this write facility's own,
-       complete/optimal tree into an otherwise-real, Acrobat-working file
-       reproduces Acrobat's blank-model-tree rejection; the real tree's
-       *codes*, once this extra wrap is added, match hand-verified digit for
-       digit). Reproduce it by wrapping the tree built above (over the real
-       leaves only) with one more merge against an unused phantom leaf,
-       placed as the LEFT (0) child so every real leaf's code gains a
-       leading 1 bit -- matching the real encoder's output exactly, not
-       merely a same-size, differently-shaped valid alternative. */
-    {
-        prc_huff_build_node *phantom_wrap = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
-        prc_huff_build_node *new_root;
-
-        if (phantom_wrap == NULL)
-        {
-            prc_free(ctx, active);
-            *out_root = active[0];
-            *out_nodes = nodes;
-            *out_node_count = node_count;
-            return -1;
-        }
-        /* NOT a leaf: a dead internal node with no children. The real
-           encoder's leaf table has exactly as many entries as there are
-           distinct real values (confirmed against the real file: 4 leaves
-           for edge_status_array, not 5) -- prc_huff_assign_codes only
-           records a table entry for is_leaf nodes it actually pops, and
-           this node (is_leaf=0, left=right=NULL) contributes nothing when
-           popped, exactly mirroring how the decoder's own on-demand tree
-           walk (prc_huffman_data_decoder / prc_bitread_character_array)
-           never touches root->left in the first place, since no real
-           leaf's code starts with bit 0. */
-        phantom_wrap->freq = 0;
-        phantom_wrap->value = 0;
-        phantom_wrap->is_leaf = 0;
-        phantom_wrap->left = NULL;
-        phantom_wrap->right = NULL;
-        nodes[node_count++] = phantom_wrap;
-
-        new_root = (prc_huff_build_node *)prc_malloc(ctx, sizeof(prc_huff_build_node));
-        if (new_root == NULL)
-        {
-            prc_free(ctx, active);
-            *out_root = active[0];
-            *out_nodes = nodes;
-            *out_node_count = node_count;
-            return -1;
-        }
-        new_root->freq = active[0]->freq;
-        new_root->is_leaf = 0;
-        new_root->value = 0;
-        new_root->left = phantom_wrap;
-        new_root->right = active[0];
-        nodes[node_count++] = new_root;
-
-        active[0] = new_root;
-    }
 
     *out_root = active[0];
     *out_nodes = nodes;
