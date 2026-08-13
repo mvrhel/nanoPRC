@@ -208,6 +208,79 @@ safe_mul_size(size_t count, size_t elem_size, size_t *out)
     return 0;
 }
 
+/* Sort key for PRC_DIAG_JITTER_SKIP_REPEATED_AXES's per-axis exact-value-repeat
+   detection: sorting is O(n log n) vs. the O(n^2) linear-scan frequency table
+   the prototype originally used, which only scaled to tiny (11-33 vertex) repros. */
+typedef struct
+{
+    double val;
+    uint32_t vi;
+} prc_diag_axis_val_t;
+
+static int
+prc_diag_axis_val_cmp(const void *a, const void *b)
+{
+    double da = ((const prc_diag_axis_val_t *)a)->val;
+    double db = ((const prc_diag_axis_val_t *)b)->val;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
+}
+
+/* Exact-position dedup key for the same probe: a raw (unwelded) STL corner
+   trivially shares its own position with every OTHER corner of the same
+   mesh vertex (any vertex touched by 2+ triangles), which is nearly all of
+   them on a real connected mesh -- that duplication is NOT the "intentional
+   CAD-flat axis alignment between DISTINCT vertices" signal the probe wants.
+   This key groups corners by exact (x,y,z) first so the per-axis repeat
+   check runs over one representative per distinct position, not per corner. */
+typedef struct
+{
+    double x, y, z;
+    uint32_t vi;
+} prc_diag_corner_xyz_t;
+
+static int
+prc_diag_corner_xyz_cmp(const void *a, const void *b)
+{
+    const prc_diag_corner_xyz_t *pa = (const prc_diag_corner_xyz_t *)a;
+    const prc_diag_corner_xyz_t *pb = (const prc_diag_corner_xyz_t *)b;
+    if (pa->x < pb->x) return -1;
+    if (pa->x > pb->x) return 1;
+    if (pa->y < pb->y) return -1;
+    if (pa->y > pb->y) return 1;
+    if (pa->z < pb->z) return -1;
+    if (pa->z > pb->z) return 1;
+    return 0;
+}
+
+/* Same probe as prc_diag_axis_val_t, but scoped per connected component
+   (2026-08-12 fix, see the repeated-axis-skip block's own comment for why:
+   an unscoped/whole-assembly version of this check misreads a coincidental
+   axis-value match between two UNRELATED parts of a multi-part assembly --
+   e.g. two standardized/mirrored sub-components placed at different
+   locations -- as the "intentional CAD-flatness" signal it's meant to
+   detect, confirmed on a real 126-part regression). Sorting by (comp, val)
+   makes same-component/same-value runs contiguous. */
+typedef struct
+{
+    double val;
+    uint32_t comp;
+    uint32_t vi;
+} prc_diag_axis_val_comp_t;
+
+static int
+prc_diag_axis_val_comp_cmp(const void *a, const void *b)
+{
+    const prc_diag_axis_val_comp_t *pa = (const prc_diag_axis_val_comp_t *)a;
+    const prc_diag_axis_val_comp_t *pb = (const prc_diag_axis_val_comp_t *)b;
+    if (pa->comp < pb->comp) return -1;
+    if (pa->comp > pb->comp) return 1;
+    if (pa->val < pb->val) return -1;
+    if (pa->val > pb->val) return 1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------------
  * Section 1: STL parsing (binary + ASCII). Nothing in this section
  * touches nanoPRC's API -- it just turns a file on disk into a flat
@@ -1582,6 +1655,47 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
             tess->kind = PRC_API_WRITE_TESS_KIND_TRIANGLES;
             tess->face_tri_counts = one_face;
             tess->num_faces = 1;
+
+            /* DIAGNOSTIC (2026-08-11, empty-model-tree corpus triage): same
+               PRC_DIAG_EXPAND_TRIANGLES probe as the per-component fallback
+               below -- fully expand vertices (no index sharing between any
+               triangles) instead of this lumped model's normally-welded/
+               shared buffer, matching what a third-party PDF3D-SDK-based
+               converter's own uncompressed output does for the same
+               geometry. Confirmed causal on local_small_part.stl (both the
+               per-component and lumped-model non-manifold TRIANGLES
+               fallbacks share the same underlying defect). Zero behavior
+               change when unset. */
+            if (prc_diag_getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
+            {
+                uint32_t exp_count = mesh->num_triangles * 3;
+                double *exp_positions = (double *)malloc(sizeof(double) * 3 * exp_count);
+                uint32_t *exp_indices = (uint32_t *)malloc(sizeof(uint32_t) * exp_count);
+                uint32_t tt, cc;
+                if (exp_positions == NULL || exp_indices == NULL)
+                {
+                    fprintf(stderr, "Error: allocation failed expanding lumped model\n");
+                    free(exp_positions); free(exp_indices);
+                    goto cleanup;
+                }
+                for (tt = 0; tt < mesh->num_triangles; tt++)
+                {
+                    for (cc = 0; cc < 3; cc++)
+                    {
+                        uint32_t src = combined_tri_indices[(size_t)tt * 3 + cc];
+                        uint32_t dst = tt * 3 + cc;
+                        memcpy(&exp_positions[(size_t)dst * 3], &combined_positions[(size_t)src * 3], sizeof(double) * 3);
+                        exp_indices[dst] = dst;
+                    }
+                }
+                free(combined_positions);
+                free(combined_tri_indices);
+                combined_positions = exp_positions;
+                combined_tri_indices = exp_indices;
+                tess->positions = exp_positions;
+                tess->num_positions = exp_count;
+                tess->tri_indices = exp_indices;
+            }
         }
 
         if (original_normals)
@@ -2055,6 +2169,10 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                             exp_indices[dst] = dst;
                         }
                     }
+                    free(local_positions);
+                    free(local_tri_indices);
+                    local_positions = exp_positions;
+                    local_tri_indices = exp_indices;
                     tess->positions = exp_positions;
                     tess->num_positions = exp_count;
                     tess->tri_indices = exp_indices;
@@ -2671,6 +2789,225 @@ main(int argc, char *argv[])
             }
             weld_grid_free(&trial_grid);
         }
+        /* DEFAULT (promoted 2026-08-11, was PRC_DIAG_JITTER_SKIP_REPEATED_AXES probe):
+           avoids jitter's real Acrobat-blank-tree risk (RESULT 9-13 of the
+           hand.stl/chains_3 investigation -- a chain-start's V0/V2
+           reconstruction becomes Acrobat-sensitive when perturbed away from
+           an EXACT value real, unjittered coordinates happen to share) by
+           simply not jittering a coordinate AXIS whose raw value repeats
+           across multiple DISTINCT mesh vertices -- the empirical signature
+           of intentional CAD-precise flatness/alignment (e.g. every vertex
+           of a planar sub-mesh sharing the exact same Z). Per axis, sorts
+           one representative position per distinct (x,y,z) vertex group
+           (O(n log n), practical at real mesh scale) and marks any value
+           occurring 2+ times as a run; an axis is skipped for a given
+           corner if its distinct vertex's value is part of such a run
+           anywhere in the mesh, WITHIN THE SAME CONNECTED COMPONENT (part) --
+           see below for why component-scoping is necessary. The dedup-to-
+           distinct-groups step matters: an earlier version operated on raw
+           (unwelded) corners directly, which trivially "repeats" for every
+           OTHER corner of any vertex touched by 2+ triangles (nearly all
+           vertices in any connected mesh) and swamped the real flatness
+           signal -- confirmed on beetle_1000000.stl, where the raw-corner
+           version flagged 100% of corners (i.e. degenerated into global
+           jitter-off in disguise, already known to fail that file).
+
+           COMPONENT SCOPING (2026-08-12, fixing a real regression): the
+           first shipped version (2026-08-11) checked for a repeated axis
+           value across the WHOLE mesh/assembly, not per part -- confirmed
+           via a real 126-part assembly (car_v76_suspension_brake_pmi.stl,
+           previously working with only the known flat-placement-transform
+           gap) that this breaks multi-part files: two UNRELATED parts
+           (e.g. standardized/mirrored sub-components at different assembly
+           locations) coincidentally sharing one axis-aligned coordinate
+           value gets misread as the "intentional CAD-flatness" signal this
+           probe is meant to detect, suppressing jitter that was never safe
+           to suppress for that vertex and reintroducing the exact
+           quantization-collision risk jitter exists to avoid (turned this
+           file from "working, misplaced parts" into "fully empty scene and
+           model tree"). Fixed by scoping the repeat check to each
+           connected component (part) independently, via a cheap trial
+           weld + union-find over shared edges on the RAW pre-jitter
+           positions (same technique as stl_import_jitter_needs_per_
+           triangle_scope above) -- a value repeating WITHIN one part still
+           counts (genuine intra-part flatness), a coincidental match
+           ACROSS unrelated parts no longer does.
+
+           Validated (real Adobe Acrobat) before promotion: hand.stl 11-
+           triangle repro (fixed -- neither the tilt-inheritance fix nor the
+           origin-choice fix alone resolved it), beetle_1000000.stl and
+           UK_original.stl (both previously required broad per-triangle
+           jitter and do NOT regress with this targeted version), and 12/20
+           (60%) of a real, independently-reviewed "empty model tree"
+           failure sample from a 185-file corpus batch, zero regressions
+           observed across every file tested (see project memory
+           project_jitter_skip_repeated_axes_2026-08-11 for the full
+           evidence table, including the car_v76 regression and this fix).
+           PRC_DIAG_JITTER_DISABLE_SKIP_REPEATED_AXES overrides back to the
+           old (unscoped) jitter behavior, for comparison/regression
+           testing only. */
+        uint8_t *repeated_axis_vertex_flag[3] = {NULL, NULL, NULL};
+        uint8_t skip_repeated_axes = (prc_diag_getenv("PRC_DIAG_JITTER_DISABLE_SKIP_REPEATED_AXES") == NULL);
+        if (skip_repeated_axes && !preweld_disabled)
+        {
+            uint32_t total_corners = mesh.num_triangles * 3;
+            uint32_t *corner_component = (uint32_t *)malloc(sizeof(uint32_t) * total_corners);
+            {
+                weld_grid comp_grid;
+                uint32_t *comp_weld_index = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)total_corners);
+                uint32_t *comp_parent = NULL;
+                uint8_t *comp_rank = NULL;
+                uint32_t *comp_of_root = NULL;
+                uint32_t num_comp = 0;
+                double comp_abs_tol = weld_tolerance_fraction * diagonal;
+                memset(&comp_grid, 0, sizeof(comp_grid));
+                if (corner_component != NULL && comp_weld_index != NULL &&
+                    weld_grid_init(&comp_grid, comp_abs_tol, total_corners) == 0)
+                {
+                    uint32_t i2, t2;
+                    uint8_t comp_ok = 1;
+                    for (i2 = 0; i2 < total_corners; i2++)
+                    {
+                        uint32_t wv = weld_grid_lookup_or_insert(&comp_grid, &mesh.raw_positions[(size_t)i2 * 3], comp_abs_tol);
+                        if (wv == UINT32_MAX) { comp_ok = 0; break; }
+                        comp_weld_index[i2] = wv;
+                    }
+                    if (comp_ok)
+                    {
+                        comp_parent = (uint32_t *)malloc(sizeof(uint32_t) * comp_grid.count);
+                        comp_rank = (uint8_t *)calloc(comp_grid.count, sizeof(uint8_t));
+                        comp_of_root = (uint32_t *)malloc(sizeof(uint32_t) * comp_grid.count);
+                        if (comp_parent != NULL && comp_rank != NULL && comp_of_root != NULL)
+                        {
+                            for (i2 = 0; i2 < comp_grid.count; i2++) comp_parent[i2] = i2;
+                            for (t2 = 0; t2 < mesh.num_triangles; t2++)
+                            {
+                                uf_union(comp_parent, comp_rank, comp_weld_index[t2 * 3 + 0], comp_weld_index[t2 * 3 + 1]);
+                                uf_union(comp_parent, comp_rank, comp_weld_index[t2 * 3 + 1], comp_weld_index[t2 * 3 + 2]);
+                            }
+                            for (i2 = 0; i2 < comp_grid.count; i2++) comp_of_root[i2] = UINT32_MAX;
+                            for (i2 = 0; i2 < comp_grid.count; i2++)
+                            {
+                                uint32_t r2 = uf_find(comp_parent, i2);
+                                if (comp_of_root[r2] == UINT32_MAX) comp_of_root[r2] = num_comp++;
+                            }
+                            for (i2 = 0; i2 < total_corners; i2++)
+                                corner_component[i2] = comp_of_root[uf_find(comp_parent, comp_weld_index[i2])];
+                        }
+                        else
+                        {
+                            comp_ok = 0;
+                        }
+                    }
+                    if (!comp_ok)
+                    {
+                        /* Allocation failure: fall back to one shared component
+                           for everything -- degrades to the old (unscoped)
+                           behavior rather than crashing or leaving
+                           corner_component uninitialized. */
+                        uint32_t i3;
+                        for (i3 = 0; i3 < total_corners; i3++)
+                            if (corner_component != NULL) corner_component[i3] = 0;
+                    }
+                }
+                else if (corner_component != NULL)
+                {
+                    uint32_t i3;
+                    for (i3 = 0; i3 < total_corners; i3++) corner_component[i3] = 0;
+                }
+                free(comp_weld_index); free(comp_parent); free(comp_rank); free(comp_of_root);
+                weld_grid_free(&comp_grid);
+            }
+            prc_diag_corner_xyz_t *xyzbuf = (prc_diag_corner_xyz_t *)malloc(sizeof(prc_diag_corner_xyz_t) * total_corners);
+            uint32_t *corner_group = (uint32_t *)malloc(sizeof(uint32_t) * total_corners);
+            uint32_t *group_first_corner = (uint32_t *)malloc(sizeof(uint32_t) * total_corners);
+            uint32_t num_groups = 0;
+            if (xyzbuf != NULL && corner_group != NULL && group_first_corner != NULL)
+            {
+                uint32_t vi3;
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    xyzbuf[vi3].x = mesh.raw_positions[(size_t)vi3 * 3 + 0];
+                    xyzbuf[vi3].y = mesh.raw_positions[(size_t)vi3 * 3 + 1];
+                    xyzbuf[vi3].z = mesh.raw_positions[(size_t)vi3 * 3 + 2];
+                    xyzbuf[vi3].vi = vi3;
+                }
+                qsort(xyzbuf, total_corners, sizeof(prc_diag_corner_xyz_t), prc_diag_corner_xyz_cmp);
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    if (vi3 == 0 || xyzbuf[vi3].x != xyzbuf[vi3 - 1].x ||
+                        xyzbuf[vi3].y != xyzbuf[vi3 - 1].y || xyzbuf[vi3].z != xyzbuf[vi3 - 1].z)
+                    {
+                        group_first_corner[num_groups] = xyzbuf[vi3].vi;
+                        num_groups++;
+                    }
+                    corner_group[xyzbuf[vi3].vi] = num_groups - 1;
+                }
+            }
+            if (xyzbuf != NULL && corner_group != NULL && group_first_corner != NULL && corner_component != NULL && num_groups > 0)
+            {
+                prc_diag_axis_val_comp_t *sortbuf = (prc_diag_axis_val_comp_t *)malloc(sizeof(prc_diag_axis_val_comp_t) * num_groups);
+                uint8_t *group_axis_flag = (uint8_t *)malloc(num_groups);
+                if (sortbuf != NULL && group_axis_flag != NULL)
+                {
+                    int axis;
+                    for (axis = 0; axis < 3; axis++)
+                    {
+                        uint32_t g, vi3;
+                        repeated_axis_vertex_flag[axis] = (uint8_t *)calloc(total_corners, sizeof(uint8_t));
+                        if (repeated_axis_vertex_flag[axis] == NULL)
+                            continue;
+                        memset(group_axis_flag, 0, num_groups);
+                        for (g = 0; g < num_groups; g++)
+                        {
+                            sortbuf[g].val = mesh.raw_positions[(size_t)group_first_corner[g] * 3 + (size_t)axis];
+                            sortbuf[g].comp = corner_component[group_first_corner[g]];
+                            sortbuf[g].vi = g;
+                        }
+                        qsort(sortbuf, num_groups, sizeof(prc_diag_axis_val_comp_t), prc_diag_axis_val_comp_cmp);
+                        {
+                            uint32_t run_start = 0;
+                            while (run_start < num_groups)
+                            {
+                                uint32_t run_end = run_start + 1;
+                                while (run_end < num_groups && sortbuf[run_end].val == sortbuf[run_start].val &&
+                                    sortbuf[run_end].comp == sortbuf[run_start].comp)
+                                    run_end++;
+                                if (run_end - run_start >= 2)
+                                {
+                                    uint32_t k;
+                                    for (k = run_start; k < run_end; k++)
+                                        group_axis_flag[sortbuf[k].vi] = 1;
+                                }
+                                run_start = run_end;
+                            }
+                        }
+                        for (vi3 = 0; vi3 < total_corners; vi3++)
+                            repeated_axis_vertex_flag[axis][vi3] = group_axis_flag[corner_group[vi3]];
+                    }
+                }
+                if (sortbuf != NULL) free(sortbuf);
+                if (group_axis_flag != NULL) free(group_axis_flag);
+            }
+            if (xyzbuf != NULL) free(xyzbuf);
+            if (corner_group != NULL) free(corner_group);
+            if (group_first_corner != NULL) free(group_first_corner);
+            if (corner_component != NULL) free(corner_component);
+            if (repeated_axis_vertex_flag[0] != NULL && repeated_axis_vertex_flag[1] != NULL && repeated_axis_vertex_flag[2] != NULL)
+            {
+                uint32_t vi3, any_axis = 0, all_axes = 0;
+                for (vi3 = 0; vi3 < total_corners; vi3++)
+                {
+                    int flagged = (repeated_axis_vertex_flag[0][vi3] != 0) + (repeated_axis_vertex_flag[1][vi3] != 0) + (repeated_axis_vertex_flag[2][vi3] != 0);
+                    if (flagged > 0) any_axis++;
+                    if (flagged == 3) all_axes++;
+                }
+                printf("Jitter: %u/%u corners (%.1f%%) skipped on >=1 repeated-value axis, %u (%.1f%%) skipped on all 3 (%u/%u distinct positions)\n",
+                    (unsigned)any_axis, (unsigned)total_corners, 100.0 * any_axis / total_corners,
+                    (unsigned)all_axes, 100.0 * all_axes / total_corners,
+                    (unsigned)num_groups, (unsigned)total_corners);
+            }
+        }
         if (!preweld_disabled)
         {
             uint32_t ti;
@@ -2731,9 +3068,12 @@ main(int argc, char *argv[])
                         hx = (uint32_t)digest[0] | ((uint32_t)digest[1] << 8) | ((uint32_t)digest[2] << 16) | ((uint32_t)digest[3] << 24);
                         hy = (uint32_t)digest[4] | ((uint32_t)digest[5] << 8) | ((uint32_t)digest[6] << 16) | ((uint32_t)digest[7] << 24);
                         hz = (uint32_t)digest[8] | ((uint32_t)digest[9] << 8) | ((uint32_t)digest[10] << 16) | ((uint32_t)digest[11] << 24);
-                        pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                        pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
-                        pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[0] == NULL || !repeated_axis_vertex_flag[0][vi])
+                            pv[0] += (((double)hx / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[1] == NULL || !repeated_axis_vertex_flag[1][vi])
+                            pv[1] += (((double)hy / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
+                        if (repeated_axis_vertex_flag[2] == NULL || !repeated_axis_vertex_flag[2][vi])
+                            pv[2] += (((double)hz / (double)0xFFFFFFFFu) * 2.0 - 1.0) * mag;
                         /* Truncate to float32: an earlier, externally-scripted version of this
                            mitigation wrote the jittered result back into a binary STL file (float32-
                            only storage) before nanoPRC ever read it, so the value actually used was
@@ -2755,6 +3095,13 @@ main(int argc, char *argv[])
             free(jitter_triangle_allow);
         if (jitter_corner_allow != NULL)
             free(jitter_corner_allow);
+        {
+            int axis;
+            for (axis = 0; axis < 3; axis++)
+            {
+                if (repeated_axis_vertex_flag[axis] != NULL) free(repeated_axis_vertex_flag[axis]);
+            }
+        }
     }
 
     if (weld_grid_init(&grid, weld_tolerance_fraction * diagonal, mesh.num_triangles * 3) != 0)
@@ -3002,16 +3349,27 @@ main(int argc, char *argv[])
 
             for (a = 0; a < 3; a++) center[a] = 0.5 * (bbox_min[a] + bbox_max[a]);
 
-            memset(&view, 0, sizeof(view));
-            view.name = "Default";
-            view.eye[0] = center[0] + diagonal * 1.0;
-            view.eye[1] = center[1] - diagonal * 1.3;
-            view.eye[2] = center[2] + diagonal * 0.7;
-            view.target[0] = center[0];
-            view.target[1] = center[1];
-            view.target[2] = center[2];
-            view.up[0] = 0.0; view.up[1] = 0.0; view.up[2] = 1.0;
-            view.is_default = 1;
+            {
+                /* PROBE (2026-08-11): test whether an elongated bbox's default
+                   camera distance is involved in the PDF3D_COMSOL "tree +
+                   geometry present but invisible in canvas" investigation --
+                   temporary, not for production use. */
+                double cam_mult = 1.0;
+                const char *cam_mult_env = prc_diag_getenv("PRC_DIAG_CAMERA_DIST_MULT");
+                if (cam_mult_env != NULL)
+                    cam_mult = atof(cam_mult_env);
+
+                memset(&view, 0, sizeof(view));
+                view.name = "Default";
+                view.eye[0] = center[0] + diagonal * 1.0 * cam_mult;
+                view.eye[1] = center[1] - diagonal * 1.3 * cam_mult;
+                view.eye[2] = center[2] + diagonal * 0.7 * cam_mult;
+                view.target[0] = center[0];
+                view.target[1] = center[1];
+                view.target[2] = center[2];
+                view.up[0] = 0.0; view.up[1] = 0.0; view.up[2] = 1.0;
+                view.is_default = 1;
+            }
 
             memset(&pdf_opts, 0, sizeof(pdf_opts));
             pdf_opts.views = &view;

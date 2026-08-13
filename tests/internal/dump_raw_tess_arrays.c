@@ -166,6 +166,19 @@ int main(int argc, char **argv)
         for (i = 0; i < parsed->triangle_face_array_size; i++) fprintf(out, " %u", parsed->normal_is_reversed[i]);
     fprintf(out, "\n");
 
+    fprintf(out, "normal_angle_number_of_bits %u\n", parsed->normal_angle_number_of_bits);
+    fprintf(out, "normal_binary_data_size %u\n", parsed->normal_binary_data_size);
+    fprintf(out, "normal_binary_data");
+    if (!parsed->must_recalculate_normals && parsed->normal_binary_data != NULL)
+        for (i = 0; i < parsed->normal_binary_data_size; i++) fprintf(out, " %u", parsed->normal_binary_data[i]);
+    fprintf(out, "\n");
+
+    fprintf(out, "normal_angle_array_size %u\n", parsed->normal_angle_array_size);
+    fprintf(out, "normal_angle_array");
+    if (!parsed->must_recalculate_normals && parsed->normal_angle_array != NULL)
+        for (i = 0; i < parsed->normal_angle_array_size; i++) fprintf(out, " %d", parsed->normal_angle_array[i]);
+    fprintf(out, "\n");
+
     fprintf(out, "point_array");
     for (i = 0; i < parsed->point_array_size; i++) fprintf(out, " %d", parsed->point_array[i]);
     fprintf(out, "\n");

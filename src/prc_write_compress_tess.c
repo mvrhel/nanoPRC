@@ -1408,6 +1408,15 @@ typedef struct
     int32_t index0, index1;   /* decoder point indices of the edge, index0 < index1 */
     uint32_t mesh_v0, mesh_v1; /* mesh vertex ids aligned with index0/index1 */
     uint32_t target_tri;      /* mesh triangle to grow across this edge */
+    /* This child's inherited tri_reversed value -- the parent's own value,
+       unchanged, for both right- and left-grown children alike. See the
+       long comment at this field's write site (prc_encode_edge_status) for
+       why: normal_was_reversed is constant along an unbroken growth chain,
+       confirmed empirically 2026-08-10. Used directly as the child's own
+       tri_reversed when it's later popped (prc_encode_traversal's main
+       loop) -- no independent per-triangle geometric decision for growing
+       triangles anymore. */
+    uint8_t inherited_reversed;
 } prc_encode_grow_op;
 
 typedef struct
@@ -2398,6 +2407,44 @@ prc_encode_edge_status(prc_encode_state *st, uint32_t tri,
                 op.mesh_v0 = ma[e];
                 op.mesh_v1 = mb[e];
                 op.target_tri = (uint32_t)nb;
+                /* A growing (non-chain-start) triangle inherits its parent's
+                   own tri_reversed value UNCHANGED, for both the right- and
+                   left-grown child alike -- normal_was_reversed is constant
+                   along an unbroken growth chain, not independently re-
+                   decided per triangle. Confirmed empirically (2026-08-10):
+                   swept 4 candidate propagation rules (right-flips/left-
+                   preserves, the reverse, both-flip, both-preserve) against
+                   PRC_DIAG_MESH_QUALITY's alltri_tilt_max ground-truth check
+                   (tilt=1.0-dot(true_n,rec_n), true_n from the ORIGINAL mesh
+                   geometry) on real prc-db files -- only "both preserve"
+                   (this one) collapses tilt from a perfect 2.0 (fully
+                   inverted reconstructed normal) down to ordinary
+                   quantization-level noise (~1e-5) on every file tested,
+                   across every chain-depth bucket. This is what
+                   prc_encode_decide_reversed's independent per-triangle
+                   geometric decision (comparing against a SMOOTHED PROXY
+                   normal, necessarily only a local approximation) was
+                   getting wrong for a meaningful fraction of growing
+                   triangles -- proxy-normal noise occasionally disagrees
+                   with the single correct chain-wide value, especially
+                   deep in long chains where more triangles have a chance to
+                   hit a locally-ambiguous proxy comparison. Chain STARTS
+                   still call prc_encode_decide_reversed (no parent to
+                   inherit from) -- a real geometric decision is unavoidable
+                   there, and is the only remaining source of incorrect
+                   reversed-bit values after this fix (see the file with
+                   many small parts in the same investigation, where a
+                   residual issue was traced to a chain-start decision
+                   specifically, not fixed by this change). */
+                op.inherited_reversed = (uint8_t)(st->tri_reversed != NULL && st->tri_reversed[tri]);
+                {
+                    const char *trace_push_env = prc_diag_getenv("PRC_DIAG_TRACE_PUSH");
+                    if (trace_push_env != NULL && nb == (int32_t)strtoul(trace_push_env, NULL, 10))
+                        fprintf(stderr, "PUSH: parent_tri=%u e=%u(%s) parent_tri_reversed=%u -> child=%u inherited=%u\n",
+                            tri, e, e == 0 ? "right" : "left",
+                            st->tri_reversed != NULL ? st->tri_reversed[tri] : 0,
+                            nb, op.inherited_reversed);
+                }
                 code = prc_encode_stack_push(st, &op);
                 if (code < 0)
                     return code;
@@ -2450,12 +2497,12 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         return PRC_ERROR_INTERNAL;
     }
 
-    /* One global origin (the decoder's origin_array): the centroid of the
-       mesh's own first triangle, used by every chain start and one/two-ref
-       branch. Round-tripped through float BEFORE any encoder math uses it,
-       because prc_write_compress_tess_to_stream writes this value as a
-       32-bit float (prc_bitwrite_float) -- a real decoder can only ever
-       recover that float-precision value, never the full double.
+    /* One global origin (the decoder's origin_array), used by every chain
+       start and one/two-ref branch. Round-tripped through float BEFORE any
+       encoder math uses it, because prc_write_compress_tess_to_stream
+       writes this value as a 32-bit float (prc_bitwrite_float) -- a real
+       decoder can only ever recover that float-precision value, never the
+       full double.
 
        Previously the bbox min corner -- replaced (2026-07-26, mixed_chains
        investigation's third trigger) after confirming real Adobe Acrobat
@@ -2472,63 +2519,98 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
        corruption on large COMPRESSED meshes" bug (large deltas losing
        precision through the float round-trip -- see project memory).
 
-       A triangle's centroid (the average of its 3 vertices) structurally
-       cannot exactly equal any of its own vertices unless the triangle is
-       degenerate (zero area, already excluded upstream by the mesh
-       preprocessing's degenerate-triangle removal), so this closes the
-       zero-delta trigger at its root rather than patching around it with a
-       small offset -- and keeps the origin well-conditioned/local in scale
-       (proportional to one triangle's own edge lengths, not a
-       potentially-mesh-spanning bbox diagonal), directly helping the
-       shard-corruption precision concern too. Uses mesh triangle 0
-       specifically (not necessarily traversal's own first-visited
-       triangle, which isn't known until traversal runs below) -- any real
-       triangle's centroid satisfies the same "can't coincide with a
-       vertex" property, so this doesn't need to be the exact first chain
-       start to be effective. */
-    if (mesh->num_triangles > 0)
-    {
-        const double *v0 = &mesh->positions[(size_t)mesh->tri_indices[0] * 3];
-        const double *v1 = &mesh->positions[(size_t)mesh->tri_indices[1] * 3];
-        const double *v2 = &mesh->positions[(size_t)mesh->tri_indices[2] * 3];
-        out->origin[0] = (double)(float)((v0[0] + v1[0] + v2[0]) / 3.0);
-        out->origin[1] = (double)(float)((v0[1] + v1[1] + v2[1]) / 3.0);
-        out->origin[2] = (double)(float)((v0[2] + v1[2] + v2[2]) / 3.0);
-    }
-    else
-    {
-        out->origin[0] = (double)(float)mesh->bbox[0];
-        out->origin[1] = (double)(float)mesh->bbox[1];
-        out->origin[2] = (double)(float)mesh->bbox[2];
-    }
-    /* EXPERIMENT (2026-08-05), mixed_chains investigation continued: RG (an
+       Then mesh triangle 0's centroid (2026-07-26 through 2026-08-10): a
+       triangle's centroid structurally cannot exactly equal any of its own
+       vertices unless the triangle is degenerate (already excluded
+       upstream), closing the zero-delta trigger. But an EXPERIMENT
+       (2026-08-05, mixed_chains investigation continued) found RG (an
        independent, real-world PRC encoder used throughout this project as a
        comparison oracle) resolves its own origin to something close to the
        mesh's overall vertex average, not any single triangle's centroid --
-       confirmed on QCD_Leinweber, whose default (triangle-0-centroid) origin
-       here lands near a mesh EXTREME (Z~0) while RG's sits centrally
+       confirmed on QCD_Leinweber, whose then-default (triangle-0-centroid)
+       origin landed near a mesh EXTREME (Z~0) while RG's sits centrally
        (Z~18.24 on a mesh spanning roughly that range). A poorly-centered
        origin inflates every chain-start's V0 delta magnitude, directly
-       feeding RESULT 12's V0+V2 reconstruction-error mechanism. Testing the
-       arithmetic mean of every DEDUPLICATED mesh vertex (mesh->positions,
-       already exactly the array the rest of this function operates on --
-       not the raw un-welded STL triangle soup, and not weighted by how many
-       triangles touch each vertex) as a direct replacement candidate, gated
-       behind PRC_DIAG_ORIGIN_VERTEX_AVERAGE so default behavior is
-       unaffected while this is still a probe, not a validated fix. */
-    if (prc_diag_getenv("PRC_DIAG_ORIGIN_VERTEX_AVERAGE") != NULL && mesh->num_positions > 0)
+       feeding RESULT 12's V0+V2 reconstruction-error mechanism, and every
+       chain restart elsewhere in the mesh pays the same inflated-delta cost
+       -- worse the larger/more spread-out the mesh.
+
+       Now (2026-08-10): the MIDPOINT OF THE TWO DEDUPLICATED MESH VERTICES
+       NEAREST the arithmetic mean of every deduplicated vertex -- combines
+       both properties instead of trading one for the other. An earlier
+       version of this change tried "nearest mesh TRIANGLE's centroid"
+       instead, but that drifted surprisingly far from the mesh-average
+       point on real solid meshes (measured 15% of bbox diagonal on one
+       real test file) -- every triangle centroid necessarily lies ON the
+       mesh SURFACE, while the vertex average of a solid, roughly-convex
+       mesh typically sits well inside the volume, so "nearest surface
+       point" and "the average" can disagree substantially. The midpoint of
+       the two nearest actual VERTICES doesn't have that constraint (not
+       tied to any single face) and stays bound to the average by local
+       vertex density, which for any real mesh with more than a handful of
+       vertices is far tighter than a whole triangle's extent. Retains the
+       zero-delta-collision safety property: the midpoint of two DISTINCT
+       (deduplicated, hence non-coincident) points cannot equal either of
+       them, or any third vertex, without an exact three-point-symmetry
+       coincidence. Deliberately NOT the plain vertex-average point itself
+       (which was live as an opt-in probe, `PRC_DIAG_ORIGIN_VERTEX_AVERAGE`,
+       2026-08-05 through 2026-08-10, and briefly the permanent default
+       earlier the same day) and deliberately not tuned to match RG's own
+       (proprietary, unexamined) origin-selection algorithm bit-for-bit --
+       being well-centered and collision-safe is the goal, not reproducing
+       any other encoder's specific value. Not expected to fix any specific
+       known bug on its own -- purely a numerical-conditioning improvement
+       (smaller V0 delta magnitude at every chain start/restart). */
+    if (mesh->num_positions >= 2)
     {
         double sx = 0.0, sy = 0.0, sz = 0.0;
+        double avg[3];
+        double best_dist2 = -1.0, second_dist2 = -1.0;
+        uint32_t best_vi = 0, second_vi = 0;
         uint32_t vi;
+
         for (vi = 0; vi < mesh->num_positions; vi++)
         {
             sx += mesh->positions[(size_t)vi * 3 + 0];
             sy += mesh->positions[(size_t)vi * 3 + 1];
             sz += mesh->positions[(size_t)vi * 3 + 2];
         }
-        out->origin[0] = (double)(float)(sx / (double)mesh->num_positions);
-        out->origin[1] = (double)(float)(sy / (double)mesh->num_positions);
-        out->origin[2] = (double)(float)(sz / (double)mesh->num_positions);
+        avg[0] = sx / (double)mesh->num_positions;
+        avg[1] = sy / (double)mesh->num_positions;
+        avg[2] = sz / (double)mesh->num_positions;
+
+        for (vi = 0; vi < mesh->num_positions; vi++)
+        {
+            const double *v = &mesh->positions[(size_t)vi * 3];
+            double d0 = v[0] - avg[0], d1 = v[1] - avg[1], d2 = v[2] - avg[2];
+            double dist2 = d0 * d0 + d1 * d1 + d2 * d2;
+
+            if (best_dist2 < 0.0 || dist2 < best_dist2)
+            {
+                second_dist2 = best_dist2;
+                second_vi = best_vi;
+                best_dist2 = dist2;
+                best_vi = vi;
+            }
+            else if (second_dist2 < 0.0 || dist2 < second_dist2)
+            {
+                second_dist2 = dist2;
+                second_vi = vi;
+            }
+        }
+        {
+            const double *a = &mesh->positions[(size_t)best_vi * 3];
+            const double *b = &mesh->positions[(size_t)second_vi * 3];
+            out->origin[0] = (double)(float)((a[0] + b[0]) / 2.0);
+            out->origin[1] = (double)(float)((a[1] + b[1]) / 2.0);
+            out->origin[2] = (double)(float)((a[2] + b[2]) / 2.0);
+        }
+    }
+    else
+    {
+        out->origin[0] = (double)(float)mesh->bbox[0];
+        out->origin[1] = (double)(float)mesh->bbox[1];
+        out->origin[2] = (double)(float)mesh->bbox[2];
     }
     {
         const char *ov = prc_diag_getenv("PRC_DIAG_FORCE_ORIGIN");
@@ -2642,6 +2724,8 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         int32_t idx[3];
         uint32_t mv[3];
         uint32_t cur;
+        uint8_t is_growing = 0;
+        uint8_t entering_reversed = 0;
 
         if (st.stack_size > 0)
         {
@@ -2649,6 +2733,14 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
 
             st.stack_size--;
             op = st.stack[st.stack_size];
+            is_growing = 1;
+            entering_reversed = op.inherited_reversed;
+            {
+                const char *trace_pop_env = prc_diag_getenv("PRC_DIAG_TRACE_PUSH");
+                if (trace_pop_env != NULL && op.target_tri == (uint32_t)strtoul(trace_pop_env, NULL, 10))
+                    fprintf(stderr, "POP: cur=%u entering_reversed=%u index0=%d index1=%d mesh_v0=%u mesh_v1=%u\n",
+                        op.target_tri, entering_reversed, op.index0, op.index1, op.mesh_v0, op.mesh_v1);
+            }
             if (st.visited[op.target_tri])
             {
                 /* Cannot happen: growable edges are never declared toward
@@ -2753,8 +2845,13 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                exactly the "swap" case at decode time -- default to that,
                not to calling prc_encode_decide_reversed unguarded (it reads
                st->real_normals[...] with no null check of its own). */
-            uint8_t tilt_scan_reversed = st.real_normals != NULL ?
-                prc_encode_decide_reversed(&st, cur, idx, mv) : 0;
+            uint8_t tilt_scan_reversed;
+            if (st.real_normals == NULL)
+                tilt_scan_reversed = 0;
+            else if (is_growing)
+                tilt_scan_reversed = entering_reversed;
+            else
+                tilt_scan_reversed = prc_encode_decide_reversed(&st, cur, idx, mv);
             int32_t ridx1 = tilt_scan_reversed ? idx[1] : idx[2];
             int32_t ridx2 = tilt_scan_reversed ? idx[2] : idx[1];
 
@@ -2847,8 +2944,22 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
            then push, in one pass) is the whole point. */
         if (st.real_normals != NULL)
         {
-            st.tri_reversed[cur] = prc_diag_getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL ? 0 :
-                prc_encode_decide_reversed(&st, cur, idx, mv);
+            /* A growing (non-chain-start) triangle's normal_was_reversed is
+               simply inherited from its parent, unchanged -- NOT an
+               independent per-triangle geometric decision. See
+               prc_encode_grow_op's own comment (where the inherited value is
+               computed, in prc_encode_edge_status) for the full rationale
+               and the empirical evidence behind this (2026-08-10). Chain
+               starts have no parent to inherit from, so they still make a
+               real geometric decision via prc_encode_decide_reversed.
+               PRC_DIAG_FORCE_UNREVERSED (pre-existing diagnostic) still
+               overrides both cases to 0, for comparison/regression testing. */
+            if (prc_diag_getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL)
+                st.tri_reversed[cur] = 0;
+            else if (is_growing)
+                st.tri_reversed[cur] = entering_reversed;
+            else
+                st.tri_reversed[cur] = prc_encode_decide_reversed(&st, cur, idx, mv);
             out->triangle_reversed[emitted] = st.tri_reversed[cur];
         }
 

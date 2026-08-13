@@ -49,6 +49,19 @@
 
 #if PRC_ENABLE_DIAG_ENV
 
+/* Demos call this directly across the nano_prc shared-library boundary
+   (e.g. demos/stl_import), so it needs the same dllexport/visibility
+   treatment as prc_api.h's PRC_EXPORT -- duplicated here rather than
+   depending on prc_api.h so this header stays self-contained for the
+   library-internal .c files that include it without prc_api.h. */
+#ifdef _WIN32
+#define PRC_DIAG_EXPORT __declspec(dllexport)
+#elif !_WIN32 && PRC_BUILD_SHARED
+#define PRC_DIAG_EXPORT __attribute__((visibility("default")))
+#else
+#define PRC_DIAG_EXPORT
+#endif
+
 /* Drop-in replacement for getenv(name) at every PRC_DIAG_*, PRC_TRACE_*,
    PRC_FUZZ_* call site: same signature, same NULL-if-unset semantics,
    cached after the first lookup per distinct name. Not thread-safe (no
@@ -56,7 +69,7 @@
    single-value cache this generalizes (prc_write_bit.c's
    prc_diag_bitwrite_double_enabled_cache); diagnostics are opt-in,
    single-context debug tooling, not used concurrently in practice. */
-const char *prc_diag_getenv(const char *name);
+PRC_DIAG_EXPORT const char *prc_diag_getenv(const char *name);
 
 #else
 
