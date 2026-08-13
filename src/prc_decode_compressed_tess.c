@@ -1470,6 +1470,10 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
            normal data mixed in with non-planar normal data. And the non-planar
            data can reference the planar normals in the references. So we need
            to add these to the reference list of normals */
+        if (ctx->trace_normals)
+            fprintf(stderr, "NORMBITS tri=%u face_is_planar=%u cursor=%u\n",
+                triangle_index, normal_state->face_is_planar, normal_state->normal_bin_data_index);
+
         if (normal_state->face_is_planar)
         {
             /* We have one normal per face */
@@ -1738,6 +1742,13 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
                     DEBUG_LOG("x_is_reversed = %d\n", x_is_reversed);
                     DEBUG_LOG("y_is_reversed = %d\n", y_is_reversed);
 
+                    if (ctx->trace_normals)
+                        fprintf(stderr, "NORMBITS tri=%u k=%d vidx=%u state=NOT_ENCOUNTERED "
+                            "cursor_before=%u bits=4 has_multi=%u rev=%u xrev=%u yrev=%u cursor_after=%u\n",
+                            g_trace_tri_idx, k, vertex_index, normal_state->normal_bin_data_index - 4,
+                            has_multiple_normals, is_reversed, x_is_reversed, y_is_reversed,
+                            normal_state->normal_bin_data_index);
+
                     if (has_multiple_normals)
                     {
                         multiple_normals[vertex_index].vertex_normal_state =
@@ -1786,6 +1797,12 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
                 else if (multiple_normals[vertex_index].vertex_normal_state ==
                             PRC_VERTEX_NORM_IS_NOT_MULTIPLE)
                 {
+                    if (ctx->trace_normals)
+                        fprintf(stderr, "NORMBITS tri=%u k=%d vidx=%u state=REPEAT_NOT_MULTIPLE "
+                            "cursor_before=%u bits=0 reused_normal_index=%u cursor_after=%u\n",
+                            g_trace_tri_idx, k, vertex_index, normal_state->normal_bin_data_index,
+                            multiple_normals[vertex_index].non_multiple_normal_index,
+                            normal_state->normal_bin_data_index);
                     treated_tri->normal_indices[k] =
                         multiple_normals[vertex_index].non_multiple_normal_index;
                 }
@@ -1796,6 +1813,11 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
                     is_a_reference = normal_bin_data[0];
                     normal_bin_data += 1;
                     normal_state->normal_bin_data_index += 1;
+                    if (ctx->trace_normals)
+                        fprintf(stderr, "NORMBITS tri=%u k=%d vidx=%u state=REPEAT_IS_MULTIPLE "
+                            "cursor_before=%u bits=1 is_a_reference=%u cursor_after=%u (more bits follow if is_a_reference or a fresh normal)\n",
+                            g_trace_tri_idx, k, vertex_index, normal_state->normal_bin_data_index - 1,
+                            is_a_reference, normal_state->normal_bin_data_index);
                     if (is_a_reference)
                     {
                         uint32_t num_stored_normals = multiple_normals[vertex_index].num_already_stored_normals_on_vertex;
@@ -1827,6 +1849,12 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
                         treated_tri->normal_indices[k] = existing_normal_index;
                         normal_bin_data += number_bits;
                         normal_state->normal_bin_data_index += number_bits;
+                        if (ctx->trace_normals)
+                            fprintf(stderr, "NORMBITS tri=%u k=%d vidx=%u state=REF_INDEX "
+                                "cursor_before=%u bits=%u read_index=%u ref_index=%u existing_normal_index=%u cursor_after=%u\n",
+                                g_trace_tri_idx, k, vertex_index,
+                                normal_state->normal_bin_data_index - number_bits, number_bits,
+                                read_index, ref_index, existing_normal_index, normal_state->normal_bin_data_index);
                     }
                     else
                     {
@@ -1840,6 +1868,11 @@ prc_handle_normal_calculation(prc_context *ctx, prc_tess_3d_compressed *data,
                         DEBUG_LOG("is_reversed = %d\n", is_reversed);
                         DEBUG_LOG("x_is_reversed = %d\n", x_is_reversed);
                         DEBUG_LOG("y_is_reversed = %d\n", y_is_reversed);
+                        if (ctx->trace_normals)
+                            fprintf(stderr, "NORMBITS tri=%u k=%d vidx=%u state=FRESH_MULTI_NORMAL "
+                                "cursor_before=%u bits=3 rev=%u xrev=%u yrev=%u cursor_after=%u\n",
+                                g_trace_tri_idx, k, vertex_index, normal_state->normal_bin_data_index - 3,
+                                is_reversed, x_is_reversed, y_is_reversed, normal_state->normal_bin_data_index);
 
                         /* Decode the normal (and store the normal) */
                         code = prc_decode_normal(ctx, data, is_reversed, x_is_reversed,
