@@ -2973,6 +2973,22 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
 
     }
 
+    /* The loop above prints each treated_tri one iteration late (see the
+       "k - 1" comment above), so the final triangle (index num_triangles - 1)
+       is built but never printed. Cover that gap here so a trace covers every
+       triangle in the entry, not just the first num_triangles - 1. */
+    if (ctx->trace_reversed && num_triangles > 0)
+    {
+        fprintf(stderr, "DEC k=%d reversed=%d treated_index=(%d,%d,%d) right=(%d,%d) left=(%d,%d) P0=(%.6f,%.6f,%.6f) P1=(%.6f,%.6f,%.6f) P2=(%.6f,%.6f,%.6f)\n",
+            num_triangles - 1, treated_tri.normal_was_reversed,
+            treated_tri.treated_index[0], treated_tri.treated_index[1], treated_tri.treated_index[2],
+            treated_tri.right_edge.edge_treatement_x, treated_tri.right_edge.edge_treatement_y,
+            treated_tri.left_edge.edge_treatement_x, treated_tri.left_edge.edge_treatement_y,
+            treated_tri.points[0].x, treated_tri.points[0].y, treated_tri.points[0].z,
+            treated_tri.points[1].x, treated_tri.points[1].y, treated_tri.points[1].z,
+            treated_tri.points[2].x, treated_tri.points[2].y, treated_tri.points[2].z);
+    }
+
     number_of_normals = normal_state.normals_vertex_count;
 
     data->triangle_indices_prc_compressed_3d = triangle_indices;
