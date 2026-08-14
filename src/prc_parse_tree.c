@@ -1900,6 +1900,32 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
     }
 
     data->num_rep_items = prc_bitread_uint32(ctx, bit_state);
+
+    /* A zero-volume bounding box on a PartDefinition -- most often seen on
+       an otherwise-empty wrapper node (num_rep_items == 0) inserted purely
+       for tree structure -- was confirmed real-Acrobat-causal for a
+       silently blanked model tree beneath that node, even when the actual
+       geometry a level or two further down is completely valid (see
+       demos/stl_import/src/stl_import.c's has_empty_part fix). This is a
+       READ-side warning only: nanoPRC's own decoder tolerates it fine (that
+       tolerance is exactly why the bug went unnoticed for so long), so this
+       does not fail the parse -- it just surfaces a real, previously-silent
+       risk factor for anyone debugging a blank-tree report against a file
+       from a different writer. */
+    if (data->bounding_box.minimum_corner.x == data->bounding_box.maximum_corner.x &&
+        data->bounding_box.minimum_corner.y == data->bounding_box.maximum_corner.y &&
+        data->bounding_box.minimum_corner.z == data->bounding_box.maximum_corner.z)
+    {
+        fprintf(stderr, "Warning: PartDefinition (num_rep_items=%u) has a zero-volume "
+            "bounding box (%.6f,%.6f,%.6f)-(%.6f,%.6f,%.6f) -- known to cause real Adobe "
+            "Acrobat to silently blank the model tree beneath this node, even when its own "
+            "geometry (or a descendant's) is otherwise valid.\n",
+            data->num_rep_items,
+            data->bounding_box.minimum_corner.x, data->bounding_box.minimum_corner.y,
+            data->bounding_box.minimum_corner.z, data->bounding_box.maximum_corner.x,
+            data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z);
+    }
+
     if (data->num_rep_items > 0)
     {
         data->rep_items = (prc_ri *)prc_calloc(ctx, data->num_rep_items, sizeof(prc_ri));
