@@ -996,8 +996,20 @@ typedef struct prc_api_write_node_s
     const prc_api_write_rep_item *rep_items;
     uint32_t num_rep_items;
     /** Axis-aligned bounding box of this node's geometry, in the same
-        units as its tessellation entries' positions. Ignored if
-        num_rep_items == 0. */
+        units as its tessellation entries' positions.
+
+        Still written into the PartDefinition entity (and still worth
+        setting to something meaningful, e.g. the union of this node's
+        children) even when num_rep_items == 0 and has_empty_part == 1: an
+        earlier version of this comment claimed the box is "ignored" in
+        that case, on the assumption that a reader has no use for a
+        bounding box on a node with no geometry of its own. Real-Acrobat
+        testing found otherwise -- a degenerate (0,0,0)-(0,0,0) box left at
+        its zero-initialized default on an empty-part ancestor node
+        silently blanked the entire model tree beneath it, even though the
+        actual geometry a few levels further down was completely intact
+        and valid. Leaving this field zeroed for an empty-part node is not
+        a safe no-op. */
     double bbox_min[3];
     double bbox_max[3];
 

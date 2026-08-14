@@ -1761,10 +1761,28 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
 
     {
         prc_api_write_node *intermediate = &parts->intermediates[0];
+        int a;
         memset(intermediate, 0, sizeof(*intermediate));
         intermediate->has_empty_part = 1;
         intermediate->children = &parts->child_ptrs[0];
         intermediate->num_children = 1;
+        /* prc_api.h documents bbox_min/bbox_max as "ignored if
+           num_rep_items == 0", which this intermediate always has -- left
+           unset (zero-initialized above) on that basis, this wrote a
+           degenerate (0,0,0)-(0,0,0) PartDefinition bounding box. Real
+           Acrobat testing (a 4-triangle minimal repro, section-swapped
+           against an independent encoder's otherwise-identical output)
+           traced a silent blank-model-tree failure to exactly this: the
+           box is NOT actually ignored by Acrobat for an empty-part
+           ancestor, and a zero-volume one blanks everything nested
+           beneath it. Since this intermediate always wraps exactly the
+           one child part just built above (whose own bbox is already a
+           real, padded box around real geometry), reuse it here too. */
+        for (a = 0; a < 3; a++)
+        {
+            intermediate->bbox_min[a] = parts->children[0].bbox_min[a];
+            intermediate->bbox_max[a] = parts->children[0].bbox_max[a];
+        }
     }
     parts->intermediate_ptrs[0] = &parts->intermediates[0];
 
@@ -2259,10 +2277,22 @@ tess_entry_done:;
            its own meaningful tree entry. */
         {
             prc_api_write_node *intermediate = &parts->intermediates[c];
+            int a;
             memset(intermediate, 0, sizeof(*intermediate));
             intermediate->has_empty_part = 1;
             intermediate->children = &parts->child_ptrs[c];
             intermediate->num_children = 1;
+            /* See the single-component build's own copy of this comment
+               (above in this file): a degenerate zero bbox on an
+               empty-part ancestor blanks Acrobat's whole model tree
+               beneath it, despite prc_api.h documenting the field as
+               "ignored" for num_rep_items == 0 nodes. Reuse the one real
+               child's already-computed bbox. */
+            for (a = 0; a < 3; a++)
+            {
+                intermediate->bbox_min[a] = parts->children[c].bbox_min[a];
+                intermediate->bbox_max[a] = parts->children[c].bbox_max[a];
+            }
         }
         parts->intermediate_ptrs[c] = &parts->intermediates[c];
     }

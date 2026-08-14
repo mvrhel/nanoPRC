@@ -14,11 +14,13 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include "prc_parse_tree.h"
 #include "prc_parse_common.h"
 #include "prc_schema.h"
 #include "debug.h"
+#include "prc_diag_env.h"
 
 #define DEBUG_TREE 0
 
@@ -1847,6 +1849,25 @@ prc_parse_product_occurrence(prc_context *ctx, prc_bit_state *bit_state, prc_asm
         data->product_behavior, data->has_transform, data->entity_ref_count, data->number_of_views);
 #endif
 
+    if (prc_diag_getenv("PRC_DIAG_DUMP_TREE") != NULL)
+    {
+        uint32_t ci;
+        fprintf(stderr, "PRC_DIAG_DUMP_TREE: ProductOccurrence unique_id=%u name=\"%s\" "
+            "biased_layer_index=%u biased_index_of_line_style=%u behavior1=%u behavior2=%u "
+            "biased_index_part=%u biased_index_prototype=%u num_child_occ=%u "
+            "has_transform=%u entity_ref_count=%u number_of_views=%u children=[",
+            data->base.base.unique_id, data->base.base.name.same ? "" :
+                (data->base.base.name.name.string ? (const char *)data->base.base.name.name.string : "(null)"),
+            data->base.graphics_content.biased_layer_index, data->base.graphics_content.biased_index_of_line_style,
+            (unsigned)data->base.graphics_content.behavior_bit_field1, (unsigned)data->base.graphics_content.behavior_bit_field2,
+            data->references_product_occurrence.biased_index_part, data->references_product_occurrence.biased_index_prototype,
+            data->references_product_occurrence.number_of_child_product_occurrences,
+            data->has_transform, data->entity_ref_count, data->number_of_views);
+        for (ci = 0; ci < data->references_product_occurrence.number_of_child_product_occurrences; ci++)
+            fprintf(stderr, "%s%u", ci ? "," : "", data->references_product_occurrence.index_child_occurrence[ci]);
+        fprintf(stderr, "]\n");
+    }
+
     return 0;
 }
 
@@ -1948,6 +1969,19 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
         data->bounding_box.maximum_corner.x, data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z,
         data->num_rep_items, data->number_views);
 #endif
+
+    if (prc_diag_getenv("PRC_DIAG_DUMP_TREE") != NULL)
+    {
+        fprintf(stderr, "PRC_DIAG_DUMP_TREE: PartDefinition unique_id=%u name=\"%s\" "
+            "biased_index_of_line_style=%u bbox_min=(%f,%f,%f) bbox_max=(%f,%f,%f) "
+            "num_rep_items=%u number_views=%u\n",
+            data->base.base.unique_id, data->base.base.name.same ? "" :
+                (data->base.base.name.name.string ? (const char *)data->base.base.name.name.string : "(null)"),
+            data->base.graphics_content.biased_index_of_line_style,
+            data->bounding_box.minimum_corner.x, data->bounding_box.minimum_corner.y, data->bounding_box.minimum_corner.z,
+            data->bounding_box.maximum_corner.x, data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z,
+            data->num_rep_items, data->number_views);
+    }
 
     return 0;
 }

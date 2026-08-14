@@ -4090,6 +4090,13 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         return PRC_ERROR_INTERNAL;
     }
 
+#define PRC_DIAG_TESS_FIELD_SIZES_MARK(label) \
+    do { if (prc_diag_getenv("PRC_DIAG_TESS_FIELD_SIZES") != NULL) \
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_SIZES: after %-24s byte_pos=%zu bit_fill=%u\n", \
+            (label), state->byte_pos, (unsigned)state->bit_fill); } while (0)
+
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("start");
+
     if (prc_bitwrite_bit(ctx, state, 0) != 0)   /* is_calculated */
         goto werr;
     /* has_faces: per the spec (Table 175), "TRUE if the entity is built
@@ -4118,9 +4125,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         goto werr;
     if (prc_bitwrite_float(ctx, state, (float)trav->origin[2]) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("tolerance+origin");
     if (prc_bitwrite_compressed_integer_array(ctx, state, trav->point_array,
             trav->point_array_size) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("point_array");
     /* edge_status_array is documented (ISO/CD 14739-1 §7.8.9, Table 175/
        CR-14) to hold 3*T entries, not T -- one 2-bit field per triangle is
        the only one a decoder actually consumes (indexed edge_status[t],
@@ -4169,9 +4178,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         }
         prc_free(ctx, padded);
     }
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("edge_status_array");
     if (prc_bitwrite_compressed_indice_array(ctx, state, trav->triangle_face_array,
             trav->triangle_face_array_size, 1, 0) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("triangle_face_array");
     if (prc_bitwrite_uint32(ctx, state, trav->points_is_reference_array_size) != 0)
         goto werr;
     for (k = 0; k < trav->points_is_reference_array_size; k++)
@@ -4179,9 +4190,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         if (prc_bitwrite_bit(ctx, state, trav->points_is_reference_array[k]) != 0)
             goto werr;
     }
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("points_is_reference_array");
     if (prc_bitwrite_compressed_indice_array(ctx, state, trav->point_reference_array,
             trav->point_reference_array_size, 0, num_refs) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("point_reference_array");
     if (prc_bitwrite_bit(ctx, state, must_recalculate_normals ? 1 : 0) != 0)
         goto werr;
 
@@ -4241,6 +4254,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
                     goto werr;
             }
         }
+        PRC_DIAG_TESS_FIELD_SIZES_MARK("normals_block");
 
         if (prc_bitwrite_bit(ctx, state, 0) != 0)   /* is_point_color */
             goto werr;
@@ -4277,6 +4291,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
                 goto werr;
             }
             prc_free(ctx, no_style_per_face);
+            PRC_DIAG_TESS_FIELD_SIZES_MARK("line_attribute_array");
         }
     }
     if (prc_bitwrite_bit(ctx, state, 1) != 0)   /* no_texture */
