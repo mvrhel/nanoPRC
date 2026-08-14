@@ -76,6 +76,11 @@ int main(int argc, char **argv)
         intermediate.has_empty_part = 1;
         intermediate.children = &leaf_ptr;
         intermediate.num_children = 1;
+        /* A has_empty_part node's own bbox is still serialized and NOT
+           safely ignorable by real Acrobat -- see stl_import.c's own fix
+           for the same pattern. Reuse the one real child's bbox. */
+        intermediate.bbox_min[0]=leaf.bbox_min[0]; intermediate.bbox_min[1]=leaf.bbox_min[1]; intermediate.bbox_min[2]=leaf.bbox_min[2];
+        intermediate.bbox_max[0]=leaf.bbox_max[0]; intermediate.bbox_max[1]=leaf.bbox_max[1]; intermediate.bbox_max[2]=leaf.bbox_max[2];
 
         prc_api_write_node *inter_ptr = &intermediate;
         prc_api_write_node root;
@@ -357,6 +362,11 @@ skip_weld:
     intermediate.children = &leaf_ptr;
     intermediate.num_children = 1;
     intermediate.name = "hand_scene"; /* TEST: standalone_grid_triangles.c names its intermediate node; ours left it NULL */
+    /* A has_empty_part node's own bbox is still serialized and NOT safely
+       ignorable by real Acrobat -- see stl_import.c's own fix for the same
+       pattern. Match leaf's own (deliberately trivial-round-number, see
+       above) bbox rather than leaving this one degenerate. */
+    for (int c = 0; c < 3; c++) { intermediate.bbox_min[c] = leaf.bbox_min[c]; intermediate.bbox_max[c] = leaf.bbox_max[c]; }
 
     prc_api_write_node *inter_ptr = &intermediate;
     prc_api_write_node root;
