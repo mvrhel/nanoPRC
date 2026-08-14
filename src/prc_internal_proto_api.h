@@ -188,18 +188,6 @@ prc_internal_api_get_color(prc_context *ctx, prc_file_struct_internal_global_dat
     int32_t color_index, float *color_out);
 
 /**
- * @brief Build a 4x4 transform from a PRC location transform.
- *
- * @param ctx Parser/context object.
- * @param location PRC transform source.
- * @param transform Output transform matrix buffer.
- * @param is_identity Output flag indicating whether the transform is identity.
- * @return 0 on success, negative error code on failure.
- */
-int prc_internal_api_set_transform(prc_context *ctx, const prc_misc_transformation *location,
-    double *transform, uint8_t *is_identity);
-
-/**
  * @brief Initialize a face output container to a safe default state.
  *
  * @param ctx Parser/context object.
