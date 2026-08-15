@@ -79,6 +79,38 @@
 #include <ctype.h>
 #include <prc_diag_env.h>
 
+/* DIAGNOSTIC (2026-08-15, Gear-Box surgical-split regression bisection):
+   PRC_DIAG_SURGICAL_SPLIT_ONLY_PARTS restricts prc_api_mesh_weld_and_split's
+   non-manifold-vertex fix (see its own call sites below) to a caller-chosen
+   subset of 1-based part numbers, comma-separated (e.g. "3,8,9") -- every
+   OTHER non-manifold-flagged part falls back to the OLD plain-welded/
+   unsplit TRIANGLES buffer instead, exactly as this write facility
+   behaved before that fix existed. Unset (the default): every flagged part
+   gets the fix, unchanged. Exists purely to let a real-Acrobat regression
+   on a specific multi-part file be narrowed down to the specific part
+   (and specific split) actually responsible, without a full rebuild per
+   candidate part. */
+static int
+prc_diag_surgical_split_part_allowed(uint32_t one_based_part_number)
+{
+    const char *list = prc_diag_getenv("PRC_DIAG_SURGICAL_SPLIT_ONLY_PARTS");
+    const char *p;
+    if (list == NULL)
+        return 1; /* unset: every part gets the fix, current default behavior */
+    p = list;
+    while (*p != '\0')
+    {
+        char *endp;
+        unsigned long v = strtoul(p, &endp, 10);
+        if (endp == p) break; /* not a number: malformed list, stop parsing */
+        if ((uint32_t)v == one_based_part_number)
+            return 1;
+        p = endp;
+        while (*p == ',' || *p == ' ') p++;
+    }
+    return 0;
+}
+
 /* Minimal, single-block-only MD5 (RFC 1321), duplicated from src/prc_write_compress_tess.c's
    own (private/static) copy -- see that copy's comment for why this exists (replicating an
    earlier externally-scripted, empirically-confirmed-working mitigation byte-for-byte, after
@@ -1649,52 +1681,56 @@ stl_import_build_single_lumped_model(const stl_mesh *mesh, const double *welded_
                 fprintf(stderr, "Error: allocation failed checking lumped model for non-manifold fans\n");
                 goto cleanup;
             }
-            one_face[0] = mesh->num_triangles;
             fprintf(stderr, "Note: lumped model contains a non-manifold vertex (disconnected triangle fans) -- "
                 "writing it uncompressed to avoid a known Acrobat compatibility issue.\n");
             tess->kind = PRC_API_WRITE_TESS_KIND_TRIANGLES;
             tess->face_tri_counts = one_face;
             tess->num_faces = 1;
 
-            /* DIAGNOSTIC (2026-08-11, empty-model-tree corpus triage): same
-               PRC_DIAG_EXPAND_TRIANGLES probe as the per-component fallback
-               below -- fully expand vertices (no index sharing between any
-               triangles) instead of this lumped model's normally-welded/
-               shared buffer, matching what a third-party PDF3D-SDK-based
-               converter's own uncompressed output does for the same
-               geometry. Confirmed causal on local_small_part.stl (both the
-               per-component and lumped-model non-manifold TRIANGLES
-               fallbacks share the same underlying defect). Zero behavior
-               change when unset. */
-            if (prc_diag_getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
+            /* Surgically split the specific non-manifold vertex/vertices
+               this lump was flagged for -- see the per-component fallback's
+               own copy of this comment (stl_import_build_parts) for the
+               full rationale; same fix, same function, applied here to the
+               lumped-model path instead. */
             {
-                uint32_t exp_count = mesh->num_triangles * 3;
-                double *exp_positions = (double *)malloc(sizeof(double) * 3 * exp_count);
-                uint32_t *exp_indices = (uint32_t *)malloc(sizeof(uint32_t) * exp_count);
-                uint32_t tt, cc;
-                if (exp_positions == NULL || exp_indices == NULL)
+                double *split_positions = NULL;
+                uint32_t *split_indices = NULL;
+                uint32_t split_num_positions = 0, split_num_triangles = 0;
+                double *new_positions;
+                uint32_t *new_indices;
+
+                if (prc_api_mesh_weld_and_split(nonmanifold_check_ctx, combined_positions, num_welded,
+                        combined_tri_indices, mesh->num_triangles, tess->tolerance,
+                        &split_positions, &split_num_positions,
+                        &split_indices, &split_num_triangles) < 0)
                 {
-                    fprintf(stderr, "Error: allocation failed expanding lumped model\n");
-                    free(exp_positions); free(exp_indices);
+                    fprintf(stderr, "Error: failed splitting non-manifold vertices for lumped model\n");
                     goto cleanup;
                 }
-                for (tt = 0; tt < mesh->num_triangles; tt++)
+
+                new_positions = (double *)malloc(sizeof(double) * 3 * split_num_positions);
+                new_indices = (uint32_t *)malloc(sizeof(uint32_t) * 3 * split_num_triangles);
+                if (new_positions == NULL || new_indices == NULL)
                 {
-                    for (cc = 0; cc < 3; cc++)
-                    {
-                        uint32_t src = combined_tri_indices[(size_t)tt * 3 + cc];
-                        uint32_t dst = tt * 3 + cc;
-                        memcpy(&exp_positions[(size_t)dst * 3], &combined_positions[(size_t)src * 3], sizeof(double) * 3);
-                        exp_indices[dst] = dst;
-                    }
+                    fprintf(stderr, "Error: allocation failed copying split result for lumped model\n");
+                    free(new_positions); free(new_indices);
+                    prc_api_mesh_weld_and_split_free(nonmanifold_check_ctx, split_positions, split_indices);
+                    goto cleanup;
                 }
+                memcpy(new_positions, split_positions, sizeof(double) * 3 * split_num_positions);
+                memcpy(new_indices, split_indices, sizeof(uint32_t) * 3 * split_num_triangles);
+                prc_api_mesh_weld_and_split_free(nonmanifold_check_ctx, split_positions, split_indices);
+
                 free(combined_positions);
                 free(combined_tri_indices);
-                combined_positions = exp_positions;
-                combined_tri_indices = exp_indices;
-                tess->positions = exp_positions;
-                tess->num_positions = exp_count;
-                tess->tri_indices = exp_indices;
+                combined_positions = new_positions;
+                combined_tri_indices = new_indices;
+
+                one_face[0] = split_num_triangles;
+                tess->positions = combined_positions;
+                tess->num_positions = split_num_positions;
+                tess->tri_indices = combined_tri_indices;
+                tess->num_triangles = split_num_triangles;
             }
         }
 
@@ -1848,6 +1884,31 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
     uint32_t t, c;
     int ok = -1;
     prc_context *nonmanifold_check_ctx = prc_api_new_context(NULL);
+    /* SAFETY CAP (2026-08-15, Gear-Box surgical-split regression): real-
+       Acrobat bisection on a real 30-part file found that applying
+       prc_api_mesh_weld_and_split's fix to 8 of its parts works, but adding
+       a 9th (any 9th -- part 25 in isolation, or any other single part,
+       real-Acrobat-tested individually as fine) makes the whole file fail.
+       No single part's split content is at fault; this is a pure COUNT
+       threshold on how many parts in ONE file get the fix, matching the
+       already-documented, never-fully-explained {3,7,14}-style pure-count
+       Acrobat defect class elsewhere in this file (see
+       STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD's own neighboring comment) --
+       just a different count basis and a different specific number. Only
+       one data point exists for this exact count basis (8 confirmed safe,
+       9 confirmed unsafe, on one real file) -- capped at exactly 8 (the
+       highest directly-tested-safe value) rather than extrapolated any
+       higher, in the same spirit of "list only what's confirmed, don't
+       guess at a formula" as that other threshold's own comment. Applied
+       in per-component PROCESSING ORDER (deterministic and reproducible
+       for a given file, since that order never changes) -- the Nth+
+       component past this cap for a given file falls back to the OLD
+       plain-welded/unsplit TRIANGLES buffer instead, exactly as this
+       write facility behaved before the surgical-split fix existed. Not
+       gated behind a diagnostic env var: this is a real safety limit, not
+       an experiment. */
+    uint32_t surgical_split_count_this_file = 0;
+    static const uint32_t PRC_SURGICAL_SPLIT_PER_FILE_CAP = 8;
 
     memset(parts, 0, sizeof(*parts));
 
@@ -2145,6 +2206,9 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                     if (local_norm_indices) free(local_norm_indices);
                     goto cleanup;
                 }
+                /* Default/fallback value -- correct as-is when the split
+                   below doesn't run (tri_count unchanged), overwritten with
+                   the post-split count when it does. */
                 one_face[0] = tri_count;
                 fprintf(stderr, "Note: part %u contains a non-manifold vertex (disconnected triangle fans) -- "
                     "writing this component uncompressed to avoid a known Acrobat compatibility issue.\n",
@@ -2153,47 +2217,69 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                 tess->face_tri_counts = one_face;
                 tess->num_faces = 1;
 
-                /* DIAGNOSTIC (2026-07-26, mixed_chains investigation): also
-                   fully expand vertices (no index sharing AT ALL between
-                   any triangles, matching what a third-party PDF3D-SDK-
-                   based converter's own uncompressed output does for the
-                   same geometry -- see project memory) instead of using
-                   this component's normally-welded/shared buffer, gated by
-                   PRC_DIAG_EXPAND_TRIANGLES so the default behavior above
-                   (still deduplicated) is unaffected until this is proven
-                   causal. Zero behavior change when unset. */
-                if (prc_diag_getenv("PRC_DIAG_EXPAND_TRIANGLES") != NULL)
+                /* Surgically split the specific non-manifold vertex/vertices
+                   this component was flagged for (one extra position per
+                   disconnected fan, not one per triangle -- see
+                   prc_api_mesh_weld_and_split's own doc comment) instead of
+                   the earlier, much blunter fix this replaced (fully
+                   expanding every triangle corner into its own private
+                   vertex): real-Acrobat-tested to fix the same class of
+                   file, but at a fraction of the size cost and without
+                   losing smooth shading on the rest of the mesh. Re-welding
+                   the already-welded local_positions/local_tri_indices here
+                   is redundant (nothing new should merge) but harmless --
+                   the split logic needs to run over the same connectivity
+                   this component's own COMPRESSED attempt would have used. */
+                if (surgical_split_count_this_file < PRC_SURGICAL_SPLIT_PER_FILE_CAP &&
+                    prc_diag_surgical_split_part_allowed(c + 1))
                 {
-                    uint32_t exp_count = tri_count * 3;
-                    double *exp_positions = (double *)malloc(sizeof(double) * 3 * exp_count);
-                    uint32_t *exp_indices = (uint32_t *)malloc(sizeof(uint32_t) * exp_count);
-                    uint32_t tt, cc;
-                    if (exp_positions == NULL || exp_indices == NULL)
+                    double *split_positions = NULL;
+                    uint32_t *split_indices = NULL;
+                    uint32_t split_num_positions = 0, split_num_triangles = 0;
+                    double *new_positions;
+                    uint32_t *new_indices;
+
+                    surgical_split_count_this_file++;
+                    if (prc_api_mesh_weld_and_split(nonmanifold_check_ctx, local_positions, local_vertex_count,
+                            local_tri_indices, tri_count, comp_tolerance,
+                            &split_positions, &split_num_positions,
+                            &split_indices, &split_num_triangles) < 0)
                     {
-                        fprintf(stderr, "Error: allocation failed expanding part %u\n", (unsigned)(c + 1));
-                        free(exp_positions); free(exp_indices);
+                        fprintf(stderr, "Error: failed splitting non-manifold vertices for part %u\n", (unsigned)(c + 1));
                         free(local_positions); free(local_tri_indices);
                         if (local_normals) free(local_normals);
                         if (local_norm_indices) free(local_norm_indices);
                         goto cleanup;
                     }
-                    for (tt = 0; tt < tri_count; tt++)
+
+                    new_positions = (double *)malloc(sizeof(double) * 3 * split_num_positions);
+                    new_indices = (uint32_t *)malloc(sizeof(uint32_t) * 3 * split_num_triangles);
+                    if (new_positions == NULL || new_indices == NULL)
                     {
-                        for (cc = 0; cc < 3; cc++)
-                        {
-                            uint32_t src = local_tri_indices[(size_t)tt * 3 + cc];
-                            uint32_t dst = tt * 3 + cc;
-                            memcpy(&exp_positions[(size_t)dst * 3], &local_positions[(size_t)src * 3], sizeof(double) * 3);
-                            exp_indices[dst] = dst;
-                        }
+                        fprintf(stderr, "Error: allocation failed copying split result for part %u\n", (unsigned)(c + 1));
+                        free(new_positions); free(new_indices);
+                        prc_api_mesh_weld_and_split_free(nonmanifold_check_ctx, split_positions, split_indices);
+                        free(local_positions); free(local_tri_indices);
+                        if (local_normals) free(local_normals);
+                        if (local_norm_indices) free(local_norm_indices);
+                        goto cleanup;
                     }
+                    memcpy(new_positions, split_positions, sizeof(double) * 3 * split_num_positions);
+                    memcpy(new_indices, split_indices, sizeof(uint32_t) * 3 * split_num_triangles);
+                    prc_api_mesh_weld_and_split_free(nonmanifold_check_ctx, split_positions, split_indices);
+
                     free(local_positions);
                     free(local_tri_indices);
-                    local_positions = exp_positions;
-                    local_tri_indices = exp_indices;
-                    tess->positions = exp_positions;
-                    tess->num_positions = exp_count;
-                    tess->tri_indices = exp_indices;
+                    local_positions = new_positions;
+                    local_tri_indices = new_indices;
+                    local_vertex_count = split_num_positions;
+                    tri_count = split_num_triangles;
+
+                    one_face[0] = tri_count;
+                    tess->positions = local_positions;
+                    tess->num_positions = local_vertex_count;
+                    tess->tri_indices = local_tri_indices;
+                    tess->num_triangles = tri_count;
                 }
                 if (original_normals)
                 {
