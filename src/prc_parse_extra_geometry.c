@@ -2183,6 +2183,7 @@ prc_parse_crv_blend02_boundary(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
 
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
 
@@ -2360,6 +2361,8 @@ prc_parse_crv_circle(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
+
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->radius = prc_bitread_double(ctx, bit_state);
 
@@ -2458,6 +2461,7 @@ prc_parse_crv_ellipse(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
 
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->rx = prc_bitread_double(ctx, bit_state);
@@ -2581,6 +2585,8 @@ prc_parse_crv_helix01(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
+
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->type = prc_bitread_uint8(ctx, bit_state);
     data->orientation = prc_bitread_bit(ctx, bit_state);
@@ -2635,6 +2641,7 @@ prc_parse_crv_hyperbola(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
 
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->semi_axis_image = prc_bitread_double(ctx, bit_state); /* Different than spec */
@@ -2691,6 +2698,7 @@ prc_parse_crv_intersection(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
 
     code = prc_parse_ptr_surface(ctx, bit_state, &data->surface1);
@@ -2770,6 +2778,7 @@ prc_parse_crv_line(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
 
     return 0;
@@ -2833,12 +2842,11 @@ prc_parse_crv_parabola(prc_context *ctx, prc_bit_state *bit_state,
     }
 
     data->has_transform = prc_bitread_bit(ctx, bit_state);
-
     if (data->has_transform)
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
-
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->focal_length = prc_bitread_double(ctx, bit_state);
     data->type = prc_bitread_uint32(ctx, bit_state);
@@ -2895,7 +2903,7 @@ prc_parse_crv_polyline(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
-
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->number_of_points = prc_bitread_uint32(ctx, bit_state);
     is_3d = data->curve_data.is_3d_flag;
@@ -3954,7 +3962,7 @@ prc_parse_content_surface(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
-/* Table 288 � PRC_TYPE_SURF_Blend01 */
+/* Table 288 PRC_TYPE_SURF_Blend01 */
 static int
 prc_parse_surf_blend01(prc_context *ctx, prc_bit_state *bit_state,
     prc_surf_blend01 *data, uint8_t read_tag)
@@ -3982,7 +3990,11 @@ prc_parse_surf_blend01(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_curve(ctx, bit_state, &data->center_curve);
@@ -4042,6 +4054,7 @@ prc_parse_surf_blend02(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_surface(ctx, bit_state, &data->bound_surface0);
@@ -4134,6 +4147,7 @@ prc_parse_surf_blend03(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     data->number_of_elements = prc_bitread_int32(ctx, bit_state); /* Unsigned int ?? */
@@ -4387,6 +4401,7 @@ prc_parse_surf_cone(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
     data->radius = prc_bitread_double(ctx, bit_state);
     data->semi_angle = prc_bitread_double(ctx, bit_state);
@@ -4426,7 +4441,7 @@ prc_parse_surf_cylinder(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
-
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
     data->radius = prc_bitread_double(ctx, bit_state);
 
@@ -4459,7 +4474,13 @@ prc_parse_surf_cylindrical(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_surface for surface_data\n");
         return code;
     }
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_surface(ctx, bit_state, &data->base_surface);
@@ -4474,7 +4495,7 @@ prc_parse_surf_cylindrical(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
-/* Table 303 � PRC_TYPE_SURF_Offset */
+/* Table 303 PRC_TYPE_SURF_Offset */
 static int
 prc_parse_surf_offset(prc_context *ctx, prc_bit_state *bit_state,
     prc_surf_offset *data, uint8_t read_tag)
@@ -4500,7 +4521,12 @@ prc_parse_surf_offset(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_surface for surface_data\n");
         return code;
     }
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_surface(ctx, bit_state, &data->base_surface);
@@ -4688,6 +4714,7 @@ prc_parse_surf_sphere(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     data->radius = prc_bitread_double(ctx, bit_state);
@@ -4728,6 +4755,7 @@ prc_parse_surf_revolution(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
     data->tolerance = prc_bitread_double(ctx, bit_state);
 
@@ -4778,6 +4806,7 @@ prc_parse_surf_extrusion(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
     data->sweep_vector = prc_parse_3d_vector(ctx, bit_state);
 
@@ -4818,7 +4847,11 @@ prc_parse_surf_from_curves(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_surface for surface_data\n");
         return code;
     }
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     data->origin = prc_parse_3d_vector(ctx, bit_state);
@@ -4872,6 +4905,7 @@ prc_parse_surf_torus(prc_context *ctx, prc_bit_state *bit_state,
     {
         prc_parse_3d_transform(ctx, bit_state, &data->transform);
     }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
     data->major_radius = prc_bitread_double(ctx, bit_state);
     data->minor_radius = prc_bitread_double(ctx, bit_state);

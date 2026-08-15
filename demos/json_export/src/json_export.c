@@ -1119,7 +1119,7 @@ cleanup:
         if (data != NULL)
         {
             prc_api_release_data(ctx, data, table.tesses, table.num_tess,
-                                  NULL, 0, model_tree);
+                                  NULL, 0, NULL, 0, model_tree);
         }
 
         code = prc_api_release_context(ctx);

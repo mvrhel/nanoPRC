@@ -217,7 +217,7 @@ count_triangles_and_bbox(prc_context *ctx, const char *path, roundtrip_stats *ou
 
 cleanup:
     if (data != NULL)
-        prc_api_release_data(ctx, data, tesses, total_tess, NULL, 0, model_tree);
+        prc_api_release_data(ctx, data, tesses, total_tess, NULL, 0, NULL, 0, model_tree);
     return ok;
 }
 

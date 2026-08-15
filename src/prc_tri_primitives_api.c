@@ -2986,7 +2986,8 @@ prc_api_get_line_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
 PRC_EXPORT int
 prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
-    prc_api_product *api_tree, uint32_t tess_index_in, prc_api_tess *api_tess)
+    prc_api_product *api_tree, uint32_t exact_object_index, uint32_t shell_index,
+    uint32_t face_index, uint32_t tess_index, prc_api_tess *api_tess_array_in)
 {
     prc_data *data = (prc_data *)data_in;
     prc_exact_geom_tess_t tess_type;
@@ -3005,17 +3006,34 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
     prc_internal_graph_style style;
     float color[4] = { 0, 0, 0, 1 };
     uint8_t had_defined_style = 0;
+    prc_api_tess *curr_tess = &api_tess_array_in[exact_object_index];
+    prc_api_face *face_out;
+    prc_internal_api_face *face_out_reserved = NULL;
 
-    if (tess_index_in >= data->exact_geom_tess_count)
+    if (exact_object_index >= data->exact_geom_tess_count)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER,
             "Exact geometry tessellation index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
-    tess_type = data->exact_geom_tess[tess_index_in].type;
-    biased_style_index = data->exact_geom_tess[tess_index_in].biased_style_index;
-    file_index = data->exact_geom_tess[tess_index_in].file_index;
+    if (shell_index >= data->exact_geom_tess[exact_object_index].number_of_shells)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Exact geometry shell index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
+        return PRC_API_ERROR_PARAMETER;
+    }
+
+    if (face_index >= data->exact_geom_tess[exact_object_index].shells[shell_index].number_of_faces)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Exact geometry face index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
+        return PRC_API_ERROR_PARAMETER;
+    }
+
+    tess_type = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].type;
+    biased_style_index = data->exact_geom_tess[exact_object_index].biased_style_index;
+    file_index = data->exact_geom_tess[exact_object_index].file_index;
 
     if (biased_style_index > 0)
     {
@@ -3039,94 +3057,286 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
         color[3] = 1.0f;
     }
 
-    /* Lets do some initialization of the api_tess */
-    memset(api_tess, 0, sizeof(prc_api_tess));
+    /* Lets point to face that is in this shell */
+    face_out = &curr_tess->shells[shell_index].shell_faces[face_index];
+    face_out->is_material = is_material;
+    face_out->is_texture = is_texture;
+    curr_tess->type = PRC_API_EXACT_GEOM;
 
     if (tess_type == PRC_EXACT_GEOM_3D)
     {
-        /* Not implemented yet */
-        return 0;
+        prc_exact_geom_tess_data *tess_data = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].tess_data;
+        uint32_t num_vertices;
+        uint32_t num_triangles;
+        
+        face_out->is_exact_geom_wire = 0;
+
+        if (tess_data == NULL || tess_data->vertices == NULL ||
+            tess_data->triangles == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Missing exact geometry tessellation data in prc_api_get_exact_geometry_tessellation_vertices\n");
+            return PRC_API_ERROR_PARAMETER;
+        }
+
+        num_vertices = tess_data->number_of_vertices;
+        num_triangles = tess_data->number_of_triangles;
+
+        curr_tess->num_line_primitives = 0;
+        curr_tess->num_text_primitives = 0;
+        curr_tess->has_transparency = 0;
+        curr_tess->is_material = is_material;
+
+        if (!curr_tess->bound_box_initialized)
+        {
+            curr_tess->bounding_box_max[0] = -DBL_MAX;
+            curr_tess->bounding_box_max[1] = -DBL_MAX;
+            curr_tess->bounding_box_max[2] = -DBL_MAX;
+            curr_tess->bounding_box_min[0] = DBL_MAX;
+            curr_tess->bounding_box_min[1] = DBL_MAX;
+            curr_tess->bounding_box_min[2] = DBL_MAX;
+            curr_tess->bound_box_initialized = 1;
+        }
+
+        prc_api_initialize_face(ctx, face_out);
+        prc_api_initialize_texture(ctx, &face_out->texture);
+        face_out->num_graphic_primitives = 1;
+        face_out->face_has_single_style = 1;
+        face_out->single_style_index = biased_style_index;
+        face_out->is_material = is_material;
+        face_out->has_transparency = 0;
+        face_out->is_texture = 0;
+
+        face_out->reserved = (void *)prc_calloc(ctx, 1, sizeof(prc_internal_api_face));
+        if (face_out->reserved == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for exact geometry face reserved data in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto failure;
+        }
+
+        face_out_reserved = prc_face_internal_face(face_out);
+        face_out_reserved->style = (prc_internal_graph_style *)prc_calloc(ctx,
+            1, sizeof(prc_internal_graph_style));
+        if (face_out_reserved->style == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for exact geometry face style in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto failure;
+        }
+        face_out_reserved->owns_style = 1;
+        prc_internal_api_initialize_style(ctx, face_out_reserved->style);
+
+        if (is_material)
+        {
+            face_out->material = material;
+            memcpy(face_out_reserved->style->ambient_color, material.ambient, 3 * sizeof(float));
+            memcpy(face_out_reserved->style->diffuse_color, material.diffuse, 3 * sizeof(float));
+            memcpy(face_out_reserved->style->specular_color, material.specular, 3 * sizeof(float));
+            memcpy(face_out_reserved->style->emissive_color, material.emissive, 3 * sizeof(float));
+            face_out_reserved->style->ambient_alpha = material.ambient_alpha;
+            face_out_reserved->style->diffuse_alpha = material.diffuse_alpha;
+            face_out_reserved->style->specular_alpha = material.specular_alpha;
+            face_out_reserved->style->emissive_alpha = material.emissive_alpha;
+            face_out_reserved->style->shininess = material.shininess;
+            face_out_reserved->style->is_material = 1;
+        }
+        else
+        {
+            memcpy(face_out_reserved->style->diffuse_color, color, 3 * sizeof(float));
+            face_out_reserved->style->diffuse_alpha = color[3];
+            face_out_reserved->style->ambient_alpha = 1.0;
+            face_out_reserved->style->specular_alpha = 1.0;
+            face_out_reserved->style->emissive_alpha = 1.0;
+            face_out_reserved->style->is_material = 0;
+        }
+
+        face_out->face_vertices.num_vertices = num_vertices;
+        face_out->face_vertices.capacity = num_vertices;
+        face_out->face_vertices.vertices = (prc_api_vertex *)prc_calloc(ctx,
+            num_vertices, sizeof(prc_api_vertex));
+        if (face_out->face_vertices.vertices == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for exact geometry face vertex buffer in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto failure;
+        }
+
+        face_out_reserved->num_indices = num_triangles * 3;
+        face_out_reserved->capacity = face_out_reserved->num_indices;
+        face_out_reserved->vertex_indices = (uint32_t *)prc_calloc(ctx,
+            face_out_reserved->num_indices, sizeof(uint32_t));
+        if (face_out_reserved->vertex_indices == NULL)
+        {
+            prc_error(ctx, PRC_API_ERROR_MEMORY,
+                "Memory allocation failed for exact geometry triangle indices in prc_api_get_exact_geometry_tessellation_vertices\n");
+            code = PRC_API_ERROR_MEMORY;
+            goto failure;
+        }
+        memcpy(face_out_reserved->vertex_indices, tess_data->triangles,
+            face_out_reserved->num_indices * sizeof(uint32_t));
+        face_out_reserved->single_norm.num_triangles = num_triangles;
+
+        for (uint32_t i = 0; i < num_vertices; i++)
+        {
+            prc_api_vertex *vertex = &face_out->face_vertices.vertices[i];
+            prc_exact_geom_vertex *exact_vertex = &tess_data->vertices[i];
+
+            vertex->position[0] = exact_vertex->position[0];
+            vertex->position[1] = exact_vertex->position[1];
+            vertex->position[2] = exact_vertex->position[2];
+            vertex->normal[0] = exact_vertex->normal[0];
+            vertex->normal[1] = exact_vertex->normal[1];
+            vertex->normal[2] = exact_vertex->normal[2];
+            vertex->normal_set = 1;
+            vertex->uv_set = 0;
+
+            if (is_material)
+            {
+                memcpy(vertex->color, material.diffuse, 3 * sizeof(float));
+                vertex->color[3] = material.diffuse_alpha;
+                memcpy(vertex->diffuse, material.diffuse, 3 * sizeof(float));
+                memcpy(vertex->tint, material.ambient, 3 * sizeof(float));
+                memcpy(vertex->specular, material.specular, 3 * sizeof(float));
+                memcpy(vertex->emissive, material.emissive, 3 * sizeof(float));
+                vertex->shininess = material.shininess;
+                vertex->alpha = material.diffuse_alpha;
+                vertex->tri_has_material = 1;
+            }
+            else
+            {
+                memcpy(vertex->color, color, 4 * sizeof(float));
+                memcpy(vertex->diffuse, color, 3 * sizeof(float));
+                vertex->tint[0] = 1.0f;
+                vertex->tint[1] = 1.0f;
+                vertex->tint[2] = 1.0f;
+                vertex->specular[0] = 0.0f;
+                vertex->specular[1] = 0.0f;
+                vertex->specular[2] = 0.0f;
+                vertex->emissive[0] = 0.0f;
+                vertex->emissive[1] = 0.0f;
+                vertex->emissive[2] = 0.0f;
+                vertex->shininess = 0.0f;
+                vertex->alpha = color[3];
+                vertex->tri_has_material = 0;
+            }
+
+            if (curr_tess->bounding_box_max[0] < vertex->position[0])
+                curr_tess->bounding_box_max[0] = vertex->position[0];
+            if (curr_tess->bounding_box_max[1] < vertex->position[1])
+                curr_tess->bounding_box_max[1] = vertex->position[1];
+            if (curr_tess->bounding_box_max[2] < vertex->position[2])
+                curr_tess->bounding_box_max[2] = vertex->position[2];
+            if (curr_tess->bounding_box_min[0] > vertex->position[0])
+                curr_tess->bounding_box_min[0] = vertex->position[0];
+            if (curr_tess->bounding_box_min[1] > vertex->position[1])
+                curr_tess->bounding_box_min[1] = vertex->position[1];
+            if (curr_tess->bounding_box_min[2] > vertex->position[2])
+                curr_tess->bounding_box_min[2] = vertex->position[2];
+        }
+#if 0
+        printf("prc_api_get_exact_geometry_tessellation_vertices: tess_index=%u num_vertices=%u num_triangles=%u\n",
+            tess_index, num_vertices, num_triangles);
+        for (uint32_t i = 0; i < num_vertices; i++)
+        {
+            prc_api_vertex *vertex = &face_out->face_vertices.vertices[i];
+            printf("  Vertex %u: Pos(%f, %f, %f) Normal(%f, %f, %f) Color(%f, %f, %f, %f)\n",
+                i,
+                vertex->position[0], vertex->position[1], vertex->position[2],
+                vertex->normal[0], vertex->normal[1], vertex->normal[2],
+                vertex->color[0], vertex->color[1], vertex->color[2], vertex->color[3]);
+        }
+        for (uint32_t i = 0; i < num_triangles; i++)
+        {
+            printf("  Triangle %u: [%u, %u, %u]\n",
+                i,
+                face_out_reserved->vertex_indices[i * 3],
+                face_out_reserved->vertex_indices[i * 3 + 1],
+                face_out_reserved->vertex_indices[i * 3 + 2]);
+        }
+#endif
     }
     else if (tess_type == PRC_EXACT_GEOM_WIRE)
     {
         /* Wire case. We simply have a set of vertices that we need to connect
-           with a line.  Create the primitives for this */
-        uint32_t num_points = data->exact_geom_tess[tess_index_in].wire_data->number_of_points;
+           with a line.  Create the primitives for this.  We will stick this
+           in the shell/face though */
+        prc_exact_geom_wire_data *wire_data = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].wire_data;
+        uint32_t num_points = wire_data->number_of_points;
 
-        api_tess->type = PRC_API_TESS_3D_Wire;
-        api_tess->tess_vertices.num_vertices = num_points;
-        api_tess->tess_vertices.capacity = num_points;
-        api_tess->tess_vertices.vertices = (prc_api_vertex *)prc_calloc(ctx, num_points, sizeof(prc_api_vertex));
-        if (api_tess->tess_vertices.vertices == NULL)
+        face_out->is_exact_geom_wire = 1;
+        face_out->is_material = 0;
+        face_out->is_texture = 0;
+
+        /* We will stick this in the shell/face as we could have multiple wires in these shells/faces */
+        face_out->face_vertices.num_vertices = num_points;
+        face_out->face_vertices.capacity = num_points;
+        face_out->face_vertices.vertices = (prc_api_vertex *)prc_calloc(ctx, num_points, sizeof(prc_api_vertex));
+        if (face_out->face_vertices.vertices == NULL)
         {
             prc_error(ctx, PRC_API_ERROR_MEMORY,
                 "Memory allocation failed for exact geometry wire vertex buffer in prc_api_get_exact_geometry_tessellation_vertices\n");
             return PRC_API_ERROR_MEMORY;
         }
 
-        api_tess->bounding_box_max[0] = -DBL_MAX;
-        api_tess->bounding_box_max[1] = -DBL_MAX;
-        api_tess->bounding_box_max[2] = -DBL_MAX;
-        api_tess->bounding_box_min[0] = DBL_MAX;
-        api_tess->bounding_box_min[1] = DBL_MAX;
-        api_tess->bounding_box_min[2] = DBL_MAX;
+        if (!curr_tess->bound_box_initialized)
+        {
+            curr_tess->bounding_box_max[0] = -DBL_MAX;
+            curr_tess->bounding_box_max[1] = -DBL_MAX;
+            curr_tess->bounding_box_max[2] = -DBL_MAX;
+            curr_tess->bounding_box_min[0] = DBL_MAX;
+            curr_tess->bounding_box_min[1] = DBL_MAX;
+            curr_tess->bounding_box_min[2] = DBL_MAX;
+            curr_tess->bound_box_initialized = 1;
+        }
 
         for (uint32_t i = 0; i < num_points; i++)
         {
-            api_tess->tess_vertices.vertices[i].position[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
-            api_tess->tess_vertices.vertices[i].position[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
-            api_tess->tess_vertices.vertices[i].position[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
+            face_out->face_vertices.vertices[i].position[0] = wire_data->points[i].x;
+            face_out->face_vertices.vertices[i].position[1] = wire_data->points[i].y;
+            face_out->face_vertices.vertices[i].position[2] = wire_data->points[i].z;
 
             /* Temp color for debug */
             if (is_material)
             {
-                memcpy(api_tess->tess_vertices.vertices[i].color, material.diffuse, 3 * sizeof(float));
-                api_tess->tess_vertices.vertices[i].color[3] = 1.0;
+                memcpy(face_out->face_vertices.vertices[i].color, material.diffuse, 3 * sizeof(float));
+                face_out->face_vertices.vertices[i].color[3] = 1.0;
             }
             else
             {
-                memcpy(api_tess->tess_vertices.vertices[i].color, color, 4 * sizeof(float));
+                memcpy(face_out->face_vertices.vertices[i].color, color, 4 * sizeof(float));
             }
 
-            if (api_tess->bounding_box_max[0] < data->exact_geom_tess[tess_index_in].wire_data->points[i].x)
-            {
-                api_tess->bounding_box_max[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
-            }
-            if (api_tess->bounding_box_max[1] < data->exact_geom_tess[tess_index_in].wire_data->points[i].y)
-            {
-                api_tess->bounding_box_max[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
-            }
-            if (api_tess->bounding_box_max[2] < data->exact_geom_tess[tess_index_in].wire_data->points[i].z)
-            {
-                api_tess->bounding_box_max[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
-            }
-            if (api_tess->bounding_box_min[0] > data->exact_geom_tess[tess_index_in].wire_data->points[i].x)
-            {
-                api_tess->bounding_box_min[0] = data->exact_geom_tess[tess_index_in].wire_data->points[i].x;
-            }
-            if (api_tess->bounding_box_min[1] > data->exact_geom_tess[tess_index_in].wire_data->points[i].y)
-            {
-                api_tess->bounding_box_min[1] = data->exact_geom_tess[tess_index_in].wire_data->points[i].y;
-            }
-            if (api_tess->bounding_box_min[2] > data->exact_geom_tess[tess_index_in].wire_data->points[i].z)
-            {
-                api_tess->bounding_box_min[2] = data->exact_geom_tess[tess_index_in].wire_data->points[i].z;
-            }
+            face_out->has_transparency = 0;
+            face_out->face_vertices.vertices[i].uv_set = false;
+            face_out->face_vertices.vertices[i].normal_set = false;
 
-            api_tess->has_transparency = 0;
-            api_tess->tess_vertices.vertices[i].uv_set = false;
-            api_tess->tess_vertices.vertices[i].normal_set = false;
+            if (curr_tess->bounding_box_max[0] < wire_data->points[i].x)
+                curr_tess->bounding_box_max[0] = wire_data->points[i].x;
+            if (curr_tess->bounding_box_max[1] < wire_data->points[i].y)
+                curr_tess->bounding_box_max[1] = wire_data->points[i].y;
+            if (curr_tess->bounding_box_max[2] < wire_data->points[i].z)
+                curr_tess->bounding_box_max[2] = wire_data->points[i].z;
+            if (curr_tess->bounding_box_min[0] > wire_data->points[i].x)
+                curr_tess->bounding_box_min[0] = wire_data->points[i].x;
+            if (curr_tess->bounding_box_min[1] > wire_data->points[i].y)
+                curr_tess->bounding_box_min[1] = wire_data->points[i].y;
+            if (curr_tess->bounding_box_min[2] > wire_data->points[i].z)
+                curr_tess->bounding_box_min[2] = wire_data->points[i].z;
         }
 
-        api_tess->num_line_primitives = 1;
-
+        /* Is a PRC_API_LINE or a PRC_API_LINE_STRIP */
+        face_out->num_graphic_primitives = 1;
         wire = (prc_internal_api_wire *)prc_calloc(ctx, 1, sizeof(prc_internal_api_wire));
         if (wire == NULL)
         {
             prc_error(ctx, PRC_API_ERROR_MEMORY,
                 "Memory allocation failed for wire primitive array in prc_api_get_exact_geometry_tessellation_vertices\n");
             code = PRC_API_ERROR_MEMORY;
-            goto wire_failure;
+            goto failure;
         }
 
         wire->num_indices = num_points;
@@ -3136,7 +3346,7 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
             prc_error(ctx, PRC_API_ERROR_MEMORY,
                 "Memory allocation failed for wire->vertex_indices in prc_api_get_exact_geometry_tessellation_vertices\n");
             code = PRC_API_ERROR_MEMORY;
-            goto wire_failure;
+            goto failure;
         }
 
         for (k = 0; k < wire->num_indices; k++)
@@ -3151,7 +3361,7 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
             wire->type = PRC_API_LINE_STRIP;
 
         /* Set the reserved data */
-        api_tess->reserved = (void *)wire;
+        face_out->reserved = (void *)wire;
     }
     else
     {
@@ -3162,35 +3372,73 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
 
     /* Associate the api_tess with the model tree part */
     if (api_tree == NULL)
-        return PRC_API_ERROR;
+    {
+        code = PRC_API_ERROR;
+        goto failure;
+    }
 
     reserve = (prc_api_child_reserve *)api_tree->reserved;
-    reserve->parts[data->exact_geom_tess[tess_index_in].part_reserve_index].tess = api_tess;
+    reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].tess = curr_tess;
+    printf("prc_api_get_exact_geometry_tessellation_vertices: associate tess_index=%u reserve_part_index=%u part_name=%s tess_ptr=%p num_rep_items=%zu\n",
+        tess_index,
+        data->exact_geom_tess[exact_object_index].part_reserve_index,
+        reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].name != NULL ?
+            reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].name : "<null>",
+        (void *)reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].tess,
+        reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].num_rep_items);
 
     return 0;
 
-wire_failure:
-    if (wire != NULL)
+failure:
+    if (tess_type == PRC_EXACT_GEOM_3D)
     {
-        if (wire->vertex_indices != NULL)
+        if (face_out->reserved != NULL)
         {
-            prc_free(ctx, wire->vertex_indices);
-            wire->vertex_indices = NULL;
+            face_out_reserved = prc_face_internal_face(face_out);
+            if (face_out_reserved->vertex_indices != NULL)
+            {
+                prc_free(ctx, face_out_reserved->vertex_indices);
+                face_out_reserved->vertex_indices = NULL;
+            }
+            if (face_out_reserved->style != NULL)
+            {
+                prc_free(ctx, face_out_reserved->style);
+                face_out_reserved->style = NULL;
+            }
+            prc_free(ctx, face_out->reserved);
+            face_out->reserved = NULL;
         }
-        prc_free(ctx, wire);
-        wire = NULL;
-    }
 
-    if (api_tess->tess_vertices.vertices != NULL)
+        if (face_out->face_vertices.vertices != NULL)
+        {
+            prc_free(ctx, face_out->face_vertices.vertices);
+            face_out->face_vertices.vertices = NULL;
+            face_out->face_vertices.num_vertices = 0;
+            face_out->face_vertices.capacity = 0;
+        }
+    }
+    else if (tess_type == PRC_EXACT_GEOM_WIRE)
     {
-        prc_free(ctx, api_tess->tess_vertices.vertices);
-        api_tess->tess_vertices.vertices = NULL;
-        api_tess->tess_vertices.num_vertices = 0;
-        api_tess->tess_vertices.capacity = 0;
+        if (wire != NULL)
+        {
+            if (wire->vertex_indices != NULL)
+            {
+                prc_free(ctx, wire->vertex_indices);
+                wire->vertex_indices = NULL;
+            }
+            prc_free(ctx, wire);
+            wire = NULL;
+        }
+
+        if (face_out->face_vertices.vertices != NULL)
+        {
+            prc_free(ctx, face_out->face_vertices.vertices);
+            face_out->face_vertices.vertices = NULL;
+            face_out->face_vertices.num_vertices = 0;
+            face_out->face_vertices.capacity = 0;
+        }
     }
 
-    api_tess->num_line_primitives = 0;
-    api_tess->reserved = NULL;
     return code;
 }
 
@@ -5973,6 +6221,28 @@ prc_api_number_of_materials(prc_context *ctx, prc_api_data data_in, const prc_ap
         return 0;
     }
 
+    if (tess_type == PRC_API_EXACT_GEOM)
+    {
+        /* We need to dig into the shells and faces for this one */
+        uint32_t num_shells = tess->num_shells;
+        uint32_t num_materials = 0;
+
+        for (uint32_t k = 0; k < num_shells; k++)
+        {
+            uint32_t num_faces_in_shell = tess->shells[k].num_faces;
+
+            for (uint16_t j = 0; j < num_faces_in_shell; j++)
+            {
+                prc_api_face face = tess->shells[k].shell_faces[j];
+                if (face.is_material)
+                {
+                    num_materials++;
+                }
+            }
+        }
+        return num_materials;
+    }
+
     /* Just return the number of faces. We will either have the default material
        or the encoded material */
     return num_faces;
@@ -6002,6 +6272,20 @@ prc_api_get_num_graphics_primitives(prc_context *ctx, prc_api_data data_in,
     {
         //return tess->num_line_primitives + tess->num_text_primitives;
         return tess->num_line_primitives;
+    }
+
+    if (tess_type == PRC_API_EXACT_GEOM)
+    {
+        /* We need to dig into the shells and faces for this one */
+        uint32_t num_shells = tess->num_shells;
+        uint32_t num_faces = 0;
+
+        for (k = 0; k < num_shells; k++)
+        {
+            uint32_t num_faces_in_shell = tess->shells[k].num_faces;
+            num_faces += num_faces_in_shell;
+        }
+        return num_faces;
     }
 
     for (k = 0; k < num_faces; k++)
@@ -6035,6 +6319,23 @@ prc_api_get_face_vertices(prc_context *ctx, const prc_api_tess *tess,
     prc_api_tess_type_t tess_type;
 
     tess_type = tess->type;
+
+    if (tess_type == PRC_API_EXACT_GEOM)
+    {
+        uint32_t shell_index_out, face_index_out;
+
+        int code = prc_api_helper_exact_geom_flat_face_to_shell_face(ctx,
+            tess, face_index, &shell_index_out, &face_index_out);
+        if (code < 0)
+        {
+            *vertex_count = 0;
+            *vertices = NULL;
+            return code;
+        }
+        *vertex_count = (uint32_t) tess->shells[shell_index_out].shell_faces[face_index_out].face_vertices.num_vertices;
+        *vertices = tess->shells[shell_index_out].shell_faces[face_index_out].face_vertices.vertices;
+        return 0;
+    }
 
     if (face_index > tess->num_faces - 1)
         return PRC_API_ERROR_PARAMETER;
@@ -6080,6 +6381,38 @@ prc_api_get_graphics_primitive(prc_context *ctx, prc_api_data data_in,
         graphics_object->type = PRC_API_TRIANGLES;
         graphics_object->num_indices = face->num_indices;
         graphics_object->indices = face->vertex_indices;
+        return 0;
+    }
+
+    if (tess_type == PRC_API_EXACT_GEOM)
+    {
+        uint32_t shell_index_out, face_index_out;
+
+        int code = prc_api_helper_exact_geom_flat_face_to_shell_face(ctx,
+            tess, face_index, &shell_index_out, &face_index_out);
+        if (code < 0)
+        {
+            graphics_object->type = PRC_API_TRIANGLES;
+            graphics_object->num_indices = 0;
+            graphics_object->indices = NULL;
+            return code;
+        }
+
+        if (tess->shells[shell_index_out].shell_faces[face_index_out].is_exact_geom_wire)
+        {
+            prc_internal_api_wire *wire = (prc_internal_api_wire *)tess->shells[shell_index_out].shell_faces[face_index_out].reserved;
+            graphics_object->type = wire[graphics_index].type;
+            graphics_object->num_indices = wire[graphics_index].num_indices;
+            graphics_object->indices = wire[graphics_index].vertex_indices;
+        }
+        else
+        {
+            /* Must be triangles */
+            face = (prc_internal_api_face *)tess->shells[shell_index_out].shell_faces[face_index_out].reserved;
+            graphics_object->type = PRC_API_TRIANGLES;
+            graphics_object->num_indices = face->num_indices;
+            graphics_object->indices = face->vertex_indices;
+        }
         return 0;
     }
 

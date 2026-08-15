@@ -262,7 +262,7 @@ int main(int argc, char **argv)
         prc_debug_index_swap_triggered_count, prc_debug_index_swap_total_count,
         prc_debug_index_swap_total_count ? 100.0 * (double)prc_debug_index_swap_triggered_count / (double)prc_debug_index_swap_total_count : 0.0);
 
-    prc_api_release_data(ctx, data, tesses, totalTesselations, NULL, 0, model_tree);
+    prc_api_release_data(ctx, data, tesses, totalTesselations, NULL, 0, NULL, 0, model_tree);
     prc_api_release_context(ctx);
     return (total_boundary > 0 || total_nonmanifold > 0) ? 3 : 0;
 }

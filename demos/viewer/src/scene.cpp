@@ -377,6 +377,17 @@ static void setBounds(prc_context *ctx, Product *app_child, prc_api_tess *tess,
     Vector4 min_bound;
     Vector4 max_bound;
 
+    printf("setBounds: product=%s tess=%p type=%d bbox_min=[%g,%g,%g] bbox_max=[%g,%g,%g]\n",
+        app_child->name(),
+        (void *)tess,
+        tess != NULL ? (int)tess->type : -1,
+        tess != NULL ? tess->bounding_box_min[0] : 0.0,
+        tess != NULL ? tess->bounding_box_min[1] : 0.0,
+        tess != NULL ? tess->bounding_box_min[2] : 0.0,
+        tess != NULL ? tess->bounding_box_max[0] : 0.0,
+        tess != NULL ? tess->bounding_box_max[1] : 0.0,
+        tess != NULL ? tess->bounding_box_max[2] : 0.0);
+
     app_child->setBoundingBox(tess->bounding_box_min, tess->bounding_box_max);
 
     /* Adjust the bounding boxes for the model by the matrix */
@@ -425,6 +436,12 @@ void Scene::addRepItems(prc_context *ctx, prc_api_data data, prc_api_part *api_p
         /* Get the tessellation for this model (part) */
         tess = prc_api_get_ri_tessellation(ctx, api_part, k);
         tess_line = prc_api_get_ri_line_tessellation(ctx, api_part, k);
+
+        printf("addRepItems: rep_item=%s tess=%p tess_line=%p num_rep_items=%zu\n",
+            api_part->rep_items[k].name,
+            (void *)tess,
+            (void *)tess_line,
+            api_part->rep_items[k].num_rep_items);
 
         if (tess != NULL)
         {
@@ -503,7 +520,8 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
     *product_count += 1;
 
     /* Special yoga pose if we have a part */
-    include_part = has_part && (api_product->part->num_rep_items > 0);
+    include_part = has_part &&
+        (api_product->part->num_rep_items > 0 || api_product->part->tess != NULL);
     start_index = include_part ? 1 : 0;
 
     if (api_product->num_children > 0 || include_part)
@@ -527,9 +545,25 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
             }
             *product_count += 1;
 
-            /* Add the RI items as children of the part child Product (app_child) */
-            addRepItems(ctx, data, api_product->part, app_child, heap, product_count,
-                minBound, maxBound, location, matrix);
+            printf("convertTree: part=%s direct_tess=%p num_rep_items=%zu\n",
+                api_product->part->name,
+                (void *)api_product->part->tess,
+                api_product->part->num_rep_items);
+
+            if (api_product->part->tess != NULL)
+            {
+                setBounds(ctx, app_child, api_product->part->tess, matrix,
+                    location.is_identity, minBound, maxBound);
+                app_child->attach(ctx, data, api_product->part->tess,
+                    *getTextRenderPtr());
+            }
+
+            if (api_product->part->num_rep_items > 0)
+            {
+                /* Add the RI items as children of the part child Product (app_child) */
+                addRepItems(ctx, data, api_product->part, app_child, heap, product_count,
+                    minBound, maxBound, location, matrix);
+            }
         }
 
         /* Now go through the children that this may have beyond the part we just added.
@@ -664,7 +698,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     uint32_t totalExactGeomTess;
     uint32_t totalLineTesselations;
     int code;
-    uint32_t j, k;
+    uint32_t i, j, k;
     int context_release_code;
 
     prc_context *ctx = prc_api_new_context(NULL);
@@ -839,22 +873,76 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
         }
     }
 
-    /* Now deal with any of the exact geometry tessellations */
+    /* Now deal with any of the exact geometry tessellations. These are wrapped
+       in a shell that has faces. So an extra layer. The number totalExactGeomTess
+       is related to the sum over exact_geom_object_count over the number of shells
+       in the exact geom count and over the number of face in the shell. We 
+       will pack these into a single "object" tessellation that is also actually
+       broken into shells and faces */
     if (totalExactGeomTess > 0)
     {
         tesses_exact = new prc_api_tess[totalExactGeomTess];
         if (tesses_exact == NULL)
         {
+            printf("Scene::load: failed to allocate exact tessellation array\n");
+            exit(1);
+        }
+        uint32_t tess_count = 0;
+        uint32_t exact_geom_object_count = prc_api_get_number_exact_geom_objects(ctx, data);
+        uint32_t shell_count, face_count;
+
+        if (tesses_exact == NULL)
+        {
             printf("Scene::load: failed to allocate exact geometry tessellation array\n");
             exit(1);
         }
-        for (k = 0; k < totalExactGeomTess; k++)
+        for (k = 0; k < exact_geom_object_count; k++)
         {
-            code = prc_api_get_exact_geometry_tessellation_vertices(ctx, data, model_tree, k, &tesses_exact[k]);
-            if (code < 0)
+            /* Lets do some initialization of the api_tess */
+            memset(&tesses_exact[k], 0, sizeof(prc_api_tess));
+
+            /* Get the number of shells */
+            shell_count = prc_api_get_number_exact_geom_shells(ctx, data, k);
+            tesses_exact[k].num_shells = shell_count;
+
+            /* Allocate the shells */
+            tesses_exact[k].shells = new prc_api_shell[shell_count];
+            if (tesses_exact[k].shells == NULL)
             {
-                printf("Scene::load: prc_api_get_exact_geometry_tessallation_vertices failed\n");
+                printf("Scene::load: failed to allocate exact tessellation shell array\n");
                 exit(1);
+            }
+
+            for (j = 0; j < shell_count; j++)
+            {
+                face_count = prc_api_get_number_exact_geom_faces(ctx, data, k, j);
+                tesses_exact[k].shells[j].num_faces = face_count;
+                tesses_exact[k].shells[j].shell_faces = new prc_api_face[face_count];
+                if (tesses_exact[k].shells[j].shell_faces == NULL)
+                {
+                    printf("Scene::load: failed to allocate exact tessellation face array\n");
+                    exit(1);
+                }
+
+                for (i = 0; i < face_count; i++)
+                {
+                    code = prc_api_get_exact_geometry_tessellation_vertices(ctx,
+                                data, model_tree, k, j, i, tess_count,
+                                tesses_exact);
+                    if (code < 0)
+                    {
+                        printf("Scene::load: prc_api_get_exact_geometry_tessallation_vertices failed\n");
+                        exit(1);
+                    }
+                    tess_count++;
+                    if (tess_count > totalExactGeomTess)
+                    {
+                        /* This is an error we should not be in this situation */
+                        printf("Scene::load: totalExactGeomTess=%u but tess_count=%u\n",
+                            totalExactGeomTess, tess_count);
+                        exit(1);
+                    }
+                }
             }
         }
     }
@@ -983,7 +1071,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
 
     /* Clean up */
     prc_api_release_data(ctx, data, tesses, totalTesselations, tesses_line,
-        totalLineTesselations, model_tree);
+        totalLineTesselations, tesses_exact, totalExactGeomTess, model_tree);
 
     for (uint32_t i = 0; i < totalTesselations; i++)
         delete[] tesses[i].tess_faces;
@@ -992,6 +1080,11 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     if (totalLineTesselations > 0)
     {
         delete[] tesses_line;
+    }
+
+    if (totalExactGeomTess > 0)
+    {
+        delete[] tesses_exact;
     }
 
     context_release_code = prc_api_release_context(ctx);

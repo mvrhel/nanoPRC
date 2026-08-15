@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -722,9 +723,11 @@ public:
                 owner_->raw(),
                 data_,
                 tessellations_.empty() ? nullptr : tessellations_.data(),
-                static_cast<uint32_t>(tessellations_.size()),
+                num_tessellations_,
                 line_tessellations_.empty() ? nullptr : line_tessellations_.data(),
                 static_cast<uint32_t>(line_tessellations_.size()),
+                num_exact_geom_tessellations_ == 0 ? nullptr : (tessellations_.data() + exact_geom_offset_),
+                num_exact_geom_tessellations_,
                 model_tree_);
             data_ = nullptr;
             model_tree_ = nullptr;
@@ -735,7 +738,7 @@ public:
     Document& operator=(const Document&) = delete;
 
     Document(Document&& other) noexcept
-        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_), num_exact_geom_tessellations_(other.num_exact_geom_tessellations_), exact_geom_offset_(other.exact_geom_offset_) {
+        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), exact_geom_shells_storage_(std::move(other.exact_geom_shells_storage_)), exact_geom_faces_storage_(std::move(other.exact_geom_faces_storage_)), exact_geom_merged_vertices_storage_(std::move(other.exact_geom_merged_vertices_storage_)), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_), num_exact_geom_tessellations_(other.num_exact_geom_tessellations_), exact_geom_offset_(other.exact_geom_offset_) {
         other.data_ = nullptr;
         other.model_tree_ = nullptr;
         other.tessellation_initialized_ = false;
@@ -752,9 +755,11 @@ public:
                     owner_->raw(),
                     data_,
                     tessellations_.empty() ? nullptr : tessellations_.data(),
-                    static_cast<uint32_t>(tessellations_.size()),
+                    num_tessellations_,
                     line_tessellations_.empty() ? nullptr : line_tessellations_.data(),
                     static_cast<uint32_t>(line_tessellations_.size()),
+                    num_exact_geom_tessellations_ == 0 ? nullptr : (tessellations_.data() + exact_geom_offset_),
+                    num_exact_geom_tessellations_,
                     model_tree_);
             }
             owner_ = std::move(other.owner_);
@@ -768,6 +773,9 @@ public:
             tess_faces_storage_ = std::move(other.tess_faces_storage_);
             line_tess_faces_storage_ = std::move(other.line_tess_faces_storage_);
             line_tess_map_ = std::move(other.line_tess_map_);
+            exact_geom_shells_storage_ = std::move(other.exact_geom_shells_storage_);
+            exact_geom_faces_storage_ = std::move(other.exact_geom_faces_storage_);
+            exact_geom_merged_vertices_storage_ = std::move(other.exact_geom_merged_vertices_storage_);
             tessellation_initialized_ = other.tessellation_initialized_;
             num_tessellations_ = other.num_tessellations_;
             num_line_tessellations_ = other.num_line_tessellations_;
@@ -936,11 +944,12 @@ public:
     py::dict exact_geometry_tessellation_info(uint32_t exact_tess_index) {
         initialize_tessellations();
         const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
+        const std::vector<prc_api_vertex>& vertices = get_exact_geometry_merged_vertices(exact_tess_index);
 
         py::dict result;
         result["index"] = py::int_(exact_tess_index);
         result["type"] = py::int_(static_cast<int>(tess.type));
-        result["vertex_count"] = py::int_(static_cast<uint32_t>(tess.tess_vertices.num_vertices));
+        result["vertex_count"] = py::int_(static_cast<uint32_t>(vertices.size()));
         return result;
     }
 
@@ -1077,17 +1086,17 @@ public:
 
     uint32_t exact_geometry_vertex_count(uint32_t exact_tess_index) {
         initialize_tessellations();
-        const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
-        return static_cast<uint32_t>(tess.tess_vertices.num_vertices);
+        return static_cast<uint32_t>(get_exact_geometry_merged_vertices(exact_tess_index).size());
     }
 
     py::array exact_geometry_vertex_positions(uint32_t exact_tess_index) {
         initialize_tessellations();
-        const prc_api_tess& tess = get_exact_geometry_tessellation(exact_tess_index);
+        const std::vector<prc_api_vertex>& vertices = get_exact_geometry_merged_vertices(exact_tess_index);
         py::object owner = py::cast(shared_from_this());
+        prc_api_tess_vertex_buffer buffer{ vertices.size(), vertices.size(), const_cast<prc_api_vertex*>(vertices.data()) };
         return make_float_array_from_vertex_field(
-            tess.tess_vertices,
-            tess.tess_vertices.vertices ? tess.tess_vertices.vertices[0].position : nullptr,
+            buffer,
+            buffer.vertices ? buffer.vertices[0].position : nullptr,
             3,
             owner);
     }
@@ -1112,7 +1121,9 @@ private:
 
         num_tessellations_ = num_tess;
         num_line_tessellations_ = num_line_tess;
-        num_exact_geom_tessellations_ = num_exact_geom_tess;
+
+        uint32_t exact_geom_object_count = prc_api_get_number_exact_geom_objects(owner_->raw(), data_);
+        num_exact_geom_tessellations_ = exact_geom_object_count;
         exact_geom_offset_ = num_tessellations_;
 
         tessellations_.assign(num_tessellations_ + num_exact_geom_tessellations_, prc_api_tess{});
@@ -1182,16 +1193,65 @@ private:
             }
         }
 
+        exact_geom_shells_storage_.assign(num_exact_geom_tessellations_, {});
+        exact_geom_faces_storage_.assign(num_exact_geom_tessellations_, {});
+        exact_geom_merged_vertices_storage_.assign(num_exact_geom_tessellations_, {});
+        exact_geom_tess_counter_ = 0;
+
         for (uint32_t exact_tess_index = 0; exact_tess_index < num_exact_geom_tessellations_; ++exact_tess_index) {
             uint32_t storage_index = exact_geom_offset_ + exact_tess_index;
-            int code = prc_api_get_exact_geometry_tessellation_vertices(
-                owner_->raw(),
-                data_,
-                model_tree_,
-                exact_tess_index,
-                &tessellations_[storage_index]);
-            if (code != 0) {
-                throw std::runtime_error("prc_api_get_exact_geometry_tessellation_vertices failed");
+            prc_api_tess& obj_tess = tessellations_[storage_index];
+            uint32_t shell_count = prc_api_get_number_exact_geom_shells(owner_->raw(), data_, exact_tess_index);
+
+            exact_geom_shells_storage_[exact_tess_index].resize(shell_count);
+            exact_geom_faces_storage_[exact_tess_index].resize(shell_count);
+
+            for (uint32_t shell_index = 0; shell_index < shell_count; ++shell_index) {
+                uint32_t face_count = prc_api_get_number_exact_geom_faces(owner_->raw(), data_, exact_tess_index, shell_index);
+                exact_geom_faces_storage_[exact_tess_index][shell_index].resize(face_count);
+                exact_geom_shells_storage_[exact_tess_index][shell_index].num_faces = face_count;
+                exact_geom_shells_storage_[exact_tess_index][shell_index].shell_faces =
+                    face_count ? exact_geom_faces_storage_[exact_tess_index][shell_index].data() : nullptr;
+            }
+
+            obj_tess.num_shells = shell_count;
+            obj_tess.shells = shell_count ? exact_geom_shells_storage_[exact_tess_index].data() : nullptr;
+
+            /* tess_index below is just a running counter across every face of every object,
+               mirroring demos/viewer/src/scene.cpp; the API writes into obj_tess regardless of its value */
+            for (uint32_t shell_index = 0; shell_index < shell_count; ++shell_index) {
+                uint32_t face_count = static_cast<uint32_t>(exact_geom_faces_storage_[exact_tess_index][shell_index].size());
+                for (uint32_t face_index = 0; face_index < face_count; ++face_index) {
+                    int code = prc_api_get_exact_geometry_tessellation_vertices(
+                        owner_->raw(), data_, model_tree_, exact_tess_index, shell_index, face_index,
+                        exact_geom_tess_counter_++, &obj_tess);
+                    if (code != 0) {
+                        throw std::runtime_error("prc_api_get_exact_geometry_tessellation_vertices failed");
+                    }
+                }
+            }
+
+            /* Merge the per-face vertex buffers the call above populated into one flat buffer,
+               kept in our own storage (never handed to prc_api_release_data) so exact_geometry_*
+               accessors below can stay simple; obj_tess.tess_vertices itself is intentionally left
+               untouched/null since prc_api_release_exact_geometry_tessellation would try to free it */
+            std::vector<prc_api_vertex>& merged = exact_geom_merged_vertices_storage_[exact_tess_index];
+            size_t total_vertices = 0;
+            for (auto& shell_faces : exact_geom_faces_storage_[exact_tess_index]) {
+                for (auto& face : shell_faces) {
+                    total_vertices += face.face_vertices.num_vertices;
+                }
+            }
+            merged.resize(total_vertices);
+            size_t write_offset = 0;
+            for (auto& shell_faces : exact_geom_faces_storage_[exact_tess_index]) {
+                for (auto& face : shell_faces) {
+                    if (face.face_vertices.num_vertices > 0 && face.face_vertices.vertices != nullptr) {
+                        std::memcpy(&merged[write_offset], face.face_vertices.vertices,
+                            face.face_vertices.num_vertices * sizeof(prc_api_vertex));
+                        write_offset += face.face_vertices.num_vertices;
+                    }
+                }
             }
         }
 
@@ -1210,6 +1270,13 @@ private:
             throw std::out_of_range("Exact geometry tessellation index out of range");
         }
         return tessellations_[exact_geom_offset_ + exact_tess_index];
+    }
+
+    const std::vector<prc_api_vertex>& get_exact_geometry_merged_vertices(uint32_t exact_tess_index) const {
+        if (exact_tess_index >= num_exact_geom_tessellations_) {
+            throw std::out_of_range("Exact geometry tessellation index out of range");
+        }
+        return exact_geom_merged_vertices_storage_[exact_tess_index];
     }
 
     const prc_api_face& get_face(const prc_api_tess& tess, uint32_t face_index) const {
@@ -1231,6 +1298,10 @@ private:
     std::vector<std::vector<prc_api_face>> tess_faces_storage_;
     std::vector<std::vector<prc_api_face>> line_tess_faces_storage_;
     std::vector<int32_t> line_tess_map_;
+    std::vector<std::vector<prc_api_shell>> exact_geom_shells_storage_;
+    std::vector<std::vector<std::vector<prc_api_face>>> exact_geom_faces_storage_;
+    std::vector<std::vector<prc_api_vertex>> exact_geom_merged_vertices_storage_;
+    uint32_t exact_geom_tess_counter_ = 0;
     bool tessellation_initialized_ = false;
     uint32_t num_tessellations_ = 0;
     uint32_t num_line_tessellations_ = 0;

@@ -2544,7 +2544,7 @@ stl_import_count_tessellations(prc_context *ctx, const char *path, uint32_t *out
     if (code == 0)
         code = prc_api_get_number_tessellations(ctx, data, model_tree, out_num_tess, &num_line_tess, &num_extra_geom_tess);
 
-    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, model_tree);
+    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, model_tree);
     if (code != 0)
     {
         fprintf(stderr, "verification: failed reading back the model tree from %s\n", path);

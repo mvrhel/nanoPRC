@@ -858,7 +858,7 @@ int main(int argc, char *argv[])
             {
                 fprintf(stderr, "verification: failed reading back the model tree from %s\n", paths[p]);
                 prc_api_print_error_stack(ctx);
-                prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL);
+                prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
                 prc_api_release_context(ctx);
                 return 1;
             }
@@ -876,7 +876,7 @@ int main(int argc, char *argv[])
             printf("Verification (%s): tessellations=%u faces_in_tess0=%u\n",
                 labels[p], verified_tess[p], verified_faces[p]);
 
-            prc_api_release_data(ctx, data, NULL, 0, NULL, 0, model_tree);
+            prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, model_tree);
         }
 
         if (verified_tess[0] != verified_tess[1] || verified_faces[0] != verified_faces[1])

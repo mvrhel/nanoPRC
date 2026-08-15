@@ -338,7 +338,7 @@ int main(int argc, char **argv)
     }
 
     free(candidates);
-    prc_api_release_data(ctx, data, tesses, totalTesselations, NULL, 0, model_tree);
+    prc_api_release_data(ctx, data, tesses, totalTesselations, NULL, 0, NULL, 0, model_tree);
     prc_api_release_context(ctx);
     return (num_candidates > 0) ? 3 : 0;
 }

@@ -379,4 +379,11 @@ prc_tess_internal_position_normal_lookup(const prc_api_tess *t)
     return (prc_internal_api_position_normal_lookup *)t->reserved;
 }
 
+/* Used to map a flattend face index to the shell/face location in the
+   exact geometry */
+int
+prc_api_helper_exact_geom_flat_face_to_shell_face(prc_context *ctx,
+    const prc_api_tess *input_tess, uint32_t flat_face_index,
+    uint32_t *shell_index_out, uint32_t *face_index_out);
+
 #endif
