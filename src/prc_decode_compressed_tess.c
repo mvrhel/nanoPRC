@@ -661,6 +661,10 @@ prc_set_left_right_edge_indices(prc_context *ctx, const prc_tess_3d_compressed *
 
     /* swap x, y if needed */
     prc_debug_hooks_init();
+    right_base[0] = treated_tri->right_edge.edge_treatement_x;
+    right_base[1] = treated_tri->right_edge.edge_treatement_y;
+    left_base[0] = treated_tri->left_edge.edge_treatement_x;
+    left_base[1] = treated_tri->left_edge.edge_treatement_y;
     prc_debug_index_swap_total_count++;
     if (!prc_debug_disable_index_swap &&
         treated_tri->right_edge.edge_treatement_x > treated_tri->right_edge.edge_treatement_y)
@@ -730,6 +734,40 @@ prc_set_left_right_edge_indices(prc_context *ctx, const prc_tess_3d_compressed *
         treated_tri->right_edge.edge_status = PRC_EDGE_TREATED;
         treated_tri->left_edge.edge_status = PRC_EDGE_NOT_TREATED;
     }
+
+    /* PRC_TRACE_GATE: this function is nanoPRC's own analog of the
+       {a,b,far}-triple canonicalize_gate() step from the spec's own
+       EdgeBreaker-style traversal pseudocode -- left_edge/right_edge's
+       (x,y,z) triples are exactly (a,b,far), with x/y independently
+       swapped to ascending order per side and z (far) left untouched,
+       matching canonicalize_gate() field-for-field. The key structural
+       difference: nanoPRC recomputes x/y/z FRESH every triangle directly
+       from that triangle's own just-decoded treated_index[0..2] -- there
+       is no explicit stack carrying a stale "far" value forward from an
+       ancestor triangle's own pre-swap state the way a literal Gate-struct
+       push/pop model would. This trace exists to let that difference be
+       checked directly against an external hand-trace of the same file's
+       same triangles, e.g. against the wheel oracle's t=805-815 divergence
+       already reported upstream (gate index-canonicalization regression). */
+    if (ctx->trace_gate)
+    {
+        fprintf(stderr, "GATE tri=%d treated_index=(%u,%u,%u) normal_was_reversed=%u "
+            "right_pre_swap_ab=(%d,%d) right_swapped=%u right_edge(a,b,far)=(%d,%d,%d) "
+            "left_pre_swap_ab=(%d,%d) left_swapped=%u left_edge(a,b,far)=(%d,%d,%d) "
+            "edge_status=%u right_status=%s left_status=%s\n",
+            triangle_count, treated_tri->treated_index[0], treated_tri->treated_index[1],
+            treated_tri->treated_index[2], treated_tri->normal_was_reversed,
+            right_base[0], right_base[1], right_treatment_swap,
+            treated_tri->right_edge.edge_treatement_x, treated_tri->right_edge.edge_treatement_y,
+            treated_tri->right_edge.edge_treatement_z,
+            left_base[0], left_base[1], left_treatment_swap,
+            treated_tri->left_edge.edge_treatement_x, treated_tri->left_edge.edge_treatement_y,
+            treated_tri->left_edge.edge_treatement_z,
+            data->edge_status_array[triangle_count],
+            (treated_tri->right_edge.edge_status == PRC_EDGE_NOT_TREATED) ? "OPEN" : "closed",
+            (treated_tri->left_edge.edge_status == PRC_EDGE_NOT_TREATED) ? "OPEN" : "closed");
+    }
+
     return edge_count;
 }
 

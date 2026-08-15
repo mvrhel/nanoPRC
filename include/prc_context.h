@@ -104,10 +104,12 @@ struct prc_context_s
     prc_graphics_content_ctx graphics_content;
     uint32_t source_file_version;
     uint32_t current_file_index;
-    /* PRC_TRACE_REVERSED / PRC_TRACE_NORMALS: read once at context creation
-       instead of via getenv on every triangle/corner (see prc_new_context). */
+    /* PRC_TRACE_REVERSED / PRC_TRACE_NORMALS / PRC_TRACE_GATE: read once at
+       context creation instead of via getenv on every triangle/corner (see
+       prc_new_context). */
     uint8_t trace_reversed;
     uint8_t trace_normals;
+    uint8_t trace_gate;
  #if PRC_DEBUG_MEMORY
     prc_debug_memory *debug_memory;
     size_t debug_memory_size;
