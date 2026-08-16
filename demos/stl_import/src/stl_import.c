@@ -1908,7 +1908,22 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
        gated behind a diagnostic env var: this is a real safety limit, not
        an experiment. */
     uint32_t surgical_split_count_this_file = 0;
-    static const uint32_t PRC_SURGICAL_SPLIT_PER_FILE_CAP = 8;
+    /* PRC_DIAG_SURGICAL_SPLIT_CAP overrides the cap for testing only (the
+       cap is one empirical data point from one file, and a file needing
+       MORE than 8 splits -- Voxler-Demo-Inversion needs 9, HeavyDutyCaster
+       16 -- gets the known-defective unsplit fallback for the excess,
+       which is itself a confirmed Acrobat-blank-tree trigger. Being able
+       to A/B that trade-off against real Acrobat is the whole point). */
+    uint32_t PRC_SURGICAL_SPLIT_PER_FILE_CAP = 8;
+    {
+        const char *cap_ov = prc_diag_getenv("PRC_DIAG_SURGICAL_SPLIT_CAP");
+        if (cap_ov != NULL)
+        {
+            long v = strtol(cap_ov, NULL, 10);
+            if (v >= 0)
+                PRC_SURGICAL_SPLIT_PER_FILE_CAP = (uint32_t)v;
+        }
+    }
 
     memset(parts, 0, sizeof(*parts));
 
@@ -2230,6 +2245,20 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                    is redundant (nothing new should merge) but harmless --
                    the split logic needs to run over the same connectivity
                    this component's own COMPRESSED attempt would have used. */
+                if (surgical_split_count_this_file >= PRC_SURGICAL_SPLIT_PER_FILE_CAP &&
+                    prc_diag_surgical_split_part_allowed(c + 1))
+                {
+                    /* Past the cap: this component keeps the old
+                       plain-welded/unsplit TRIANGLES buffer, which is
+                       itself a known real-Acrobat blank-tree trigger for
+                       non-manifold-fan content. Say so rather than
+                       silently shipping the known-bad form. */
+                    fprintf(stderr, "Note: part %u needs the non-manifold vertex split but this file has "
+                        "already used its per-file cap of %u -- writing it unsplit (a known Acrobat "
+                        "compatibility risk). Set PRC_DIAG_SURGICAL_SPLIT_CAP to test a higher cap.\n",
+                        (unsigned)(c + 1), (unsigned)PRC_SURGICAL_SPLIT_PER_FILE_CAP);
+                }
+
                 if (surgical_split_count_this_file < PRC_SURGICAL_SPLIT_PER_FILE_CAP &&
                     prc_diag_surgical_split_part_allowed(c + 1))
                 {
