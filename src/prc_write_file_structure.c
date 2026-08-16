@@ -54,6 +54,7 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
     const prc_write_tess_entry *entries, uint32_t num_entries)
 {
     uint32_t i;
+    uint8_t *demote = NULL;
     uint8_t *skip = NULL;
     uint32_t surviving_count = num_entries;
 
@@ -71,19 +72,49 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
        caller, at least one degenerating to nothing after weld). By the time
        prc_write_compress_tess_entry's own error surfaces, this function has
        already committed tess_count (line below, historically) to the
-       stream, so a later entry can't be skipped without corrupting what's
-       already written -- the fix has to happen in a pre-pass, BEFORE
+       stream, so a later entry can't be handled without corrupting what's
+       already written -- the decision has to happen in a pre-pass, BEFORE
        tess_count is written, not in the main loop. Re-runs
        prc_encode_preprocess a second time for each COMPRESSED entry (the
        real per-entry write below does its own, unavoidable given
        prc_write_compress_tess_entry doesn't accept a pre-built mesh) --
-       an acceptable cost for a rare-in-practice case, not a hot path. */
+       an acceptable cost for a rare-in-practice case, not a hot path.
+
+       FIX (2026-08-15, HeavyDutyCasterWheel-Partlist-PDF3D): that original
+       fix DROPPED the entry and wrote a reduced tess_count, which silently
+       DESYNCS every caller-held tessellation index past the dropped one.
+       Callers assign prc_api_write_rep_item::biased_tessellation_index
+       themselves, up front, positionally (demos/stl_import assigns
+       component c -> biased index c+1), and the model tree is serialized
+       BEFORE this function runs (prc_write_prc_buffer), so nothing can
+       renumber it afterwards. On HeavyDutyCaster (40 components, component
+       8 a 3-triangle sliver that quantizes away entirely) that left parts
+       9..39 pointing at their neighbour's geometry and part 40 pointing at
+       biased index 40 with only 39 entries present -- a dangling reference
+       real Acrobat responds to by blanking the whole model tree.
+
+       So: DEMOTE rather than drop. The entry's raw geometry is untouched
+       and perfectly writable -- it is only the COMPRESSED encoder's own
+       quantization that collapses it -- so write it as an uncompressed
+       PRC_TYPE_TESS_3D entry instead, exactly the fallback already used
+       for content the COMPRESSED path can't represent (non-manifold fans,
+       demos/stl_import). tess_count stays equal to num_entries, so every
+       caller-side index remains valid by construction and this whole class
+       of desync disappears. Dropping is retained only for an entry that
+       carries no writable geometry at ALL (num_triangles/num_faces zero --
+       unreachable from any in-tree caller, since a connected component
+       always has at least one triangle); such an entry has no valid
+       representation in either encoding, and a caller referencing it was
+       already inconsistent. */
     if (num_entries > 0)
     {
+        demote = (uint8_t *)prc_calloc(ctx, num_entries, sizeof(uint8_t));
         skip = (uint8_t *)prc_calloc(ctx, num_entries, sizeof(uint8_t));
-        if (skip == NULL)
+        if (demote == NULL || skip == NULL)
         {
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_tessellation_section_to_stream\n");
+            if (demote != NULL) prc_free(ctx, demote);
+            if (skip != NULL) prc_free(ctx, skip);
             return PRC_ERROR_MEMORY;
         }
         for (i = 0; i < num_entries; i++)
@@ -103,18 +134,27 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
             {
                 if (mesh.num_triangles == 0)
                 {
-                    printf("Note: a COMPRESSED tessellation entry has zero surviving triangles "
-                        "after welding (entry %u of %u) -- skipping it rather than aborting the "
-                        "whole file.\n", i, num_entries);
-                    skip[i] = 1;
-                    surviving_count--;
+                    if (e->num_triangles > 0)
+                    {
+                        printf("Note: a COMPRESSED tessellation entry has zero surviving triangles "
+                            "after welding (entry %u of %u) -- writing it uncompressed instead, so "
+                            "caller-side tessellation indices stay valid.\n", i, num_entries);
+                        demote[i] = 1;
+                    }
+                    else
+                    {
+                        printf("Note: tessellation entry %u of %u carries no writable geometry "
+                            "-- dropping it. Caller-side tessellation indices past this entry "
+                            "shift by one.\n", i, num_entries);
+                        skip[i] = 1;
+                        surviving_count--;
+                    }
                 }
                 prc_encode_preprocess_free(ctx, &mesh);
             }
             /* A real error here (not just "welded to nothing") is left for
                the real per-entry call below to report/fail on, same as
-               before this fix -- this pre-pass only ever removes entries,
-               never masks a genuine error. */
+               before this fix -- this pre-pass never masks a genuine error. */
         }
     }
 
@@ -130,13 +170,42 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
         if (skip != NULL && skip[i])
             continue;
 
-        if (e->kind == PRC_WRITE_TESS_KIND_3D)
+        if (e->kind == PRC_WRITE_TESS_KIND_3D || (demote != NULL && demote[i]))
         {
+            int must_calc = e->must_calculate_normals;
+            double crease = e->crease_angle_degrees;
+            const uint32_t *face_counts = e->face_tri_counts;
+            uint32_t face_count = e->num_faces;
+            uint32_t one_face = e->num_triangles;
+            int code;
+
+            if (demote != NULL && demote[i])
+            {
+                /* A COMPRESSED entry legitimately carries no face grouping
+                   (num_faces == 0 means "whole entry is one face", see
+                   prc_api_write_tess_entry's doc comment) and no normal
+                   data of its own (COMPRESSED reconstructs normals from
+                   geometry). The uncompressed writer requires both, so
+                   supply the equivalent single face and ask it to
+                   recompute normals -- matching what demos/stl_import
+                   already does for its own TRIANGLES fallback entries. */
+                if (face_counts == NULL || face_count == 0)
+                {
+                    face_counts = &one_face;
+                    face_count = 1;
+                }
+                if (e->normals == NULL && e->norm_indices == NULL)
+                {
+                    must_calc = 1;
+                    if (crease <= 0.0) crease = 30.0;
+                }
+            }
+
             if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
-            if (prc_write_tess_3d(ctx, s, e->positions, e->num_positions, e->normals, e->num_normals,
-                    e->tri_indices, e->norm_indices, e->num_triangles, e->face_tri_counts, e->num_faces,
-                    e->must_calculate_normals, e->crease_angle_degrees) != 0)
-                goto fail;
+            code = prc_write_tess_3d(ctx, s, e->positions, e->num_positions, e->normals, e->num_normals,
+                e->tri_indices, e->norm_indices, e->num_triangles, face_counts, face_count,
+                must_calc, crease);
+            if (code != 0) goto fail;
         }
         else if (e->kind == PRC_WRITE_TESS_KIND_COMPRESSED)
         {
@@ -162,11 +231,15 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
 
     if (skip != NULL)
         prc_free(ctx, skip);
+    if (demote != NULL)
+        prc_free(ctx, demote);
     return 0;
 
 fail:
     if (skip != NULL)
         prc_free(ctx, skip);
+    if (demote != NULL)
+        prc_free(ctx, demote);
     return s->error ? PRC_ERROR_MEMORY : PRC_ERROR_INTERNAL;
 }
 
