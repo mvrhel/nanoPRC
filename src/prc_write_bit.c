@@ -1818,8 +1818,58 @@ prc_bitwrite_compressed_integer_array(prc_context *ctx, prc_bit_write_state *sta
        the actual Huffman leaf/code tables this table produces between a
        working and a broken file -- guessing further point-value variants
        has now failed twice. */
-    for (k = 0; k < data_size; k++)
-        bit_lengths[k] = (uint8_t)prc_int32_bit_width_signed(data[k]);
+    /* DIAGNOSTIC (2026-08-17, PRC_DIAG_NATURAL_BITWIDTH): opt-in switch to the
+       natural (no +1) width formula, default OFF so shipped behavior is
+       unchanged. Re-added because a NEW piece of evidence the two earlier
+       attempts did not have is now in hand: on two independent, small,
+       self-contained real repros (EGU2020 component 1, 10 triangles; Voxler
+       component 6, 14 triangles) an independent encoder's Acrobat-PASSING
+       output was field-for-field identical to ours except origin/tolerance/
+       crease -- and with those forced to match, a read-side
+       PRC_DIAG_POINT_ARRAY_BITPOS comparison shows we spend exactly ONE MORE
+       BIT than it does on 38 of 39 point_array entries (the sole match being
+       a 2-bit value). That is this constant +1, measured directly against a
+       known-good file rather than inferred.
+
+       The block comment above records the standing precondition: do not retry
+       a bit-length change without first diffing the Huffman leaf/code tables
+       between a working and a broken file. That precondition turns out to be
+       UNSATISFIABLE as literally written -- the independent encoder emits ZERO
+       Huffman tables for these arrays (verified via PRC_DIAG_READ_HUFF_TABLE:
+       4 tables in ours, 0 in theirs), so no working file with a comparable
+       table exists to diff against. What IS measurable, and what the
+       precondition is really guarding, is how this change perturbs OUR OWN
+       table -- so diff PRC_DIAG_READ_HUFF_TABLE output with this var on vs
+       off before drawing any conclusion.
+
+       History to respect: the natural formula and a clamped-to-2 variant were
+       each tried as DEFAULTS and each broke Walnut in real Acrobat. This is
+       deliberately a probe, not a default, and any promotion needs a Walnut
+       regression check first.
+
+       TESTED IN REAL ACROBAT, 2026-08-17:
+         - It no longer breaks Walnut. Re-checked against Walnut, QCD,
+           B1385400FSC, Gear-Box and local_small_part with this probe ALONE:
+           all five pass. The two historical reverts are not reproducible on
+           the current build, presumably because the intervening zero-bbox,
+           tilt, origin-choice and jitter-scoping fixes removed whatever it
+           interacted with. So it is once again promotable ON SPEC-CORRECTNESS
+           GROUNDS (SS9.8 genuinely has no +1, and this converges exactly with
+           an independent encoder: 39/39 bit lengths, 555 bits vs our 593).
+         - It fixes NO Acrobat blank-tree case. Tested on both minimal repros
+           and both full files: all failed. Per the standing rule in the
+           project notes, do NOT describe or commit this as a blank-tree fix.
+         - It is ANTAGONISTIC to PRC_DIAG_NATURAL_BITWIDTH_INDICE: on
+           EGU2020's full file the indice probe alone works, and adding this
+           one breaks it again (harmless on the isolated component, harmful on
+           the full file -- content-dependent). Do not enable both. */
+    {
+        uint8_t use_natural = (prc_diag_getenv("PRC_DIAG_NATURAL_BITWIDTH") != NULL);
+        for (k = 0; k < data_size; k++)
+            bit_lengths[k] = use_natural
+                ? (uint8_t)prc_int32_bit_width_signed_natural_clamped(data[k])
+                : (uint8_t)prc_int32_bit_width_signed(data[k]);
+    }
 
     /* DIAGNOSTIC (2026-07-24, PRC_DIAG_POINT_ARRAY_BITLENGTHS): dumps each
        value alongside its computed bit length, added while checking whether
@@ -1975,7 +2025,47 @@ prc_bitwrite_compressed_indice_array(prc_context *ctx, prc_bit_write_state *stat
        reinterpretation makes sense for an absolute, always-non-negative
        length), so it must stay within 0-31 to round-trip through the
        reader's 6-bit character-array element unambiguously. */
-    needed[0] = prc_int32_bit_width_signed(data[0]);
+    /* DIAGNOSTIC (2026-08-17, PRC_DIAG_NATURAL_BITWIDTH_INDICE): default OFF.
+       DELIBERATELY SEPARATE from PRC_DIAG_NATURAL_BITWIDTH, because the two
+       sites are NOT the same question. Per the INVESTIGATED comment above
+       prc_int32_bit_width_signed_natural: SS9.8 (WriteCompressedIntegerArray,
+       point_array) has no +1 in the spec's own pseudocode -- so the natural
+       formula there is a genuine spec-correctness fix. SS9.9
+       (WriteCompressedIndiceArray, THIS function) explicitly specifies
+       GetNumberOfBitsUsedToStoreUnsignedInteger(abs(v))+1 -- so the +1 here
+       is CORRECT and this probe deliberately DEVIATES from the spec.
+
+       It exists because a bit-level comparison against an independent encoder
+       whose output real Acrobat ACCEPTS (Voxler component 6, the 14-triangle
+       repro) showed our point_reference_array spending exactly 2 more bits
+       than theirs for identical decoded values (11, 12, 0) -- the last
+       remaining structural difference between our failing stream and their
+       passing one, everything else having been forced to match.
+
+       TESTED IN REAL ACROBAT, 2026-08-17. RESULT: NET NEGATIVE -- do not
+       promote, and do not re-litigate without new evidence.
+         FIXES:   EGU2020-3889_presentation -- both its 10-triangle component
+                  AND the real 5-part file (the only configuration that ever
+                  fixed it; the spec-correct SS9.8 change alone did not, and
+                  applying BOTH breaks it again).
+         BREAKS:  QCD_Leinweber_ActionXs24t36black_Anim_r9796 and
+                  3D-PDF-Sample-Disc-Brake, both previously passing.
+         NEUTRAL: Walnut, B1385400FSC, PROSTEP, local_small_part, Gear-Box,
+                  HeavyDutyCaster all unaffected. Does NOT fix
+                  Voxler-Demo-Inversion, the file whose teardown produced it.
+
+       So neither convention is universally accepted: the spec-mandated +1 is
+       rejected for EGU2020, and this deviation is rejected for QCD and
+       Disc-Brake. That kills the tidy reading ("the spec mandates a form
+       readers reject") and puts the bit-length convention in the same
+       category as bit_length==22 and the {3,7,14} counts -- a MARKER that
+       correlates with the real trigger, not the trigger itself. A spec CR was
+       planned on the strength of the EGU2020 result and then dropped for
+       exactly this reason. Kept as an opt-in probe only, to document the
+       finding and save the next investigation from repeating it. */
+    needed[0] = prc_diag_getenv("PRC_DIAG_NATURAL_BITWIDTH_INDICE") != NULL
+        ? prc_int32_bit_width_signed_natural_clamped(data[0])
+        : prc_int32_bit_width_signed(data[0]);
     if (needed[0] >= 32)
     {
         prc_free(ctx, bit_lengths);
@@ -2010,7 +2100,13 @@ prc_bitwrite_compressed_indice_array(prc_context *ctx, prc_bit_write_state *stat
            face_array, whose more varied face-index deltas exposed this
            where point_reference_array's narrower delta range happened not
            to (2026-07-10). */
-        needed[k] = 1 + prc_spec_bits_for_unsigned(abs_diff);
+        /* see PRC_DIAG_NATURAL_BITWIDTH_INDICE's note on needed[0] above --
+           same probe, same deliberate SS9.9 deviation, applied to the delta
+           bit-lengths so the whole array converges rather than just its
+           first element. */
+        needed[k] = prc_diag_getenv("PRC_DIAG_NATURAL_BITWIDTH_INDICE") != NULL
+            ? (1 + prc_bit_width_u32(abs_diff) < 2 ? 2 : 1 + prc_bit_width_u32(abs_diff))
+            : 1 + prc_spec_bits_for_unsigned(abs_diff);
         delta = (int32_t)needed[k] - (int32_t)needed[k - 1];
         if (delta < -32 || delta > 31)
         {
