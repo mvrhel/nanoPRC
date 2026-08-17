@@ -634,6 +634,17 @@ prc_huff_value_compare(const void *a, const void *b)
     return 0;
 }
 
+/* Forward declaration: prc_huff_build_tree's PRC_DIAG_HUFF_AVOID_LENGTH_TIES
+   retry loop calls prc_huff_assign_codes to inspect the code lengths a
+   candidate tree actually produces, but that function is defined further
+   down. Without this prototype the call is an implicit declaration, which
+   C99 does not permit and which GCC/Clang reject outright once the later
+   static definition conflicts with the implied extern one (MSVC only
+   warns, which is why this survived local builds). */
+static int prc_huff_assign_codes(prc_context *ctx, prc_huff_build_node *root,
+    uint32_t leaf_count, uint32_t *leaf_values, uint32_t *code_lengths,
+    uint32_t *code_values);
+
 /* Builds a Huffman tree over the distinct values present in
    values[0..count-1] (a simple O(D^2) pairwise-minimum merge over the D
    distinct values -- fine for the array sizes this write facility deals
