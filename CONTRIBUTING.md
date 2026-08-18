@@ -33,6 +33,14 @@ The repository enforces this via a required GitHub Actions check on pull request
 - Keep changes scoped and readable.
 - Preserve existing style unless a file-wide reformat is intentionally part of the change.
 - Add or update documentation when behavior changes.
+- **Before opening a PR, run the C99 conformance gate:** `python tests/internal/check_c99.py`
+  (exit 0 = clean). The core library and the C demos are strict C99, but MSVC's C mode silently
+  accepts constructs C99 removed — so a green Windows build is not evidence of conformance, and
+  violations surface only in CI on Linux/macOS. The script parses every first-party `.c` file with
+  a real Clang/GCC frontend at `-std=c99`; it finds a compiler on PATH, or on Windows uses any
+  Visual Studio installation's bundled `clang-tidy` (VS2019 or VS2022, any edition). It needs a
+  configured CMake build directory for the generated headers — pass `--build-dir` if yours is not
+  `build/`.
 
 ## Security
 

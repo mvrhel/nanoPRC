@@ -124,6 +124,11 @@ int main(int argc, char **argv)
     intermediate.num_children = 1;
     intermediate.name = "quad_scene";
     intermediate.has_empty_part = 1;
+    /* A has_empty_part node's own bbox is still serialized and NOT safely
+       ignorable by real Acrobat -- see stl_import.c's own fix for the same
+       pattern. Reuse the one real child's bbox. */
+    intermediate.bbox_min[0] = leaf.bbox_min[0]; intermediate.bbox_min[1] = leaf.bbox_min[1]; intermediate.bbox_min[2] = leaf.bbox_min[2];
+    intermediate.bbox_max[0] = leaf.bbox_max[0]; intermediate.bbox_max[1] = leaf.bbox_max[1]; intermediate.bbox_max[2] = leaf.bbox_max[2];
 
     /* Root: matches "Model" in the real oracle dumps (has_part=0, pure
        container). */

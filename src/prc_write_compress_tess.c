@@ -302,10 +302,11 @@ prc_encode_rebuild_edges(prc_edge_slot *etable, size_t ecap,
 }
 
 int
-prc_encode_preprocess(prc_context *ctx,
+prc_encode_preprocess_ex(prc_context *ctx,
     const double *positions, uint32_t num_positions,
     const uint32_t *tri_indices, uint32_t num_triangles,
     prc_write_tolerance tolerance,
+    uint8_t skip_nonmanifold_edge_remap,
     prc_encode_mesh *out)
 {
     prc_vtx_slot *vtable = NULL;
@@ -755,7 +756,16 @@ prc_encode_preprocess(prc_context *ctx,
        genuinely valid 2-manifold structure, with the "extra" triangles now
        just very slightly detached (an offset far below visual perception,
        scaled off this mesh's own resolved encoding tolerance) rather than
-       welded onto the same edge as everyone else. */
+       welded onto the same edge as everyone else.
+
+       Mechanics: walk every triangle's 3 edges, hashing each by its
+       (min-vertex, max-vertex) pair into an open-addressed table (etable)
+       so the two triangles sharing an edge always land on the same slot
+       regardless of which one is visited first. The first two triangles
+       seen for a given edge get linked normally (out->edges[...].tri0/
+       tri1); a THIRD (or later) triangle on that same edge is not linked
+       at all -- it's queued (excess_tri/excess_slot) for the private-copy
+       treatment below instead, once every triangle has been scanned. */
     if (clean_tris > 0)
     {
         size_t max_edges = (size_t)clean_tris * 3;
@@ -843,8 +853,13 @@ prc_encode_preprocess(prc_context *ctx,
             }
         }
 
-        if (num_excess > 0)
+        if (num_excess > 0 && !skip_nonmanifold_edge_remap)
         {
+            /* For each queued (triangle, edge-slot) pair, give that
+               triangle two brand-new vertices standing in for the shared
+               edge's own two endpoints (i0/i1 below), instead of reusing
+               the original shared ones -- everything else about the
+               triangle (its third, "apex" vertex) is untouched. */
             /* Offset magnitude: well above the resolved encoding tolerance
                (so the quantized point_array value is genuinely distinct,
                not silently re-merged by quantization), far below anything
@@ -1079,6 +1094,25 @@ prc_encode_preprocess(prc_context *ctx,
                 vedge_list[vedge_start[v1e] + vedge_count[v1e]] = ei2; vedge_count[v1e]++;
             }
 
+            /* ---- Non-manifold "fan" detection and splitting, per vertex ----
+               Algorithm, in plain terms: for every deduplicated vertex touched
+               by 2+ triangles, treat those triangles as nodes in a graph and
+               union-find them together whenever two of them share an EDGE
+               (not just the vertex itself) that also touches this same
+               vertex. The resulting connected components are that vertex's
+               "fans" -- maximal groups of triangles that form one continuous
+               surface patch around it. A normal, manifold vertex always ends
+               up as exactly one fan (every incident triangle edge-connects
+               to its neighbors in a ring). A vertex where two otherwise-
+               unrelated parts of the mesh happen to touch at a single point
+               (no shared edges between the two triangle groups, only this
+               one shared vertex) ends up as 2+ fans -- that's the defect this
+               loop finds and fixes: every fan after the first gets its own
+               freshly-allocated vertex, so what was one shared, ambiguous
+               point becomes N distinct points, one per genuinely-separate
+               surface patch, and no reader's normal-averaging or connectivity
+               logic ever has to reconcile triangles that were never really
+               part of the same local surface to begin with. */
             if (vtri_count && vtri_start && vtri_list && vedge_count && vedge_start && vedge_list && vparent && vfan_new_vertex
                 && tri_local && tri_local_stamp
                 && prc_diag_getenv("PRC_DIAG_DISABLE_NONMANIFOLD_SPLIT") == NULL)
@@ -1087,8 +1121,16 @@ prc_encode_preprocess(prc_context *ctx,
                 {
                     uint32_t deg = vtri_start[vi + 1] - vtri_start[vi];
                     uint32_t k2, ncomp2, root0, m2;
-                    if (deg < 2) continue;
+                    if (deg < 2) continue; /* a single incident triangle can't be non-manifold on its own */
                     stamp++;
+                    /* Renumber this vertex's `deg` incident triangles to local
+                       indices 0..deg-1 (tri_local/tri_local_stamp double as a
+                       sparse "is this global triangle index one of THIS
+                       vertex's incident triangles, and if so which local
+                       slot" lookup, reused/overwritten via the stamp counter
+                       across every vertex in this outer loop rather than
+                       cleared each time) and start each in its own
+                       union-find set. */
                     for (k2 = 0; k2 < deg; k2++)
                     {
                         uint32_t t = vtri_list[vtri_start[vi] + k2];
@@ -1096,6 +1138,15 @@ prc_encode_preprocess(prc_context *ctx,
                         tri_local_stamp[t] = stamp;
                         vparent[k2] = k2; /* local indices 0..deg-1 into vtri_list[vtri_start[vi]+k2] */
                     }
+                    /* Union two incident triangles whenever an edge touching
+                       this vertex is shared between them (ed->tri0/tri1 are
+                       that edge's two adjacent triangles, or -1 if boundary).
+                       Only edges actually touching vi are walked (vedge_list
+                       is vi's own incident-edge list), and only pairs where
+                       BOTH sides are also incident to vi this same call
+                       (tri_local_stamp[...] == stamp) count -- an edge can
+                       touch this vertex on one side and a completely
+                       different vertex's own triangle fan on the other. */
                     for (m2 = vedge_start[vi]; m2 < vedge_start[vi + 1]; m2++)
                     {
                         const prc_encode_edge *ed = &out->edges[vedge_list[m2]];
@@ -1109,6 +1160,12 @@ prc_encode_preprocess(prc_context *ctx,
                             if (ra != rb) vparent[ra] = rb;
                         }
                     }
+                    /* root0 = the fan containing local triangle 0, arbitrarily
+                       chosen as "the one that keeps the original vertex" (see
+                       the split loop below -- every OTHER fan gets a new
+                       vertex instead). If every incident triangle unions back
+                       to root0, there's only one fan: an ordinary manifold
+                       vertex, nothing to split. */
                     root0 = prc_uf_find(vparent, 0);
                     ncomp2 = 1;
                     for (k2 = 1; k2 < deg; k2++)
@@ -1364,6 +1421,24 @@ fail:
         prc_free(ctx, presplit_tri_component);
     prc_encode_preprocess_free(ctx, out);
     return ret;
+}
+
+/* Every existing caller (COMPRESSED encoding, where an edge shared by 3+
+   triangles genuinely must be resolved -- the EdgeBreaker-style traversal
+   below assumes at most 2 triangles per edge) wants the non-manifold-edge
+   remap; only prc_api_mesh_weld_and_split (an uncompressed-TRIANGLES-
+   oriented caller, which has no such traversal and so no need for that
+   specific cleanup -- see its own doc comment) opts out via
+   prc_encode_preprocess_ex directly. */
+int
+prc_encode_preprocess(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance,
+    prc_encode_mesh *out)
+{
+    return prc_encode_preprocess_ex(ctx, positions, num_positions, tri_indices, num_triangles,
+        tolerance, 0, out);
 }
 
 /* Depth-first traversal (Step B): emits the compressed-tessellation arrays by
@@ -4090,6 +4165,13 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         return PRC_ERROR_INTERNAL;
     }
 
+#define PRC_DIAG_TESS_FIELD_SIZES_MARK(label) \
+    do { if (prc_diag_getenv("PRC_DIAG_TESS_FIELD_SIZES") != NULL) \
+        fprintf(stderr, "PRC_DIAG_TESS_FIELD_SIZES: after %-24s byte_pos=%zu bit_fill=%u\n", \
+            (label), state->byte_pos, (unsigned)state->bit_fill); } while (0)
+
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("start");
+
     if (prc_bitwrite_bit(ctx, state, 0) != 0)   /* is_calculated */
         goto werr;
     /* has_faces: per the spec (Table 175), "TRUE if the entity is built
@@ -4118,9 +4200,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         goto werr;
     if (prc_bitwrite_float(ctx, state, (float)trav->origin[2]) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("tolerance+origin");
     if (prc_bitwrite_compressed_integer_array(ctx, state, trav->point_array,
             trav->point_array_size) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("point_array");
     /* edge_status_array is documented (ISO/CD 14739-1 §7.8.9, Table 175/
        CR-14) to hold 3*T entries, not T -- one 2-bit field per triangle is
        the only one a decoder actually consumes (indexed edge_status[t],
@@ -4128,9 +4212,29 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
        on disk as zero padding. Writing only T entries (this write
        facility's own prior behavior) round-trips fine through a reader
        that just trusts the stored count, but is not what the format
-       specifies, and was found -- via a decoder cross-checked directly
-       against Adobe Acrobat -- to be one of the load-bearing details a
-       stricter reader's array-cardinality validation depends on. */
+       specifies.
+
+       Despite the wording of an earlier version of this comment, this is
+       NOT a confirmed-causal Acrobat fix -- a later investigation
+       (PRC_DIAG_NO_EDGE_STATUS_PADDING, added to test this exact question
+       against real Acrobat blank-tree repros) found disabling the padding
+       "tested and not causal" for those bugs, and a direct same-geometry
+       A/B test (2026-08-13) found Acrobat accepts unpadded (case-A, 1*T)
+       output too. CR-14 itself, the spec citation this fix leans on, was
+       submitted by a maintainer of this project based on their own earlier
+       observation, not independent external validation, so it isn't
+       corroborating evidence on its own either.
+
+       Padding is kept as the default anyway, for two independent reasons
+       that held up under scrutiny: (1) a broad real-world corpus census
+       (~34,500 COMPRESSED tessellation instances, prc-db) found case-B
+       (3*T) outnumbers case-A (1*T) roughly 3:1 in practice: 76.6% vs
+       23.4%; (2) Adobe's own PRC support is believed to derive from the
+       Tech Soft 3D/HOOPS codebase lineage (the dominant case-B writer
+       family), meaning Acrobat's own parser may be exercised far more
+       thoroughly against case-B's shape than case-A's, even where both
+       are spec-valid. Neither is proof case-A is unsafe, but both point
+       the same direction, so case-B stays the lower-risk default. */
     {
         uint32_t t_count = trav->edge_status_array_size;
         uint32_t padded_count = (prc_diag_getenv("PRC_DIAG_NO_EDGE_STATUS_PADDING") != NULL) ? t_count : t_count * 3;
@@ -4149,9 +4253,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         }
         prc_free(ctx, padded);
     }
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("edge_status_array");
     if (prc_bitwrite_compressed_indice_array(ctx, state, trav->triangle_face_array,
             trav->triangle_face_array_size, 1, 0) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("triangle_face_array");
     if (prc_bitwrite_uint32(ctx, state, trav->points_is_reference_array_size) != 0)
         goto werr;
     for (k = 0; k < trav->points_is_reference_array_size; k++)
@@ -4159,9 +4265,11 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
         if (prc_bitwrite_bit(ctx, state, trav->points_is_reference_array[k]) != 0)
             goto werr;
     }
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("points_is_reference_array");
     if (prc_bitwrite_compressed_indice_array(ctx, state, trav->point_reference_array,
             trav->point_reference_array_size, 0, num_refs) != 0)
         goto werr;
+    PRC_DIAG_TESS_FIELD_SIZES_MARK("point_reference_array");
     if (prc_bitwrite_bit(ctx, state, must_recalculate_normals ? 1 : 0) != 0)
         goto werr;
 
@@ -4221,6 +4329,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
                     goto werr;
             }
         }
+        PRC_DIAG_TESS_FIELD_SIZES_MARK("normals_block");
 
         if (prc_bitwrite_bit(ctx, state, 0) != 0)   /* is_point_color */
             goto werr;
@@ -4257,6 +4366,7 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
                 goto werr;
             }
             prc_free(ctx, no_style_per_face);
+            PRC_DIAG_TESS_FIELD_SIZES_MARK("line_attribute_array");
         }
     }
     if (prc_bitwrite_bit(ctx, state, 1) != 0)   /* no_texture */
@@ -4312,6 +4422,59 @@ prc_api_mesh_has_nonmanifold_fans(prc_context *ctx,
     has_fans = mesh.nonmanifold_vertices > 0;
     prc_encode_preprocess_free(ctx, &mesh);
     return has_fans;
+}
+
+int
+prc_api_mesh_weld_and_split(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance,
+    double **out_positions, uint32_t *out_num_positions,
+    uint32_t **out_tri_indices, uint32_t *out_num_triangles)
+{
+    prc_encode_mesh mesh;
+    int code;
+
+    if (out_positions == NULL || out_num_positions == NULL ||
+        out_tri_indices == NULL || out_num_triangles == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "prc_api_mesh_weld_and_split: invalid arguments\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    /* skip_nonmanifold_edge_remap=1: this function's whole point is to fix
+       up a mesh for uncompressed TRIANGLES output, which has no traversal
+       algorithm caring how many triangles share an edge -- only the
+       fan-vertex split (for smooth-normal-reconstruction correctness) is
+       relevant here, not COMPRESSED's own edge-count constraint. Skipping
+       it turned out to matter a lot in practice: on one real mechanical
+       assembly this was tested against, the edge remap alone added
+       ~390,000 extra vertices (a real, if COMPRESSED-specific, mesh-quality
+       fixup applied to a file with many 3+-way-shared edges) versus a few
+       hundred from the fan split actually wanted here. */
+    code = prc_encode_preprocess_ex(ctx, positions, num_positions, tri_indices, num_triangles,
+        tolerance, 1, &mesh);
+    if (code < 0)
+        return code;
+
+    *out_positions = mesh.positions;
+    *out_num_positions = mesh.num_positions;
+    *out_tri_indices = mesh.tri_indices;
+    *out_num_triangles = mesh.num_triangles;
+
+    /* Steal positions/tri_indices ownership for the caller; free everything
+       else prc_encode_preprocess allocated (edges, tri_component, etc). */
+    mesh.positions = NULL;
+    mesh.tri_indices = NULL;
+    prc_encode_preprocess_free(ctx, &mesh);
+    return 0;
+}
+
+void
+prc_api_mesh_weld_and_split_free(prc_context *ctx, double *positions, uint32_t *tri_indices)
+{
+    if (positions != NULL) prc_free(ctx, positions);
+    if (tri_indices != NULL) prc_free(ctx, tri_indices);
 }
 
 int

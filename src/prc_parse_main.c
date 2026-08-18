@@ -28,6 +28,7 @@
 #include "debug.h"
 #include "prc_vector_util.h"
 #include "prc_huff.h"
+#include "prc_diag_env.h"
 
 #ifndef PRC_ENABLE_UNZIPPED_FUZZ
 #define PRC_ENABLE_UNZIPPED_FUZZ 0
@@ -863,6 +864,9 @@ prc_open_contents(prc_context *ctx, const char* infile)
                 file_struct[k].model_unzipped = ptr_raw2;
                 file_struct[k].model_size = code;
 
+                if (prc_diag_getenv("PRC_DIAG_DUMP_SECTIONS") != NULL)
+                    fprintf(stderr, "PRC_DIAG_DUMP_SECTIONS: fs=%u section=MODEL size=%zu\n", k, (size_t)code);
+
 #if PRC_ENABLE_UNZIPPED_FUZZ
                 if (prc_fuzz_should_mutate(fuzz_section_mask, PRC_FUZZ_SECTION_MODEL))
                 {
@@ -930,6 +934,9 @@ prc_open_contents(prc_context *ctx, const char* infile)
                         /* Schema case (required) */
                         file_struct[k].schema_globals_unzipped = ptr_raw2;
                         file_struct[k].schema_globals_size = code;
+
+                        if (prc_diag_getenv("PRC_DIAG_DUMP_SECTIONS") != NULL)
+                            fprintf(stderr, "PRC_DIAG_DUMP_SECTIONS: fs=%u section=SCHEMA_GLOBALS size=%zu\n", k, (size_t)code);
                     }
                     else
                     {
@@ -940,6 +947,9 @@ prc_open_contents(prc_context *ctx, const char* infile)
                            is the position that this section is.  Does one
                            throw an error or move on. */
                         type = prc_bitread_uint32(ctx, &bit_state);
+
+                        if (prc_diag_getenv("PRC_DIAG_DUMP_SECTIONS") != NULL)
+                            fprintf(stderr, "PRC_DIAG_DUMP_SECTIONS: fs=%u section_index=%u type=%u size=%zu\n", k, j, type, (size_t)code);
 
                         switch (type)
                         {

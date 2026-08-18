@@ -823,6 +823,92 @@ PRC_EXPORT int prc_api_mesh_has_nonmanifold_fans(prc_context *ctx,
     prc_write_tolerance tolerance);
 
 /**
+ * @brief Welds coincident vertices (within @p tolerance, same convention
+ * PRC_API_WRITE_TESS_KIND_COMPRESSED's own encoder uses) and additionally
+ * splits any vertex touched by multiple disconnected triangle "fans" --
+ * see prc_api_mesh_has_nonmanifold_fans's own doc comment for what that
+ * means and why it matters -- into one copy per fan, instead of leaving it
+ * shared.
+ *
+ * WHY THIS EXISTS: `prc_api_mesh_has_nonmanifold_fans` only ANSWERS whether
+ * a mesh has this defect; callers that detect it and fall back to
+ * PRC_API_WRITE_TESS_KIND_TRIANGLES still need the defect actually fixed,
+ * not just diagnosed. A blunt fix -- fully expanding every triangle corner
+ * into its own private vertex, discarding ALL index sharing -- also works,
+ * but at a real cost: on ordinary real-world meshes this both roughly
+ * triples output size AND silently degrades a reader's normal
+ * reconstruction to flat/faceted shading EVERYWHERE, not just at the
+ * actual defect site, since a reader can only smooth-average normals
+ * across triangles that visibly share a vertex index. This function fixes
+ * only the specific vertices that are actually non-manifold: a mesh with,
+ * say, one such vertex gets exactly one extra position, not one extra
+ * position per triangle. Every other vertex keeps its sharing, so smooth
+ * shading is preserved everywhere except the genuinely-discontinuous split
+ * points -- where flat/faceted shading is the geometrically CORRECT result
+ * anyway, since the fans meeting there are topologically unrelated surface
+ * patches that only happen to touch at a single point.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO: PRC_API_WRITE_TESS_KIND_COMPRESSED's
+ * own internal preprocessing also resolves edges shared by 3+ triangles
+ * (a different, more common real-world mesh-quality issue than the
+ * disconnected-fan case above), by giving each such triangle its own
+ * private copy of that edge's two endpoints. That step exists only because
+ * COMPRESSED's own EdgeBreaker-style traversal assumes at most 2 triangles
+ * per edge -- a constraint plain uncompressed TRIANGLES output does not
+ * share, since it has no such traversal. This function skips that step
+ * accordingly, and doing so matters in practice, not just in theory: on
+ * one real mechanical assembly used to validate this function, the edge
+ * step alone would have added roughly 390,000 extra vertices, against a
+ * few hundred from the fan-vertex splitting this function actually
+ * performs. If a caller does intend to hand this function's output to
+ * PRC_API_WRITE_TESS_KIND_COMPRESSED rather than _TRIANGLES, that encoder
+ * still runs its own full preprocessing (edge step included) internally
+ * regardless of what buffer it's given, so this is a safe input either
+ * way -- just not a complete substitute for COMPRESSED's own preprocessing
+ * if that specific edge case also needs handling.
+ *
+ * Degenerate (zero-area, post-weld) triangles are also removed, same as
+ * PRC_API_WRITE_TESS_KIND_COMPRESSED's own preprocessing -- so
+ * @p out_num_triangles may be less than @p num_triangles even where no
+ * splitting occurs.
+ *
+ * OWNERSHIP: the returned arrays are freshly allocated and owned by the
+ * caller. Free them with prc_api_mesh_weld_and_split_free (not a plain
+ * free()/delete[] -- they were allocated through this context's own
+ * allocator hooks, which may differ) once no longer needed, whether or not
+ * they end up handed to a write call in between.
+ *
+ * @param ctx              Active context.
+ * @param positions        3 doubles per input vertex.
+ * @param num_positions    Number of vertices in @p positions.
+ * @param tri_indices      3 vertex indices per triangle (into @p positions).
+ * @param num_triangles    Number of triangles in @p tri_indices.
+ * @param tolerance        Same tolerance the caller intends to pass to
+ *                         PRC_API_WRITE_TESS_KIND_COMPRESSED for this mesh.
+ * @param out_positions    Receives a newly allocated array, 3 doubles per
+ *                         output vertex.
+ * @param out_num_positions Receives the output vertex count.
+ * @param out_tri_indices  Receives a newly allocated array, 3 indices per
+ *                         output triangle (into *out_positions).
+ * @param out_num_triangles Receives the output triangle count.
+ * @return 0 on success, negative PRC_ERROR_* on failure (outputs left
+ *         untouched).
+ */
+PRC_EXPORT int prc_api_mesh_weld_and_split(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance,
+    double **out_positions, uint32_t *out_num_positions,
+    uint32_t **out_tri_indices, uint32_t *out_num_triangles);
+
+/**
+ * @brief Frees arrays returned by prc_api_mesh_weld_and_split. Either
+ * pointer may be NULL (no-op for that one).
+ */
+PRC_EXPORT void prc_api_mesh_weld_and_split_free(prc_context *ctx,
+    double *positions, uint32_t *tri_indices);
+
+/**
  * @brief Representation-item kind for prc_api_write_rep_item.
  *
  * SURFACE writes a PRC_TYPE_RI_PolyBrepModel representation item (a
@@ -996,8 +1082,20 @@ typedef struct prc_api_write_node_s
     const prc_api_write_rep_item *rep_items;
     uint32_t num_rep_items;
     /** Axis-aligned bounding box of this node's geometry, in the same
-        units as its tessellation entries' positions. Ignored if
-        num_rep_items == 0. */
+        units as its tessellation entries' positions.
+
+        Still written into the PartDefinition entity (and still worth
+        setting to something meaningful, e.g. the union of this node's
+        children) even when num_rep_items == 0 and has_empty_part == 1: an
+        earlier version of this comment claimed the box is "ignored" in
+        that case, on the assumption that a reader has no use for a
+        bounding box on a node with no geometry of its own. Real-Acrobat
+        testing found otherwise -- a degenerate (0,0,0)-(0,0,0) box left at
+        its zero-initialized default on an empty-part ancestor node
+        silently blanked the entire model tree beneath it, even though the
+        actual geometry a few levels further down was completely intact
+        and valid. Leaving this field zeroed for an empty-part node is not
+        a safe no-op. */
     double bbox_min[3];
     double bbox_max[3];
 

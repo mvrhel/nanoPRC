@@ -257,6 +257,12 @@ int main(int argc, char **argv)
         memset(&nested, 0, sizeof(nested));
         nested.has_empty_part = 1;
         nested.name = "grid_nested";
+        /* A has_empty_part node's own bbox is still serialized and NOT
+           safely ignorable by real Acrobat -- see stl_import.c's own fix
+           for the same pattern. No child of its own to copy from here, so
+           match root's (the real geometry's) bbox instead. */
+        nested.bbox_min[0] = bbox_min[0]; nested.bbox_min[1] = bbox_min[1]; nested.bbox_min[2] = bbox_min[2];
+        nested.bbox_max[0] = bbox_max[0]; nested.bbox_max[1] = bbox_max[1]; nested.bbox_max[2] = bbox_max[2];
 
         nested_ptr = &nested;
         memset(&root, 0, sizeof(root));
@@ -279,6 +285,11 @@ int main(int argc, char **argv)
         intermediate.num_children = 1;
         intermediate.name = "grid_scene";
         intermediate.has_empty_part = 1;
+        /* A has_empty_part node's own bbox is still serialized and NOT
+           safely ignorable by real Acrobat -- see stl_import.c's own fix
+           for the same pattern. Reuse the one real child's bbox. */
+        intermediate.bbox_min[0] = part_node.bbox_min[0]; intermediate.bbox_min[1] = part_node.bbox_min[1]; intermediate.bbox_min[2] = part_node.bbox_min[2];
+        intermediate.bbox_max[0] = part_node.bbox_max[0]; intermediate.bbox_max[1] = part_node.bbox_max[1]; intermediate.bbox_max[2] = part_node.bbox_max[2];
 
         intermediate_ptr = &intermediate;
         memset(&root, 0, sizeof(root));

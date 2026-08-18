@@ -75,6 +75,23 @@ int prc_encode_preprocess(prc_context *ctx,
     prc_write_tolerance tolerance,
     prc_encode_mesh *out);
 
+/* Same as prc_encode_preprocess, plus skip_nonmanifold_edge_remap: when
+   non-zero, skips the step that gives a private vertex pair to any triangle
+   that's the 3rd-or-later one sharing a given edge. That step exists only
+   because COMPRESSED's own EdgeBreaker-style traversal assumes at most 2
+   triangles per edge; a caller with no such traversal (e.g. building plain
+   uncompressed TRIANGLES output) can skip it and keep the (often much
+   larger, on real-world meshes with many 3+-way edges) vertex count it
+   would otherwise add down to just what prc_api_mesh_has_nonmanifold_fans'
+   own vertex-fan splitting needs. prc_encode_preprocess is a thin wrapper
+   for this with the flag hardcoded to 0 (existing behavior, unchanged). */
+int prc_encode_preprocess_ex(prc_context *ctx,
+    const double *positions, uint32_t num_positions,
+    const uint32_t *tri_indices, uint32_t num_triangles,
+    prc_write_tolerance tolerance,
+    uint8_t skip_nonmanifold_edge_remap,
+    prc_encode_mesh *out);
+
 void prc_encode_preprocess_free(prc_context *ctx, prc_encode_mesh *m);
 
 typedef struct prc_encode_traversal_result_s

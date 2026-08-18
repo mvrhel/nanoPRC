@@ -14,11 +14,13 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include "prc_parse_tree.h"
 #include "prc_parse_common.h"
 #include "prc_schema.h"
 #include "debug.h"
+#include "prc_diag_env.h"
 
 #define DEBUG_TREE 0
 
@@ -1847,6 +1849,25 @@ prc_parse_product_occurrence(prc_context *ctx, prc_bit_state *bit_state, prc_asm
         data->product_behavior, data->has_transform, data->entity_ref_count, data->number_of_views);
 #endif
 
+    if (prc_diag_getenv("PRC_DIAG_DUMP_TREE") != NULL)
+    {
+        uint32_t ci;
+        fprintf(stderr, "PRC_DIAG_DUMP_TREE: ProductOccurrence unique_id=%u name=\"%s\" "
+            "biased_layer_index=%u biased_index_of_line_style=%u behavior1=%u behavior2=%u "
+            "biased_index_part=%u biased_index_prototype=%u num_child_occ=%u "
+            "has_transform=%u entity_ref_count=%u number_of_views=%u children=[",
+            data->base.base.unique_id, data->base.base.name.same ? "" :
+                (data->base.base.name.name.string ? (const char *)data->base.base.name.name.string : "(null)"),
+            data->base.graphics_content.biased_layer_index, data->base.graphics_content.biased_index_of_line_style,
+            (unsigned)data->base.graphics_content.behavior_bit_field1, (unsigned)data->base.graphics_content.behavior_bit_field2,
+            data->references_product_occurrence.biased_index_part, data->references_product_occurrence.biased_index_prototype,
+            data->references_product_occurrence.number_of_child_product_occurrences,
+            data->has_transform, data->entity_ref_count, data->number_of_views);
+        for (ci = 0; ci < data->references_product_occurrence.number_of_child_product_occurrences; ci++)
+            fprintf(stderr, "%s%u", ci ? "," : "", data->references_product_occurrence.index_child_occurrence[ci]);
+        fprintf(stderr, "]\n");
+    }
+
     return 0;
 }
 
@@ -1879,6 +1900,32 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
     }
 
     data->num_rep_items = prc_bitread_uint32(ctx, bit_state);
+
+    /* A zero-volume bounding box on a PartDefinition -- most often seen on
+       an otherwise-empty wrapper node (num_rep_items == 0) inserted purely
+       for tree structure -- was confirmed real-Acrobat-causal for a
+       silently blanked model tree beneath that node, even when the actual
+       geometry a level or two further down is completely valid (see
+       demos/stl_import/src/stl_import.c's has_empty_part fix). This is a
+       READ-side warning only: nanoPRC's own decoder tolerates it fine (that
+       tolerance is exactly why the bug went unnoticed for so long), so this
+       does not fail the parse -- it just surfaces a real, previously-silent
+       risk factor for anyone debugging a blank-tree report against a file
+       from a different writer. */
+    if (data->bounding_box.minimum_corner.x == data->bounding_box.maximum_corner.x &&
+        data->bounding_box.minimum_corner.y == data->bounding_box.maximum_corner.y &&
+        data->bounding_box.minimum_corner.z == data->bounding_box.maximum_corner.z)
+    {
+        fprintf(stderr, "Warning: PartDefinition (num_rep_items=%u) has a zero-volume "
+            "bounding box (%.6f,%.6f,%.6f)-(%.6f,%.6f,%.6f) -- known to cause real Adobe "
+            "Acrobat to silently blank the model tree beneath this node, even when its own "
+            "geometry (or a descendant's) is otherwise valid.\n",
+            data->num_rep_items,
+            data->bounding_box.minimum_corner.x, data->bounding_box.minimum_corner.y,
+            data->bounding_box.minimum_corner.z, data->bounding_box.maximum_corner.x,
+            data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z);
+    }
+
     if (data->num_rep_items > 0)
     {
         data->rep_items = (prc_ri *)prc_calloc(ctx, data->num_rep_items, sizeof(prc_ri));
@@ -1948,6 +1995,19 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
         data->bounding_box.maximum_corner.x, data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z,
         data->num_rep_items, data->number_views);
 #endif
+
+    if (prc_diag_getenv("PRC_DIAG_DUMP_TREE") != NULL)
+    {
+        fprintf(stderr, "PRC_DIAG_DUMP_TREE: PartDefinition unique_id=%u name=\"%s\" "
+            "biased_index_of_line_style=%u bbox_min=(%f,%f,%f) bbox_max=(%f,%f,%f) "
+            "num_rep_items=%u number_views=%u\n",
+            data->base.base.unique_id, data->base.base.name.same ? "" :
+                (data->base.base.name.name.string ? (const char *)data->base.base.name.name.string : "(null)"),
+            data->base.graphics_content.biased_index_of_line_style,
+            data->bounding_box.minimum_corner.x, data->bounding_box.minimum_corner.y, data->bounding_box.minimum_corner.z,
+            data->bounding_box.maximum_corner.x, data->bounding_box.maximum_corner.y, data->bounding_box.maximum_corner.z,
+            data->num_rep_items, data->number_views);
+    }
 
     return 0;
 }
