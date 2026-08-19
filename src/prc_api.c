@@ -177,6 +177,7 @@ prc_api_helper_release_attributes(prc_context *ctx, prc_api_attributes *attribut
 PRC_EXPORT void
 prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_in,
     uint32_t num_tess, prc_api_tess *line_tess, uint32_t num_line_tess,
+    prc_api_tess *exact_tess, uint32_t num_exact_tess,
     prc_api_product *product_tree)
 {
     prc_data *data = (prc_data *)data_in;
@@ -487,6 +488,11 @@ prc_api_release_data(prc_context *ctx, prc_api_data data_in, prc_api_tess *tess_
         {
             prc_free(ctx, tess_in[k].text_primitives);
         }
+    }
+
+    for (k = 0; k < num_exact_tess; k++)
+    {
+        prc_api_release_exact_geometry_tessellation(ctx, &exact_tess[k]);
     }
 
     if (data->part_details != NULL)
@@ -1778,6 +1784,48 @@ prc_api_helper_get_biased_file_index_from_unique_id(prc_context *ctx, prc_api_da
         }
     }
     return 0;
+}
+
+/* Used in exact geometry to find the shell and face indices given a flat
+   index that goes through all the faces that lie in the shell */
+int
+prc_api_helper_exact_geom_flat_face_to_shell_face(prc_context *ctx,
+    const prc_api_tess *input_tess, uint32_t flat_face_index,
+    uint32_t *shell_index_out, uint32_t *face_index_out)
+{
+    uint32_t shell_index;
+    uint32_t running_face_count = 0;
+
+    if (input_tess == NULL || shell_index_out == NULL || face_index_out == NULL)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER,
+            "Invalid input in prc_api_helper_exact_geom_flat_face_to_shell_face\n");
+        return PRC_API_ERROR_PARAMETER;
+    }
+
+    for (shell_index = 0; shell_index < input_tess->num_shells; shell_index++)
+    {
+        uint32_t shell_face_count = input_tess->shells[shell_index].num_faces;
+
+        if (UINT32_MAX - running_face_count < shell_face_count)
+        {
+            prc_error(ctx, PRC_API_ERROR_PARAMETER,
+                "Face count overflow in prc_api_helper_exact_geom_flat_face_to_shell_face\n");
+            return PRC_API_ERROR_PARAMETER;
+        }
+
+        if (flat_face_index < running_face_count + shell_face_count)
+        {
+            *shell_index_out = shell_index;
+            *face_index_out = flat_face_index - running_face_count;
+            return 0;
+        }
+        running_face_count += shell_face_count;
+    }
+
+    prc_error(ctx, PRC_API_ERROR_PARAMETER,
+        "Flat face index out of range in prc_api_helper_exact_geom_flat_face_to_shell_face\n");
+    return PRC_API_ERROR_PARAMETER;
 }
 
 /*
@@ -3578,6 +3626,205 @@ prc_api_release_tessellation_vertices(prc_context *ctx, prc_api_tess *tess)
     tess->tess_vertices.capacity = 0;
 }
 
+PRC_EXPORT void
+prc_api_release_exact_geometry_tessellation(prc_context *ctx, prc_api_tess *tess)
+{
+    uint32_t j;
+
+    if (tess == NULL)
+        return;
+
+    if (tess->type == PRC_API_TESS_3D || tess->type == PRC_API_TESS_3D_Compressed)
+    {
+        if (tess->tess_faces != NULL)
+        {
+            for (j = 0; j < tess->num_faces; j++)
+            {
+                if (tess->tess_faces[j].reserved != NULL)
+                {
+                    prc_internal_api_face *face_out_reserved =
+                        prc_face_internal_face(&tess->tess_faces[j]);
+                    if (face_out_reserved->vertex_indices != NULL)
+                        prc_free(ctx, face_out_reserved->vertex_indices);
+                    if (face_out_reserved->single_norm.fan_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->single_norm.fan_offsets);
+                    if (face_out_reserved->single_norm.strip_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->single_norm.strip_offsets);
+                    if (face_out_reserved->multi_norm.fan_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->multi_norm.fan_offsets);
+                    if (face_out_reserved->multi_norm.strip_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->multi_norm.strip_offsets);
+                    if (face_out_reserved->texture_single_norm.fan_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->texture_single_norm.fan_offsets);
+                    if (face_out_reserved->texture_single_norm.strip_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->texture_single_norm.strip_offsets);
+                    if (face_out_reserved->texture_multi_norm.fan_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->texture_multi_norm.fan_offsets);
+                    if (face_out_reserved->texture_multi_norm.strip_offsets != NULL)
+                        prc_free(ctx, face_out_reserved->texture_multi_norm.strip_offsets);
+                    if (face_out_reserved->style != NULL && face_out_reserved->owns_style)
+                    {
+                        uint8_t done = 0;
+                        prc_internal_texture *next = face_out_reserved->style->texture.next_texture;
+                        while (!done)
+                        {
+                            prc_internal_texture *next2;
+                            if (next != NULL)
+                            {
+                                next2 = next->next_texture;
+                                prc_free(ctx, next);
+                                next = next2;
+                            }
+                            else
+                            {
+                                done = 1;
+                            }
+                        }
+                        prc_free(ctx, face_out_reserved->style);
+                    }
+                    prc_free(ctx, face_out_reserved);
+                    tess->tess_faces[j].reserved = NULL;
+                }
+
+                if (tess->type == PRC_API_TESS_3D &&
+                    tess->tess_faces[j].face_vertices.vertices != NULL)
+                {
+                    prc_free(ctx, tess->tess_faces[j].face_vertices.vertices);
+                    tess->tess_faces[j].face_vertices.vertices = NULL;
+                    tess->tess_faces[j].face_vertices.num_vertices = 0;
+                    tess->tess_faces[j].face_vertices.capacity = 0;
+                }
+            }
+
+            prc_free(ctx, tess->tess_faces);
+            tess->tess_faces = NULL;
+        }
+    }
+
+    if (tess->type == PRC_API_TESS_3D_Wire || tess->type == PRC_API_TESS_MarkUp)
+    {
+        prc_internal_api_wire *wire = prc_tess_internal_wire(tess);
+
+        if (wire != NULL)
+        {
+            for (j = 0; j < tess->num_line_primitives; j++)
+            {
+                if (wire[j].vertex_indices != NULL)
+                    prc_free(ctx, wire[j].vertex_indices);
+            }
+            prc_free(ctx, wire);
+            tess->reserved = NULL;
+        }
+    }
+
+    if (tess->type == PRC_API_EXACT_GEOM && tess->shells != NULL)
+    {
+        /* Exact geometry stores its faces per-shell rather than in the flat tess_faces
+           array above; the shells/shell_faces arrays themselves are caller-owned
+           (e.g. stack/vector storage) and must not be freed here, only their contents */
+        uint32_t shell_index;
+
+        for (shell_index = 0; shell_index < tess->num_shells; shell_index++)
+        {
+            prc_api_shell *shell = &tess->shells[shell_index];
+            uint32_t face_index;
+
+            if (shell->shell_faces == NULL)
+                continue;
+
+            for (face_index = 0; face_index < shell->num_faces; face_index++)
+            {
+                prc_api_face *face = &shell->shell_faces[face_index];
+
+                if (face->reserved != NULL)
+                {
+                    if (face->is_exact_geom_wire)
+                    {
+                        prc_internal_api_wire *face_wire = prc_face_internal_wire(face);
+
+                        if (face_wire->vertex_indices != NULL)
+                            prc_free(ctx, face_wire->vertex_indices);
+                        prc_free(ctx, face_wire);
+                    }
+                    else
+                    {
+                        prc_internal_api_face *face_out_reserved = prc_face_internal_face(face);
+
+                        if (face_out_reserved->vertex_indices != NULL)
+                            prc_free(ctx, face_out_reserved->vertex_indices);
+                        if (face_out_reserved->single_norm.fan_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->single_norm.fan_offsets);
+                        if (face_out_reserved->single_norm.strip_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->single_norm.strip_offsets);
+                        if (face_out_reserved->multi_norm.fan_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->multi_norm.fan_offsets);
+                        if (face_out_reserved->multi_norm.strip_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->multi_norm.strip_offsets);
+                        if (face_out_reserved->texture_single_norm.fan_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->texture_single_norm.fan_offsets);
+                        if (face_out_reserved->texture_single_norm.strip_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->texture_single_norm.strip_offsets);
+                        if (face_out_reserved->texture_multi_norm.fan_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->texture_multi_norm.fan_offsets);
+                        if (face_out_reserved->texture_multi_norm.strip_offsets != NULL)
+                            prc_free(ctx, face_out_reserved->texture_multi_norm.strip_offsets);
+                        if (face_out_reserved->style != NULL && face_out_reserved->owns_style)
+                        {
+                            uint8_t done = 0;
+                            prc_internal_texture *next = face_out_reserved->style->texture.next_texture;
+
+                            while (!done)
+                            {
+                                prc_internal_texture *next2;
+
+                                if (next != NULL)
+                                {
+                                    next2 = next->next_texture;
+                                    prc_free(ctx, next);
+                                    next = next2;
+                                }
+                                else
+                                {
+                                    done = 1;
+                                }
+                            }
+                            prc_free(ctx, face_out_reserved->style);
+                        }
+                        prc_free(ctx, face_out_reserved);
+                    }
+                    face->reserved = NULL;
+                }
+
+                if (face->face_vertices.vertices != NULL)
+                {
+                    prc_free(ctx, face->face_vertices.vertices);
+                    face->face_vertices.vertices = NULL;
+                    face->face_vertices.num_vertices = 0;
+                    face->face_vertices.capacity = 0;
+                }
+            }
+        }
+    }
+
+    if (tess->tess_vertices.vertices != NULL)
+    {
+        prc_free(ctx, tess->tess_vertices.vertices);
+        tess->tess_vertices.vertices = NULL;
+        tess->tess_vertices.num_vertices = 0;
+        tess->tess_vertices.capacity = 0;
+    }
+
+    if (tess->text_primitives != NULL)
+    {
+        prc_free(ctx, tess->text_primitives);
+        tess->text_primitives = NULL;
+    }
+
+    tess->num_faces = 0;
+    tess->num_line_primitives = 0;
+    tess->num_text_primitives = 0;
+}
+
 static int
 prc_api_helper(prc_context *ctx, prc_data *data_in, uint32_t file_index,
     uint32_t tess_index, uint32_t part_index, uint32_t style_index,
@@ -3912,27 +4159,25 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                         memset(((unsigned char *)data->exact_geom_tess) + old_bytes,
                             0, new_bytes - old_bytes);
                     }
+
                     data->exact_geom_tess[data->exact_geom_tess_count].biased_style_index = part->biased_style_index;
                     data->exact_geom_tess[data->exact_geom_tess_count].file_index = i;
                     data->exact_geom_tess[data->exact_geom_tess_count].topo_context_index = j;
                     data->exact_geom_tess[data->exact_geom_tess_count].body_index = part->biased_body_index - 1;
                     data->exact_geom_tess[data->exact_geom_tess_count].part_reserve_index = k;
 
-                    /* Now approximate the exact geometry */
-                    code = prc_approximate_exact_geom(ctx, data);
+                    /* Now approximate the exact geometry. Hand back the number
+                       of tessellations this . */
+                    uint32_t num_new_exact_geom_tess = 0;
+                    code = prc_approximate_objects_exact_geom(ctx, data, &num_new_exact_geom_tess);
                     if (code < 0)
                     {
                         prc_error(ctx, code, "Failed in prc_approximate_exact_geom\n");
                         return code;
                     }
 
-                    if (data->exact_geom_tess[data->exact_geom_tess_count].type == PRC_EXACT_GEOM_WIRE ||
-                        data->exact_geom_tess[data->exact_geom_tess_count].type == PRC_EXACT_GEOM_3D)
-                    {
-                        ++(*num_exact_geom_tess);
-                    }
-
-                    data->exact_geom_tess_count++;
+                    data->exact_geom_tess_count += num_new_exact_geom_tess;
+                    *num_exact_geom_tess = data->exact_geom_tess_count;
                 }
             }
         }
@@ -4238,6 +4483,45 @@ prc_api_get_tessellation_type(prc_context *ctx, prc_api_data data, uint32_t tess
     }
 }
 
+/* Exact geometry count methods */
+PRC_EXPORT uint32_t
+prc_api_get_number_exact_geom_objects(prc_context *ctx, prc_api_data data)
+{
+    prc_data *data_in = (prc_data *)data;
+    return data_in->exact_geom_tess_count;
+}
+
+PRC_EXPORT uint32_t
+prc_api_get_number_exact_geom_shells(prc_context *ctx, prc_api_data data,
+                                     uint32_t exact_geom_index)
+{
+    prc_data *data_in = (prc_data *)data;
+    if (exact_geom_index >= data_in->exact_geom_tess_count)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "Exact geometry index out of range in prc_api_get_number_exact_geom_shells\n");
+        return 0;
+    }
+    return data_in->exact_geom_tess[exact_geom_index].number_of_shells;
+}
+
+PRC_EXPORT uint32_t
+prc_api_get_number_exact_geom_faces(prc_context *ctx, prc_api_data data,
+    uint32_t exact_geom_index, uint32_t shell_index)
+{
+    prc_data *data_in = (prc_data *)data;
+    if (exact_geom_index >= data_in->exact_geom_tess_count)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "Exact geometry index out of range in prc_api_get_number_exact_geom_faces\n");
+        return 0;
+    }
+    if (shell_index >= data_in->exact_geom_tess[exact_geom_index].number_of_shells)
+    {
+        prc_error(ctx, PRC_API_ERROR_PARAMETER, "Shell index out of range in prc_api_get_number_exact_geom_faces\n");
+        return 0;
+    }
+    return data_in->exact_geom_tess[exact_geom_index].shells[shell_index].number_of_faces;
+}
+
 /* The tess index in this case is an index into either part_details
    or markup details */
 PRC_EXPORT uint32_t
@@ -4336,6 +4620,11 @@ prc_api_skip_face(prc_context *ctx, const prc_api_tess *api_tess,
     {
         return api_tess->tess_faces[face_index].disable_face;
     }
+    if (api_tess->type == PRC_API_EXACT_GEOM)
+    {
+        /* We need to decide what we want to do here TODO. */
+        return 0;
+    }
     return 0;
 }
 
@@ -4344,6 +4633,24 @@ PRC_EXPORT int
 prc_api_face_is_material(prc_context *ctx, const prc_api_tess *api_tess,
                          uint32_t face_index)
 {
+    int code;
+
+    if (api_tess->type == PRC_API_EXACT_GEOM)
+    {
+        /* Get the shell and face index (in the api_tes structure) to figure
+           out which one this is */
+        uint32_t shell_index;
+        uint32_t shell_face_index;
+
+        code = prc_api_helper_exact_geom_flat_face_to_shell_face(ctx,
+            api_tess, face_index, &shell_index, &shell_face_index);
+        if (code < 0)
+        {
+            return 0;
+        }
+        return api_tess->shells[shell_index].shell_faces[shell_face_index].is_material;
+    }
+
     if (api_tess->type != PRC_API_TESS_3D)
     {
         if (api_tess->type == PRC_API_TESS_3D_Compressed)
@@ -4387,15 +4694,31 @@ PRC_EXPORT void
 prc_api_get_face_material(prc_context *ctx, const prc_api_tess *api_tess,
     prc_api_material *material, uint32_t face_index)
 {
-    if (api_tess->type == PRC_API_TESS_3D)
+    if (api_tess->type == PRC_API_TESS_3D || api_tess->type == PRC_API_EXACT_GEOM)
     {
-        if (api_tess->num_faces == 0)
+        prc_internal_api_face *face_reserved = NULL;
+
+        if (api_tess->type == PRC_API_TESS_3D && api_tess->num_faces == 0)
         {
             return;
         }
 
-        prc_internal_api_face *face_reserved =
-            prc_face_internal_face(&api_tess->tess_faces[face_index]);
+        if (api_tess->type == PRC_API_TESS_3D)
+        {
+            face_reserved =
+                prc_face_internal_face(&api_tess->tess_faces[face_index]);
+        }
+        else
+        {
+            uint32_t shell_index_out, face_index_out;
+            int code;
+
+            code = prc_api_helper_exact_geom_flat_face_to_shell_face(ctx,
+                api_tess, face_index, &shell_index_out, &face_index_out);
+            if (code < 0)
+                return;
+            face_reserved = (prc_internal_api_face*) api_tess->shells[shell_index_out].shell_faces[face_index_out].reserved;
+        }
         if (face_reserved == NULL)
         {
             return;

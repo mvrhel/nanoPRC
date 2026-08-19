@@ -2834,30 +2834,51 @@ prc_release_file_struct(prc_context *ctx, prc_filestructure *file_struct)
 static void
 prc_release_exact_geometry_tess(prc_context *ctx, prc_exact_geom_tess *tess)
 {
-    if (tess->tess_data != NULL)
+    if (tess->shells != NULL)
     {
-        if (tess->tess_data->triangles != NULL)
+        for (size_t k = 0; k < tess->number_of_shells; k++)
         {
-            prc_free(ctx, tess->tess_data->triangles);
-            tess->tess_data->triangles = NULL;
+            if (tess->shells[k].faces != NULL)
+            {
+                for (size_t j = 0; j < tess->shells[k].number_of_faces; j++)
+                {
+                    if (tess->shells[k].faces[j].tess_data != NULL)
+                    {
+                        for (size_t i = 0; i < tess->shells[k].faces[j].tess_data->number_of_triangles; i++)
+                        {
+                            if (tess->shells[k].faces[j].tess_data->triangles != NULL)
+                            {
+                                prc_free(ctx, tess->shells[k].faces[j].tess_data->triangles);
+                                tess->shells[k].faces[j].tess_data->triangles = NULL;
+                            }
+                            if (tess->shells[k].faces[j].tess_data->vertices != NULL)
+                            {
+                                prc_free(ctx, tess->shells[k].faces[j].tess_data->vertices);
+                                tess->shells[k].faces[j].tess_data->vertices = NULL;
+                            }
+                        }
+                        prc_free(ctx, tess->shells[k].faces[j].tess_data);
+                        tess->shells[k].faces[j].tess_data = NULL;
+                    }
+                    if (tess->shells[k].faces[j].wire_data != NULL)
+                    {
+                        for (size_t i = 0; i < tess->shells[k].faces[j].wire_data->number_of_points; i++)
+                        {
+                            if (tess->shells[k].faces[j].wire_data->points != NULL)
+                            {
+                                prc_free(ctx, tess->shells[k].faces[j].wire_data->points);
+                                tess->shells[k].faces[j].wire_data->points = NULL;
+                            }
+                        }
+                        prc_free(ctx, tess->shells[k].faces[j].wire_data);
+                        tess->shells[k].faces[j].wire_data = NULL;
+                    }
+                }
+                prc_free(ctx, tess->shells[k].faces);
+            }
         }
-        if (tess->tess_data->vertices != NULL)
-        {
-            prc_free(ctx, tess->tess_data->vertices);
-            tess->tess_data->vertices = NULL;
-        }
-        prc_free(ctx, tess->tess_data);
-    }
-
-    if (tess->wire_data != NULL)
-    {
-        if (tess->wire_data->points != NULL)
-        {
-            prc_free(ctx, tess->wire_data->points);
-            tess->wire_data->points = NULL;
-        }
-        prc_free(ctx, tess->wire_data);
-        tess->wire_data = NULL;
+        prc_free(ctx, tess->shells);
+        tess->shells = NULL;
     }
 }
 
@@ -2895,7 +2916,7 @@ prc_release_data(prc_context *ctx, prc_data *data)
 
     if (data->exact_geom_capacity > 0 && data->exact_geom_tess != NULL)
     {
-        for (k = 0; k < data->exact_geom_capacity; k++)
+        for (k = 0; k < data->exact_geom_tess_count; k++)
         {
             prc_release_exact_geometry_tess(ctx, &data->exact_geom_tess[k]);
         }

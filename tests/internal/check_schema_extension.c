@@ -67,7 +67,7 @@ int main(int argc, char **argv)
     else
         printf("schema does NOT declare a PRC_TYPE_ROOTBaseWithGraphics extension\n");
 
-    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL);
+    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
     prc_api_release_context(ctx);
     return 0;
 }

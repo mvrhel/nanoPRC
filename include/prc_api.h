@@ -60,7 +60,8 @@ typedef enum
     PRC_API_TESS_3D_Compressed,
     PRC_API_TESS_3D_Wire,
     PRC_API_TESS_3D_Wire_Extra,
-    PRC_API_TESS_MarkUp
+    PRC_API_TESS_MarkUp,
+    PRC_API_EXACT_GEOM
 } prc_api_tess_type_t;
 
 /* prc_api_test_type_t was a typo for prc_api_tess_type_t. Kept as an alias so
@@ -162,6 +163,7 @@ typedef struct prc_api_tess_vertex_buffer_s
 /* The default style.  reserved has the details for the actual face */
 typedef struct prc_api_face_s
 {
+    uint8_t is_exact_geom_wire;
     size_t num_graphic_primitives;
     uint8_t is_material;
     uint8_t has_transparency;
@@ -175,6 +177,12 @@ typedef struct prc_api_face_s
     void *reserved;
     uint8_t disable_face;
 } prc_api_face;
+
+typedef struct prc_api_shell_s
+{
+    size_t num_faces;
+    prc_api_face *shell_faces;
+} prc_api_shell;
 
 typedef struct prc_api_transform_s
 {
@@ -203,11 +211,14 @@ typedef struct prc_api_tess_s
     prc_api_tess_type_t type;
     uint8_t has_transparency;
     size_t num_faces;
+    size_t num_shells;
     size_t num_line_primitives;
     size_t num_text_primitives;
+    prc_api_shell *shells;
     prc_api_text_primitive *text_primitives;
     prc_api_face *tess_faces;
     prc_api_tess_vertex_buffer tess_vertices;
+    uint8_t bound_box_initialized;
     double bounding_box_min[3];
     double bounding_box_max[3];
     const char *name;
@@ -391,9 +402,11 @@ PRC_EXPORT prc_api_data prc_api_open_contents(prc_context *ctx, const char *infi
  * @param num_tess Number of entries in tess.
  * @param line_tess Optional line tessellation array previously allocated by caller.
  * @param num_line_tess Number of entries in line_tess.
+ * @param exact_tess Optional exact-geometry tessellation array previously allocated by caller.
+ * @param num_exact_tess Number of entries in exact_tess.
  * @param product_tree Optional model tree previously allocated by caller.
  */
-PRC_EXPORT void prc_api_release_data(prc_context *ctx, prc_api_data data, prc_api_tess *tess, uint32_t num_tess, prc_api_tess *line_tess, uint32_t num_line_tess, prc_api_product *product_tree);
+PRC_EXPORT void prc_api_release_data(prc_context *ctx, prc_api_data data, prc_api_tess *tess, uint32_t num_tess, prc_api_tess *line_tess, uint32_t num_line_tess, prc_api_tess *exact_tess, uint32_t num_exact_tess, prc_api_product *product_tree);
 
 /**
  * @brief Print an API product tree for diagnostics.
@@ -570,6 +583,36 @@ PRC_EXPORT int prc_api_get_number_tessellations(prc_context *ctx, prc_api_data d
 PRC_EXPORT uint32_t prc_api_get_number_faces(prc_context *ctx, prc_api_data data, uint32_t tess_index);
 
 /**
+ * @brief Return number of exact geometry objects that have been created.
+ *
+ * @param ctx Active API context.
+ * @param data Data handle.
+ * @return Number of exact geometry objects.
+ */
+PRC_EXPORT uint32_t prc_api_get_number_exact_geom_objects(prc_context *ctx, prc_api_data data);
+
+/**
+ * @brief Return number of shells in an exact geometry object.
+ *
+ * @param ctx Active API context.
+ * @param data Data handle.
+ * @param exact_geom_index Exact geometry object index.
+ * @return Number of shells in the exact geometry object.
+ */
+PRC_EXPORT uint32_t prc_api_get_number_exact_geom_shells(prc_context *ctx, prc_api_data data, uint32_t exact_geom_index);
+
+/**
+ * @brief Return number of faces in a shell in an exact geometry object.
+ *
+ * @param ctx Active API context.
+ * @param data Data handle.
+ * @param exact_geom_index Exact geometry object index.
+ * @param shell_index Shell index in the exact geometry object.
+ * @return Number of faces in the shell.
+ */
+PRC_EXPORT uint32_t prc_api_get_number_exact_geom_faces(prc_context *ctx, prc_api_data data, uint32_t exact_geom_index, uint32_t shell_index);
+
+/**
  * @brief Build face wire primitive data for one tessellation face.
  *
  * @param ctx Active API context.
@@ -601,11 +644,27 @@ PRC_EXPORT int prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data 
  * @param ctx Active API context.
  * @param data_in Data handle.
  * @param api_tree Model tree root.
- * @param tess_index Tessellation index.
+ * @param geom_object_index Exact geometry object index.
+ * @param shell_index Shell index in the exact geometry object.
+ * @param face_index Face index in the shell.
+ * @param tess_index Tessellation index in the face.
  * @param api_tess Output tessellation data.
  * @return 0 on success, negative PRC_API_ERROR_* code on failure.
  */
-PRC_EXPORT int prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data data_in, prc_api_product *api_tree, uint32_t tess_index, prc_api_tess *api_tess);
+PRC_EXPORT int prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data data_in, prc_api_product *api_tree, uint32_t geom_object_index, uint32_t shell_index, uint32_t face_index, uint32_t tess_index, prc_api_tess *api_tess);
+
+/**
+ * @brief Release allocations owned by one exact-geometry API tessellation.
+ *
+ * Unlike the caller-managed tessellation arrays released through
+ * prc_api_release_data, exact-geometry tessellations may allocate their own
+ * internal face array and related buffers when materialized through
+ * prc_api_get_exact_geometry_tessellation_vertices.
+ *
+ * @param ctx Active API context.
+ * @param tess Exact-geometry tessellation object to release.
+ */
+PRC_EXPORT void prc_api_release_exact_geometry_tessellation(prc_context *ctx, prc_api_tess *tess);
 
 /**
  * @brief Get one graphics primitive descriptor by index.

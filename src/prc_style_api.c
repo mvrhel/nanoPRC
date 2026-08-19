@@ -239,6 +239,8 @@ prc_internal_get_surface_material(prc_context *ctx,
         material->specular_alpha = (float) graph_material.specular_alpha;
         material->shininess = (float) graph_material.shininess;
 
+        /* Lets be a little more robust about this */
+#if 0
         if (graph_material.biased_ambient_index <= 0 ||
             graph_material.biased_diffuse_index <= 0 ||
             graph_material.biased_emissive_index <= 0 ||
@@ -246,57 +248,94 @@ prc_internal_get_surface_material(prc_context *ctx,
         {
             return PRC_ERROR_PARSE;
         }
+#endif
 
-        color_index = (graph_material.biased_ambient_index - 1) /3;
-        if (color_index < global_data->color_count)
+        if (graph_material.biased_ambient_index == 0)
         {
-            rgb_color = global_data->colors[color_index];
-            material->ambient[0] = (float)rgb_color.red;
-            material->ambient[1] = (float)rgb_color.green;
-            material->ambient[2] = (float)rgb_color.blue;
+            material->ambient[0] = 0.8f;
+            material->ambient[1] = 0.8f;
+            material->ambient[2] = 0.8f;
         }
         else
         {
-            return PRC_ERROR_PARSE;
+            color_index = (graph_material.biased_ambient_index - 1) / 3;
+            if (color_index < global_data->color_count)
+            {
+                rgb_color = global_data->colors[color_index];
+                material->ambient[0] = (float)rgb_color.red;
+                material->ambient[1] = (float)rgb_color.green;
+                material->ambient[2] = (float)rgb_color.blue;
+            }
+            else
+            {
+                return PRC_ERROR_PARSE;
+            }
         }
 
-        color_index = (graph_material.biased_diffuse_index - 1) / 3;
-        if (color_index < global_data->color_count)
+        if (graph_material.biased_diffuse_index == 0)
         {
-            rgb_color = global_data->colors[color_index];
-            material->diffuse[0] = (float)rgb_color.red;
-            material->diffuse[1] = (float)rgb_color.green;
-            material->diffuse[2] = (float)rgb_color.blue;
+            material->diffuse[0] = 0.8f;
+            material->diffuse[1] = 0.8f;
+            material->diffuse[2] = 0.8f;
         }
         else
         {
-            return PRC_ERROR_PARSE;
+            color_index = (graph_material.biased_diffuse_index - 1) / 3;
+            if (color_index < global_data->color_count)
+            {
+                rgb_color = global_data->colors[color_index];
+                material->diffuse[0] = (float)rgb_color.red;
+                material->diffuse[1] = (float)rgb_color.green;
+                material->diffuse[2] = (float)rgb_color.blue;
+            }
+            else
+            {
+                return PRC_ERROR_PARSE;
+            }
         }
 
-        color_index = (graph_material.biased_emissive_index - 1) / 3;
-        if (color_index < global_data->color_count)
+        if (graph_material.biased_emissive_index == 0)
         {
-            rgb_color = global_data->colors[color_index];
-            material->emissive[0] = (float)rgb_color.red;
-            material->emissive[1] = (float)rgb_color.green;
-            material->emissive[2] = (float)rgb_color.blue;
+            material->emissive[0] = 0.0f;
+            material->emissive[1] = 0.0f;
+            material->emissive[2] = 0.0f;
         }
         else
         {
-            return PRC_ERROR_PARSE;
+            color_index = (graph_material.biased_emissive_index - 1) / 3;
+            if (color_index < global_data->color_count)
+            {
+                rgb_color = global_data->colors[color_index];
+                material->emissive[0] = (float)rgb_color.red;
+                material->emissive[1] = (float)rgb_color.green;
+                material->emissive[2] = (float)rgb_color.blue;
+            }
+            else
+            {
+                return PRC_ERROR_PARSE;
+            }
         }
 
-        color_index = (graph_material.biased_specular_index - 1) / 3;
-        if (color_index < global_data->color_count)
+        if (graph_material.biased_specular_index == 0)
         {
-            rgb_color = global_data->colors[color_index];
-            material->specular[0] = (float)rgb_color.red;
-            material->specular[1] = (float)rgb_color.green;
-            material->specular[2] = (float)rgb_color.blue;
+            material->specular[0] = 0.0f;
+            material->specular[1] = 0.0f;
+            material->specular[2] = 0.0f;
         }
         else
         {
-            return PRC_ERROR_PARSE;
+            color_index = (graph_material.biased_specular_index - 1) / 3;
+            if (color_index < global_data->color_count)
+            {
+                rgb_color = global_data->colors[color_index];
+                material->specular[0] = (float)rgb_color.red;
+                material->specular[1] = (float)rgb_color.green;
+                material->specular[2] = (float)rgb_color.blue;
+            }
+            else
+            {
+                return PRC_ERROR_PARSE;
+            }
         }
     }
     else

@@ -600,6 +600,15 @@ typedef enum {
     PRC_HCG_CompositeCurve = 13
 } PRC_Compressed_curve_t;
 
+/* Used for working with exact geometry transforms. Put in here as we want
+   to have a member variable that has the transform decoded and ready to use
+   as we sample curves and surfaces */
+typedef struct prc_exact_geom_transform_s
+{
+    double matrix[16];
+    uint8_t is_identity;
+} prc_exact_geom_transform;
+
 /* Predefines for abstract types */
 typedef struct prc_surf_blend01_s prc_surf_blend01;
 typedef struct prc_surf_blend02_s prc_surf_blend02;
@@ -1878,6 +1887,7 @@ struct prc_surf_plane_s
     prc_unsigned_int tag;
     prc_content_surface curve_data;
     prc_trans_3d transform; /* Does not have a has_transform bit */
+    prc_exact_geom_transform exact_transform; /* Does not have a has_transform bit */
     prc_domain domain;
     double u_parameter_coeff_a;
     double v_parameter_coeff_a;
@@ -2439,6 +2449,7 @@ struct prc_surf_blend01_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_curve center_curve;
     prc_ptr_curve origin_curve;
@@ -2452,6 +2463,7 @@ struct prc_surf_blend02_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_surface bound_surface0;
     prc_ptr_curve bound_curve0;
@@ -2475,6 +2487,7 @@ struct prc_surf_blend03_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     uint32_t number_of_elements;
     double *parameters;
@@ -2528,6 +2541,7 @@ struct prc_surf_cone_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     double radius;
     double semi_angle;
@@ -2540,6 +2554,7 @@ struct prc_surf_cylinder_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     double radius;
 };
@@ -2551,6 +2566,7 @@ struct prc_surf_cylindrical_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_surface base_surface;
     double tolerance;
@@ -2562,6 +2578,7 @@ struct prc_surf_offset_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_surface base_surface;
     double offset_distance;
@@ -2574,6 +2591,7 @@ struct pr_surf_pipe_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_curve center_curve;
     prc_ptr_curve origin_curve;
@@ -2587,6 +2605,7 @@ struct prc_surf_ruled_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_curve first_curve;
     prc_ptr_curve second_curve;
@@ -2599,6 +2618,7 @@ struct prc_surf_sphere_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     double radius;
 };
@@ -2610,6 +2630,7 @@ struct prc_surf_revolution_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     double tolerance;
     prc_vec3 origin;
@@ -2625,6 +2646,7 @@ struct prc_surf_extrusion_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_vec3 sweep_vector;
     prc_ptr_curve base_curve;
@@ -2637,6 +2659,7 @@ struct prc_surf_fromcurves_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_vec3 origin;
     prc_ptr_curve first_curve;
@@ -2650,6 +2673,7 @@ struct prc_surf_torus_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     double major_radius;
     double minor_radius;
@@ -2662,6 +2686,7 @@ struct prc_surf_transform_s
     prc_content_surface curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_uv_parameterization parameterization;
     prc_ptr_surface base_surface;
     prc_math_fct_3d math_transform;
@@ -2674,6 +2699,7 @@ struct prc_crv_blend02_boundary_s
     prc_content_curve curve_data;
     uint8_t has_transform; /* This is not in the spec */
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_ptr_surface surface;
     int bound;
@@ -2724,6 +2750,7 @@ struct prc_crv_circle_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     double radius;
 };
@@ -2742,6 +2769,7 @@ struct prc_crv_composite_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_unsigned_int number_of_subcurves;
     prc_composite_subcurve *subcurves;
@@ -2755,6 +2783,7 @@ struct prc_crv_onsurf_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     double tolerance;
     prc_ptr_curve uv_curve;
@@ -2769,6 +2798,7 @@ struct prc_crv_ellipse_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     double rx;
     double ry;
@@ -2781,6 +2811,7 @@ struct prc_crv_equation_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_interval interval;
     prc_math_fct_1d x_function;
@@ -2826,6 +2857,7 @@ struct prc_crv_helix01_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     uint8_t type;
     uint8_t orientation;
@@ -2841,6 +2873,7 @@ struct prc_crv_hyperbola_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     double semi_axis;
     double semi_axis_image;
@@ -2854,6 +2887,7 @@ struct prc_crv_intersection_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_ptr_surface surface1;
     prc_ptr_surface surface2;
@@ -2892,6 +2926,7 @@ struct prc_crv_line_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
 };
 
@@ -2902,6 +2937,7 @@ struct prc_crv_offset_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_ptr_curve base_curve;
     prc_vec3 offset_plane_normal;
@@ -2915,6 +2951,7 @@ struct prc_crv_parabola_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     double focal_length;
     uint8_t type;
@@ -2934,6 +2971,7 @@ struct prc_crv_polyline_s
     prc_content_curve curve_data;
     uint8_t has_transform;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     uint32_t number_of_points;
     prc_polyline_point *points;
@@ -2945,6 +2983,7 @@ struct prc_crv_transform_s
     prc_unsigned_int tag;
     prc_content_curve curve_data;
     prc_trans_3d transform;
+    prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_ptr_curve base_curve;
     prc_math_fct_3d math_transformation;
@@ -3734,24 +3773,42 @@ typedef enum {
 
 /* This is used to create, store, and manage the tessellations of the exact
    geometry data. All tesselllations will be uncompressed 3D triangle data
-   or if they are a curve they will just be simple line segments */
-typedef struct prc_exact_geom_tess_s
+   or if they are a curve they will just be simple line segments. We can have
+   multiple shells which can have multiple faces. Think of one shell as the surface
+   defining the outside of a hollow cube. The inside of the cube is another shell.
+   The area between the two shells is the material of the cube.
+   Each shell has a different normal direction. Each shell can have multiple faces.
+   Each face may have a different surface definition and here, each face has a
+   different tessellation. So we have prc_exact_geom_tess contain the shells
+   prc_exact_geom_shell and they contain the faces prc_exact_geom_face. */
+typedef struct prc_exact_geom_face_s
 {
     prc_exact_geom_tess_t type;
-    uint32_t biased_style_index;
-    uint32_t file_index;
-    uint32_t style_index_biased;
-    uint32_t topo_context_index;
-    uint32_t body_index;
-    uint32_t part_reserve_index;
     uint8_t has_matrix; /* Need to implement this... */
     double matrix[16];
     prc_exact_geom_wire_data *wire_data;
     prc_exact_geom_tess_data *tess_data;
+    uint8_t orientation; /* 0 = outward, 1 = inward */
+} prc_exact_geom_face;
+
+typedef struct prc_exact_geom_shell_s
+{
+    uint32_t number_of_faces;
+    prc_exact_geom_face *faces;
+} prc_exact_geom_shell;
+
+typedef struct prc_exact_geom_tess_s
+{
+    uint32_t biased_style_index;
+    uint32_t number_of_shells;
+    prc_exact_geom_shell *shells;
+    uint32_t file_index;
+    uint32_t topo_context_index;
+    uint32_t body_index;
+    uint32_t part_reserve_index;
 } prc_exact_geom_tess;
 
 /* Done with exact geometry tessellation management */
-
 struct prc_data_s
 {
     prc_header *header;
@@ -3821,6 +3878,6 @@ struct prc_nano_brep_compressed_data_s
 
 prc_data* prc_open_contents(prc_context *ctx, const char *infile);
 void prc_release_data(prc_context *ctx, prc_data *data);
-int prc_approximate_exact_geom(prc_context *ctx, prc_api_data data_in);
+int prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint32_t *num_tessellations);
 
 #endif

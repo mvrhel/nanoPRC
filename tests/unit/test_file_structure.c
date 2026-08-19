@@ -102,7 +102,7 @@ test_one_triangle_roundtrip(prc_context *ctx)
     PRC_ASSERT_EQ(pd->file_struct[0].tree->parts_count, 1);
     PRC_ASSERT_EQ(pd->file_struct[0].tree->product_count, 1);
 
-    prc_api_release_data(ctx, (prc_api_data)pd, NULL, 0, NULL, 0, NULL);
+    prc_api_release_data(ctx, (prc_api_data)pd, NULL, 0, NULL, 0, NULL, 0, NULL);
     prc_write_global_tables_free(ctx, &tables);
 }
 

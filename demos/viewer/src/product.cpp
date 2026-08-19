@@ -590,6 +590,10 @@ void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *te
     {
         face_max = 1;
     }
+    else if (tess->type == PRC_API_EXACT_GEOM)
+    {
+        face_max = numGraphicObjects;
+    }
     else
     {
         face_max = tess->num_faces;
@@ -648,6 +652,11 @@ void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *te
             {
                 num_text_primitives = tess->num_text_primitives;
             }
+        }
+        else if (tess->type == PRC_API_EXACT_GEOM)
+        {
+            num_graphic_primitives = 1;
+            hasTexture = 0;
         }
         else
         {

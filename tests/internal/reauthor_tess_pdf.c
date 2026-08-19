@@ -401,7 +401,7 @@ int main(int argc, char **argv)
        manifested as a hard crash on a larger tessellation (tess 901, 26540
        triangles) under ASan; a smaller one (tess 902) silently read freed-
        but-not-yet-reused memory without crashing. */
-    prc_api_release_data(ctx, data, &tess, 1, NULL, 0, model_tree);
+    prc_api_release_data(ctx, data, &tess, 1, NULL, 0, NULL, 0, model_tree);
     free(tess.tess_faces);
     prc_api_release_context(ctx);
     return 0;

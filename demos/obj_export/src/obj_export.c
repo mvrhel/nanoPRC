@@ -608,7 +608,7 @@ cleanup:
     {
         if (data)
         {
-            prc_api_release_data(ctx, data, tesses, total_tessellations, NULL, 0, model_tree);
+            prc_api_release_data(ctx, data, tesses, total_tessellations, NULL, 0, NULL, 0, model_tree);
         }
         prc_api_release_context(ctx);
     }

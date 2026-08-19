@@ -89,7 +89,7 @@ int main(int argc, char **argv)
     if (code != 0)
     {
         printf("RESULT\tPREP_TREE_FAIL\tcode=%d\n", code);
-        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL);
+        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
         prc_api_release_context(ctx);
         return 1;
     }
@@ -98,7 +98,7 @@ int main(int argc, char **argv)
     if (code != 0)
     {
         printf("RESULT\tCREATE_TREE_FAIL\tcode=%d\n", code);
-        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL);
+        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
         prc_api_release_context(ctx);
         return 1;
     }
@@ -107,7 +107,7 @@ int main(int argc, char **argv)
     if (code != 0)
     {
         printf("RESULT\tGET_NUM_TESS_FAIL\tcode=%d\n", code);
-        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, model_tree);
+        prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, model_tree);
         prc_api_release_context(ctx);
         return 1;
     }
@@ -154,7 +154,7 @@ int main(int argc, char **argv)
         }
     }
 
-    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, model_tree);
+    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, model_tree);
     prc_api_release_context(ctx);
     return 0;
 }
