@@ -30,6 +30,8 @@
 #define PRC_MAX_NURBS_CONTROL_POINTS 16000000ULL
 
 /* Forward declarations due to circular dependencies */
+static int prc_parse_ptr_curve(prc_context *ctx, prc_bit_state *bit_state,
+    prc_ptr_curve *data);
 static int prc_parse_ptr_surface(prc_context *ctx, prc_bit_state *bit_state,
     prc_ptr_surface *data);
 static int prc_parse_compressed_point(prc_context *ctx, prc_bit_state *bit_state,
@@ -2811,6 +2813,24 @@ prc_parse_crv_offset(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+    code = prc_parse_ptr_curve(ctx, bit_state, &data->base_curve);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_ptr_curve for base_curve\n");
+        return code;
+    }
+
+    data->offset_plane_normal = prc_parse_3d_vector(ctx, bit_state);
+    data->offset = prc_bitread_double(ctx, bit_state);
+    data->base_params = NULL;
+    data->base_func = NULL;
     return 0;
 }
 
