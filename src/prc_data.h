@@ -2940,6 +2940,8 @@ struct prc_crv_offset_s
     prc_exact_geom_transform exact_geom_transform;
     prc_parameterization parameterization;
     prc_ptr_curve base_curve;
+    void *base_func; /* For evaluating the base */
+    void *base_params; /* For evaluating the base */
     prc_vec3 offset_plane_normal;
     double offset;
 };

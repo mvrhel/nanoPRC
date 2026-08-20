@@ -77,6 +77,15 @@ typedef struct prc_surface_sampling_info_s
     uint32_t num_samples_v;
 } prc_surface_sampling_info;
 
+typedef struct prc_curve_sampling_info_s
+{
+    double start;
+    double end;
+    uint32_t num_samples;
+    void *curve_params;
+    curve_func curve_eval_func;
+} prc_curve_sampling_info;
+
 /* Forward declaration - populates sampling_info (including the valid parametric domain)
    for any prc_type_surf; needed early by the Blend02 bound-projection helpers */
 static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
@@ -397,6 +406,74 @@ prc_evaluate_hyperbola(prc_context *ctx, void *params, double input)
     return output;
 }
 
+/* Evaluate an offset curve at a single point */
+static prc_vec3
+prc_evaluate_offset_curve(prc_context *ctx, void *params, double input)
+{
+    prc_vec3 output;
+    prc_crv_offset *offset = (prc_crv_offset *)params;
+    prc_vec3 base_point;
+    prc_vec3 offset_dir;
+    curve_func base_func;
+    int code;
+
+    if (offset->base_func == NULL || offset->base_params == NULL)
+    {
+        output.x = 0.0;
+        output.y = 0.0;
+        output.z = 0.0;
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Missing base curve evaluator in prc_evaluate_offset_curve\n");
+        return output;
+    }
+
+    base_func = (curve_func)offset->base_func;
+    base_point = base_func(ctx, offset->base_params, input);
+    offset_dir.x = 0.0;
+    offset_dir.y = 0.0;
+    offset_dir.z = 0.0;
+
+    /* The base evaluator is also used for the finite-difference derivative. */
+    {
+        double h = 1e-5;
+        double before_input = input - h;
+        double after_input = input + h;
+        prc_vec3 before;
+        prc_vec3 after;
+        prc_vec3 base_deriv;
+
+        if (before_input < offset->parameterization.interval.min_value)
+            before_input = offset->parameterization.interval.min_value;
+        if (after_input > offset->parameterization.interval.max_value)
+            after_input = offset->parameterization.interval.max_value;
+        before = base_func(ctx, offset->base_params, before_input);
+        after = base_func(ctx, offset->base_params, after_input);
+        if (after_input == before_input)
+            return base_point;
+        base_deriv.x = (after.x - before.x) / (after_input - before_input);
+        base_deriv.y = (after.y - before.y) / (after_input - before_input);
+        base_deriv.z = (after.z - before.z) / (after_input - before_input);
+        prc_vec_cross(base_deriv, offset->offset_plane_normal, &offset_dir);
+    }
+
+    code = prc_vec_normalize(&offset_dir);
+    if (code < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Degenerate offset direction in prc_evaluate_offset_curve\n");
+        return base_point;
+    }
+
+    output.x = base_point.x + offset->offset * offset_dir.x;
+    output.y = base_point.y + offset->offset * offset_dir.y;
+    output.z = base_point.z + offset->offset * offset_dir.z;
+
+    if (offset->has_transform && !offset->exact_geom_transform.is_identity)
+    {
+        output = prc_exact_geom_apply_transform(ctx, &offset->exact_geom_transform, output);
+    }
+
+    return output;
+}
+
 /* Evaluate circle at a single point */
 static prc_vec3
 prc_evaluate_circle(prc_context *ctx, void *params, double input)
@@ -609,6 +686,140 @@ prc_evaluate_crv_nurbs(prc_context *ctx, void *params, double u)
     return output;
 }
 
+static int 
+prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
+    prc_curve_sampling_info *sample_info)
+{
+    int code;
+
+    switch (ptr_curve->curve_type)
+    {
+        case PRC_TYPE_CRV_NURBS:
+        {
+            prc_crv_nurbs *nurbs = ptr_curve->crv_nurbs;
+            sample_info->curve_params = (void *)nurbs;
+            sample_info->curve_eval_func = prc_evaluate_crv_nurbs;
+            sample_info->start = nurbs->u[nurbs->d];
+            sample_info->end = nurbs->u[nurbs->highest_index_of_knots - nurbs->d];
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Parabola:
+        {
+            prc_crv_parabola *parabola = ptr_curve->crv_parabola;
+            prc_parameterization params = parabola->parameterization;
+            sample_info->curve_params = (void *)parabola;
+            sample_info->curve_eval_func = prc_evaluate_parabola;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Line:
+        {
+            prc_crv_line *line = ptr_curve->crv_line;
+            prc_parameterization params = line->parameterization;
+            sample_info->curve_params = NULL;
+            sample_info->curve_eval_func = prc_evaluate_line;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = 2;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Hyperbola:
+        {
+            prc_crv_hyperbola *hyperbola = ptr_curve->crv_hyperbola;
+            prc_parameterization params = hyperbola->parameterization;
+            sample_info->curve_params = (void *)hyperbola;
+            sample_info->curve_eval_func = prc_evaluate_hyperbola;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Circle:
+        {
+            prc_crv_circle *circle = ptr_curve->crv_circle;
+            prc_parameterization params = circle->parameterization;
+            sample_info->curve_params = (void *)circle;
+            sample_info->curve_eval_func = prc_evaluate_circle;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Ellipse:
+        {
+            prc_crv_ellipse *ellipse = ptr_curve->crv_ellipse;
+            prc_parameterization params = ellipse->parameterization;
+            sample_info->curve_params = (void *)ellipse;
+            sample_info->curve_eval_func = prc_evaluate_ellipse;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Helix01:
+        {
+            prc_crv_helix01 *helix = ptr_curve->crv_helix01;
+            prc_parameterization params = helix->parameterization;
+            sample_info->curve_params = (void *)helix;
+            sample_info->curve_eval_func = prc_evaluate_helix;
+            sample_info->start = params.interval.min_value;
+            sample_info->end = params.interval.max_value;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        /* A series of straight line segments */
+        case PRC_TYPE_CRV_PolyLine:
+        {
+            prc_crv_polyline *polyline = ptr_curve->crv_polyline;
+            sample_info->curve_params = (void *)polyline;
+            sample_info->curve_eval_func = prc_evaluate_polyline;
+            sample_info->start = 0.0;
+            sample_info->end = (double)(polyline->number_of_points - 1);
+            sample_info->num_samples = polyline->number_of_points;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Offset:
+        {
+            prc_crv_offset *offset = ptr_curve->crv_offset;
+            prc_ptr_curve base_curve = offset->base_curve;
+
+            /* Make sure the base_curve is NOT PRC_TYPE_CRV_Offset to avoid
+               deep recursions */
+            if (base_curve.curve_type == PRC_TYPE_CRV_Offset)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid base base curve type in prc_get_curve_sample_info\n");
+                return PRC_ERROR_INTERNAL;
+            }
+
+            /* Sample info returns with details for the base_curve */
+            code = prc_get_curve_sample_info(ctx, data, &base_curve, sample_info);
+            if (code < 0)
+            {
+                return code;
+            }
+            break;
+        }
+
+        default:
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid base base curve type in prc_get_curve_sample_info\n");
+            return PRC_ERROR_INTERNAL;
+        }
+    }
+    return 0;
+}
+
 static int
 prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t face_index, prc_content_wire_edge *curve)
@@ -628,20 +839,25 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t num_samples;
     prc_exact_geom_transform *exact_geom_trans = NULL;
     prc_trans_3d *transform = NULL;
+    prc_curve_sampling_info sample_info;
     int code;
+
+    code = prc_get_curve_sample_info(ctx, data, &curve->ptr_curve, &sample_info);
+    if (code < 0)
+    {
+        return code;
+    }
+    start = sample_info.start;
+    end = sample_info.end;
+    num_samples = sample_info.num_samples;
+    curve_params = sample_info.curve_params;
+    curve_eval_func = sample_info.curve_eval_func;
 
     switch (curve->ptr_curve.curve_type)
     {
         case PRC_TYPE_CRV_NURBS:
         {
             prc_crv_nurbs *nurbs = curve->ptr_curve.crv_nurbs;
-
-            /* Valid parameter range excludes the clamped end knot multiplicities */
-            start = nurbs->u[nurbs->d];
-            end = nurbs->u[nurbs->highest_index_of_knots - nurbs->d];
-            curve_params = (void *)nurbs;
-            curve_eval_func = prc_evaluate_crv_nurbs;
-            num_samples = CURVE_SAMPLES;
             break;
         }
 
@@ -649,11 +865,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_parabola *parabola = curve->ptr_curve.crv_parabola;
             prc_parameterization params = parabola->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = (void *)parabola;
-            curve_eval_func = prc_evaluate_parabola;
-            num_samples = CURVE_SAMPLES;
             exact_geom_trans = &parabola->exact_geom_transform;
             transform = &parabola->transform;
             break;
@@ -663,11 +874,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_line *line = curve->ptr_curve.crv_line;
             prc_parameterization params = line->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = NULL;
-            curve_eval_func = prc_evaluate_line;
-            num_samples = 2;
             exact_geom_trans = &line->exact_geom_transform;
             transform = &line->transform;
             break;
@@ -677,11 +883,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_hyperbola *hyperbola = curve->ptr_curve.crv_hyperbola;
             prc_parameterization params = hyperbola->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = (void *)hyperbola;
-            curve_eval_func = prc_evaluate_hyperbola;
-            num_samples = CURVE_SAMPLES;
             exact_geom_trans = &hyperbola->exact_geom_transform;
             transform = &hyperbola->transform;
             break;
@@ -691,11 +892,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_circle *circle = curve->ptr_curve.crv_circle;
             prc_parameterization params = circle->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = (void *)circle;
-            curve_eval_func = prc_evaluate_circle;
-            num_samples = CURVE_SAMPLES;
             exact_geom_trans = &circle->exact_geom_transform;
             transform = &circle->transform;
             break;
@@ -705,11 +901,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_ellipse *ellipse = curve->ptr_curve.crv_ellipse;
             prc_parameterization params = ellipse->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = (void *)ellipse;
-            curve_eval_func = prc_evaluate_ellipse;
-            num_samples = CURVE_SAMPLES;
             exact_geom_trans = &ellipse->exact_geom_transform;
             transform = &ellipse->transform;
             break;
@@ -719,11 +910,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_helix01 *helix = curve->ptr_curve.crv_helix01;
             prc_parameterization params = helix->parameterization;
-            start = params.interval.min_value;
-            end = params.interval.max_value;
-            curve_params = (void *)helix;
-            curve_eval_func = prc_evaluate_helix;
-            num_samples = CURVE_SAMPLES;
             exact_geom_trans = &helix->exact_geom_transform;
             transform = &helix->transform;
             break;
@@ -733,13 +919,21 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         case PRC_TYPE_CRV_PolyLine:
         {
             prc_crv_polyline *polyline = curve->ptr_curve.crv_polyline;
-            start = 0.0;
-            end = (double)(polyline->number_of_points - 1);
-            curve_params = (void *)polyline;
-            curve_eval_func = prc_evaluate_polyline;
-            num_samples = polyline->number_of_points;
             exact_geom_trans = &polyline->exact_geom_transform;
             transform = &polyline->transform;
+            break;
+        }
+
+        case PRC_TYPE_CRV_Offset:
+        {
+            prc_crv_offset *offset = curve->ptr_curve.crv_offset;
+
+            /* Set the base one in the params so it can be used in 
+               prc_evaluate_offset_curve */
+            offset->base_func = sample_info.curve_eval_func;
+            offset->base_params = sample_info.curve_params;
+            curve_eval_func = prc_evaluate_offset_curve;
+            curve_params = (void*) offset;
             break;
         }
 
@@ -931,6 +1125,27 @@ prc_get_curve_eval_func(prc_context *ctx, prc_ptr_curve *curve,
             *min_u = curve->crv_nurbs->u[curve->crv_nurbs->d];
             *max_u = curve->crv_nurbs->u[curve->crv_nurbs->highest_index_of_knots - curve->crv_nurbs->d];
             return 0;
+        case PRC_TYPE_CRV_Offset:
+        {
+            prc_crv_offset *offset = curve->crv_offset;
+            prc_ptr_curve base_curve = offset->base_curve;
+            curve_func base_eval_func = NULL;
+
+            if (base_curve.curve_type == PRC_TYPE_CRV_Offset)
+                return PRC_ERROR_INTERNAL;
+
+            code = prc_get_curve_eval_func(ctx, &base_curve, &base_eval_func,
+                &offset->base_params, min_u, max_u);
+            if (code < 0)
+                return code;
+
+            offset->base_func = (void *)base_eval_func;
+            *eval_func = prc_evaluate_offset_curve;
+            *params = (void *)offset;
+            *min_u = offset->parameterization.interval.min_value;
+            *max_u = offset->parameterization.interval.max_value;
+            return 0;
+        }
         default:
             return PRC_ERROR_INTERNAL;
     }
