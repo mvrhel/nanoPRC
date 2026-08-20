@@ -113,25 +113,58 @@ uint8_t *prc_write_le_unique_id(uint8_t *p, uint32_t word0);
    this codebase has never read a word of, let alone implemented, yet every
    nanoPRC-written file was unconditionally claiming full knowledge of it.
    (One such gated field, PRC_TYPE_GRAPH_DirectionalLight's intensity at
-   >=8030, is read unconditionally by this codebase regardless of declared
-   version -- but nanoPRC's own writer never emits light nodes at all, so
-   this doesn't create a NEW self-inconsistency by lowering the declared
-   version here; it would only matter for reading third-party files that
-   already have lights and declare a version below 8030, which is a
-   pre-existing, separate concern.)
+   >=8030, WAS read unconditionally by this codebase regardless of declared
+   version. Fixed 2026-08-20 -- prc_parse_tree.c now gates it on
+   source_file_version and defaults to 1.0 below 8030, per the spec's own
+   "shall not attempt to read intensity from the bitstream". That was a read
+   -side desync on third-party files, unrelated to what this write facility
+   declares; nanoPRC's own writer emits no light nodes.)
 
-   8016/8016 (single, self-consistent, matching exactly the highest version
-   this codebase can actually justify) is now used instead: an empirically
-   isolated test (2026-07-27, matching an independent encoder's own
-   self-consistent-version convention, 8137/8137) on three real files that
-   reproducibly blank the Acrobat model tree found declared version made no
-   difference to those specific failures either way -- so this change is
-   about not asserting compliance with 15+ years of spec content this
-   codebase has no knowledge of, not a fix for any currently-known bug.
-   Re-validate against the full previously-Acrobat-confirmed file set
-   before treating this as safely shipped, same as any bitstream change. */
-#define PRC_WRITE_MIN_VERS_FOR_READ 8016u
-#define PRC_WRITE_AUTH_VERS 8016u
+   8016/8016 was used from that point (2026-07-27) on the reasoning above:
+   the highest version this codebase could then justify. **Superseded
+   2026-08-20 by 8137/8137**, for four independent reasons, the first of
+   which makes 8016 not merely conservative but wrong:
+
+   1. THIS WRITE FACILITY ALREADY EMITS 8137-ERA CONTENT. prc_write_tree.c
+      writes PRC_TYPE_MISC_GeneralTransformation (type tag + 16 doubles) for
+      any node with a non-identity placement transform. ISO/CD 14739-1
+      SS8.4.2 states that entity "was defined in version 8137 of the PRC
+      file Format Specification", and its Table 342 schema is exactly
+      Block_Version 8137 + SimpleFor 16 + Data_Double -- matching our
+      emission field for field. Declaring 8016 with min == auth means no
+      schema is written (the spec's "writer does not have to write any extra
+      data" case), so a reader conforming to exactly 8016 would meet an
+      entity type that did not exist at its version with nothing in the file
+      telling it how to skip. That is the precise failure the versioning
+      mechanism exists to prevent.
+   2. 8137 IS THE HIGHEST VERSION THE SPECIFICATION ITSELF DEFINES. The only
+      version-shaped numbers anywhere in the draft are 8030 (the
+      DirectionalLight intensity gate), 8137 (SS8.4.2), an illustrative 9149
+      inside a schema example, and 10001 -- which SS4.2 identifies as this
+      document's own publication version ("the first day of the year 2010"),
+      not a feature-set marker. Nothing in the document gates anything above
+      8137, so declaring 8137 claims conformance to the document as written.
+   3. ACROBAT'S PRC ENGINE current_version IS EXACTLY 8137. Measured
+      2026-08-18 by bisection on a known-good file: 8137 accepted, 8138
+      refused with "This 3D format is supported by a more recent release of
+      Adobe Acrobat", on a fully-updated 2026 install. 8137 decodes as
+      16 May 2008 -- the engine is ~18 years frozen.
+   4. IT IS THE ECOSYSTEM CONVENTION. PDF3DReportGen and an independent
+      OpenSCAD-based serializer both emit 8137/8137, as do 213 of the 310
+      files in the prc-db real-world corpus (69%).
+
+   min == auth, so no schema is required. Note what this does NOT claim to
+   fix: declared version was directly tested against the Acrobat blank-model
+   -tree family (2026-07-27, three real failing files at 8137/8137) and made
+   no difference, and files that reproduce that defect are now known to do so
+   while declaring 8137 themselves. This is a correctness fix for (1) and an
+   alignment for (2)-(4), not a blank-tree fix.
+
+   Re-validate against the full previously-Acrobat-confirmed file set before
+   treating this as safely shipped -- it changes the header of every written
+   file, same as any bitstream change. */
+#define PRC_WRITE_MIN_VERS_FOR_READ 8137u
+#define PRC_WRITE_AUTH_VERS 8137u
 
 /* Writes ContentPRCBase/ContentPRCRefBase's `name` field (Table 31): bit
    same=1 with no following string if `name` is NULL (matching this write

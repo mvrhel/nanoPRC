@@ -1194,7 +1194,26 @@ prc_parse_graph_light_object(prc_context *ctx, prc_bit_state *bit_state, prc_gra
 
     case PRC_TYPE_GRAPH_DirectionalLight:
         data->direction = prc_parse_3d_vector(ctx, bit_state);
-        data->intensity = prc_bitread_double(ctx, bit_state);
+        /* VERSION GATE (ISO/CD 14739-1, PRC_TYPE_GRAPH_DirectionalLight):
+           `intensity` is present only when the file's authoring version is
+           >= 8030. The authoring version is the SOLE mechanism for detecting
+           its presence -- there is no secondary flag -- and a reader meeting
+           an older file "shall treat intensity as 1.0 and shall not attempt
+           to read intensity from the bitstream".
+
+           Reading it unconditionally (this parser's behaviour until now) does
+           not merely produce a wrong intensity on a pre-8030 file: it consumes
+           8 bytes that are not there and desyncs the bitstream for everything
+           parsed after the light. PRC_TYPE_GRAPH_PointLight has no intensity
+           field at all in any version, so the gate belongs here only.
+
+           ctx->source_file_version carries the file's own authoring_version
+           (set in prc_parse_main.c from the FileStructure header), the same
+           field the >= 7046 / 7309 / 8016 gates elsewhere in this file use. */
+        if (ctx->source_file_version >= 8030)
+            data->intensity = prc_bitread_double(ctx, bit_state);
+        else
+            data->intensity = 1.0;
         break;
 
     case PRC_TYPE_GRAPH_SpotLight:
