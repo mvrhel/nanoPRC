@@ -2371,13 +2371,34 @@ prc_parse_crv_circle(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
+/* Table 259 CompositeSubCurve */
+static int
+prc_parse_composite_subcurve(prc_context *ctx, prc_bit_state *bit_state,
+    prc_composite_subcurve *data)
+{
+    int code;
+
+    code = prc_parse_ptr_curve(ctx, bit_state, &data->ptr_curve);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_ptr_curve\n");
+        return code;
+    }
+    data->sense = prc_bitread_bit(ctx, bit_state);
+    data->base_func = NULL;
+    data->base_params = NULL;
+
+    return 0;
+}
+
 /* Table 257 PRC_TYPE_CRV_Composite */
 static int
 prc_parse_crv_composite(prc_context *ctx, prc_bit_state *bit_state,
     prc_crv_composite *data, uint8_t read_tag)
 {
     int code;
-
+    uint32_t i;
+    
     if (read_tag)
     {
         data->tag = prc_bitread_uint32(ctx, bit_state);
@@ -2397,7 +2418,36 @@ prc_parse_crv_composite(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_curve\n");
         return code;
     }
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
 
+    data->number_of_subcurves = prc_bitread_uint32(ctx, bit_state);
+    if (data->number_of_subcurves > 0)
+    {
+        data->subcurves = (prc_composite_subcurve *)prc_calloc(ctx, data->number_of_subcurves,
+            sizeof(prc_composite_subcurve));
+        if (!data->subcurves)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Memory allocation failed in prc_parse_crv_composite\n");
+            return PRC_ERROR_MEMORY;
+        }
+        for (i = 0; i < data->number_of_subcurves; i++)
+        {
+            code = prc_parse_composite_subcurve(ctx, bit_state, &data->subcurves[i]);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Parsing error in prc_parse_composite_subcurve\n");
+                return code;
+            }
+        }
+    }
+
+    data->is_closed = prc_bitread_bit(ctx, bit_state);
     return 0;
 }
 
@@ -2648,7 +2698,7 @@ prc_parse_crv_hyperbola(prc_context *ctx, prc_bit_state *bit_state,
     data->parameterization = prc_parse_parameterization(ctx, bit_state);
     data->semi_axis_image = prc_bitread_double(ctx, bit_state); /* Different than spec */
     data->semi_axis = prc_bitread_double(ctx, bit_state);
-    data->type = prc_bitread_uint32(ctx, bit_state);
+    data->type = prc_bitread_uint8(ctx, bit_state);
 
     return 0;
 }
