@@ -2792,6 +2792,10 @@ struct prc_crv_onsurf_s
     prc_ptr_curve uv_curve;
     prc_ptr_surface surface;
     prc_domain uv_domain;
+    void *base_curve_func; /* For evaluating the base curve */
+    void *base_curve_params; /* For evaluating the base curve */
+    void *base_surface_func; /* For evaluating the base surface */
+    void *base_surface_params; /* For evaluating the base surface */
 };
 
 /* Table 262 — PRC_TYPE_CRV_Ellipse */

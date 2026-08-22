@@ -2478,6 +2478,38 @@ prc_parse_crv_onsurf(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
+
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+    data->tolerance = prc_bitread_double(ctx, bit_state);
+
+    /* A 2D curve in the parameter space of the surface */
+    code = prc_parse_ptr_curve(ctx, bit_state, &data->uv_curve);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_ptr_curve\n");
+        return code;
+    }
+
+    code = prc_parse_ptr_surface(ctx, bit_state, &data->surface);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_ptr_surface\n");
+        return code;
+    }
+
+    data->uv_domain = prc_parse_domain(ctx, bit_state);
+    
+    /* Used for exact geometry rendering */
+    data->base_curve_func = NULL;
+    data->base_curve_params = NULL;
+    data->base_surface_func = NULL;
+    data->base_surface_params = NULL;
+
     return 0;
 }
 
