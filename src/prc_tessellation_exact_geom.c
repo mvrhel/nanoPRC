@@ -95,6 +95,10 @@ static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
 static int prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
     prc_curve_sampling_info *sample_info);
 
+/* Forward declaration - used in curves before surfaces occur */
+static int prc_get_surface_eval_func(prc_context *ctx, prc_type_surf *surface,
+    surface_func *eval_func, void **params);
+
 /* A version of the 3D transform that we use for exact geometry. This one is limited
    to Identity, Translate, Rotate and Scale */
 static int
@@ -691,6 +695,33 @@ prc_evaluate_crv_nurbs(prc_context *ctx, void *params, double u)
 }
 
 static prc_vec3
+prc_evaluate_onsurf(prc_context *ctx, void *params, double w)
+{
+    prc_crv_onsurf *onsurf = (prc_crv_onsurf *)params;
+    prc_vec3 output = { 0.0, 0.0, 0.0 };
+    curve_func base_curve_eval;
+    prc_vec3 curve_output;
+    surface_func base_surf_eval;
+
+    if (onsurf == NULL || onsurf->base_curve_func == NULL ||
+        onsurf->base_curve_params == NULL || onsurf->base_surface_func == NULL ||
+        onsurf->base_surface_params == NULL)
+    {
+        return output;
+    }
+
+    /* Evaluate w on the curve to get the u, v position */
+    base_curve_eval = (curve_func) onsurf->base_curve_func;
+    curve_output = base_curve_eval(ctx, onsurf->base_curve_params, w);
+
+    /* Evaluate u, v on the surface to get the XYZ position */
+    base_surf_eval = (surface_func) onsurf->base_surface_func;
+    output = base_surf_eval(ctx, onsurf->base_surface_params, curve_output.x, curve_output.y);
+
+    return output;
+}
+
+static prc_vec3
 prc_evaluate_composite(prc_context *ctx, void *params, double u)
 {
     prc_crv_composite *composite = (prc_crv_composite *)params;
@@ -774,6 +805,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         case PRC_TYPE_CRV_NURBS:
         {
             prc_crv_nurbs *nurbs = ptr_curve->crv_nurbs;
+
             sample_info->curve_params = (void *)nurbs;
             sample_info->curve_eval_func = prc_evaluate_crv_nurbs;
             sample_info->start = nurbs->u[nurbs->d];
@@ -786,6 +818,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_parabola *parabola = ptr_curve->crv_parabola;
             prc_parameterization params = parabola->parameterization;
+
             sample_info->curve_params = (void *)parabola;
             sample_info->curve_eval_func = prc_evaluate_parabola;
             sample_info->start = params.interval.min_value;
@@ -798,6 +831,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_line *line = ptr_curve->crv_line;
             prc_parameterization params = line->parameterization;
+
             sample_info->curve_params = NULL;
             sample_info->curve_eval_func = prc_evaluate_line;
             sample_info->start = params.interval.min_value;
@@ -810,6 +844,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_hyperbola *hyperbola = ptr_curve->crv_hyperbola;
             prc_parameterization params = hyperbola->parameterization;
+
             sample_info->curve_params = (void *)hyperbola;
             sample_info->curve_eval_func = prc_evaluate_hyperbola;
             sample_info->start = params.interval.min_value;
@@ -822,6 +857,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_circle *circle = ptr_curve->crv_circle;
             prc_parameterization params = circle->parameterization;
+
             sample_info->curve_params = (void *)circle;
             sample_info->curve_eval_func = prc_evaluate_circle;
             sample_info->start = params.interval.min_value;
@@ -834,6 +870,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_ellipse *ellipse = ptr_curve->crv_ellipse;
             prc_parameterization params = ellipse->parameterization;
+
             sample_info->curve_params = (void *)ellipse;
             sample_info->curve_eval_func = prc_evaluate_ellipse;
             sample_info->start = params.interval.min_value;
@@ -846,6 +883,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         {
             prc_crv_helix01 *helix = ptr_curve->crv_helix01;
             prc_parameterization params = helix->parameterization;
+
             sample_info->curve_params = (void *)helix;
             sample_info->curve_eval_func = prc_evaluate_helix;
             sample_info->start = params.interval.min_value;
@@ -858,6 +896,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
         case PRC_TYPE_CRV_PolyLine:
         {
             prc_crv_polyline *polyline = ptr_curve->crv_polyline;
+
             sample_info->curve_params = (void *)polyline;
             sample_info->curve_eval_func = prc_evaluate_polyline;
             sample_info->start = 0.0;
@@ -898,6 +937,48 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             sample_info->end = (double)(composite->number_of_subcurves);
             sample_info->num_samples = (composite->number_of_subcurves > 0) ?
                 (composite->number_of_subcurves * 2U + 1U) : 1U;
+            break;
+        }
+
+        case PRC_TYPE_CRV_OnSurf:
+        {
+            prc_crv_onsurf *onsurf = ptr_curve->crv_onsurf;
+            prc_curve_sampling_info base_curve_sample_info;
+            prc_surface_sampling_info surface_sample_info;
+            surface_func surf_eval_func = NULL;
+            void *surf_eval_params = NULL;
+            prc_surface_sampling_info surface_samp_info;
+
+            sample_info->curve_params = (void *)onsurf;
+            sample_info->curve_eval_func = prc_evaluate_onsurf;
+
+            /* Get details of base curve sample type */
+            code = prc_get_curve_sample_info(ctx, data, &onsurf->uv_curve, &base_curve_sample_info);
+            if (code < 0)
+            {
+                return code;
+            }
+            onsurf->base_curve_func = base_curve_sample_info.curve_eval_func;
+            onsurf->base_curve_params = base_curve_sample_info.curve_params;
+            sample_info->start = base_curve_sample_info.start;
+            sample_info->end = base_curve_sample_info.end;
+            sample_info->num_samples = base_curve_sample_info.num_samples;
+
+            /* Get details on surface sample type. This sets up the matrix */
+            code = prc_get_surface_data(ctx, &onsurf->surface.surface, &surface_samp_info);
+            if (code < 0)
+            {
+                return code;
+            }
+
+            code = prc_get_surface_eval_func(ctx, &onsurf->surface.surface,
+                &surf_eval_func, &surf_eval_params);
+            if (code < 0)
+            {
+                return code;
+            }
+            onsurf->base_surface_func = surf_eval_func;
+            onsurf->base_surface_params = surf_eval_params;
             break;
         }
 
@@ -948,6 +1029,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         case PRC_TYPE_CRV_NURBS:
         {
             prc_crv_nurbs *nurbs = curve->ptr_curve.crv_nurbs;
+
             break;
         }
 
@@ -955,6 +1037,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_parabola *parabola = curve->ptr_curve.crv_parabola;
             prc_parameterization params = parabola->parameterization;
+
             exact_geom_trans = &parabola->exact_geom_transform;
             transform = &parabola->transform;
             break;
@@ -964,6 +1047,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_line *line = curve->ptr_curve.crv_line;
             prc_parameterization params = line->parameterization;
+
             exact_geom_trans = &line->exact_geom_transform;
             transform = &line->transform;
             break;
@@ -973,6 +1057,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_hyperbola *hyperbola = curve->ptr_curve.crv_hyperbola;
             prc_parameterization params = hyperbola->parameterization;
+
             exact_geom_trans = &hyperbola->exact_geom_transform;
             transform = &hyperbola->transform;
             break;
@@ -982,6 +1067,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_circle *circle = curve->ptr_curve.crv_circle;
             prc_parameterization params = circle->parameterization;
+
             exact_geom_trans = &circle->exact_geom_transform;
             transform = &circle->transform;
             break;
@@ -991,6 +1077,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_ellipse *ellipse = curve->ptr_curve.crv_ellipse;
             prc_parameterization params = ellipse->parameterization;
+
             exact_geom_trans = &ellipse->exact_geom_transform;
             transform = &ellipse->transform;
             break;
@@ -1000,6 +1087,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_helix01 *helix = curve->ptr_curve.crv_helix01;
             prc_parameterization params = helix->parameterization;
+
             exact_geom_trans = &helix->exact_geom_transform;
             transform = &helix->transform;
             break;
@@ -1009,6 +1097,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         case PRC_TYPE_CRV_PolyLine:
         {
             prc_crv_polyline *polyline = curve->ptr_curve.crv_polyline;
+
             exact_geom_trans = &polyline->exact_geom_transform;
             transform = &polyline->transform;
             break;
@@ -1018,12 +1107,21 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             prc_crv_offset *offset = curve->ptr_curve.crv_offset;
 
-            /* Set the base one in the params so it can be used in 
+            /* Set the base one in the params so it can be used in
                prc_evaluate_offset_curve */
             offset->base_func = sample_info.curve_eval_func;
             offset->base_params = sample_info.curve_params;
             curve_eval_func = prc_evaluate_offset_curve;
             curve_params = (void*) offset;
+            break;
+        }
+
+        case PRC_TYPE_CRV_OnSurf:
+        {
+            prc_crv_onsurf *onsurf = curve->ptr_curve.crv_onsurf;
+
+            exact_geom_trans = &onsurf->exact_geom_transform;
+            transform = &onsurf->transform;
             break;
         }
 
