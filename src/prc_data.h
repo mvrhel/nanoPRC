@@ -2760,6 +2760,9 @@ struct prc_composite_subcurve_s
 {
     prc_ptr_curve ptr_curve;
     uint8_t sense;
+    void *base_func;   /* For evaluating the base */
+    void *base_params; /* For evaluating the base */
+    uint32_t num_samples; /* For evaluating the subcurve */
 };
 
 /* Table 257 — PRC_TYPE_CRV_Composite */

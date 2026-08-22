@@ -91,6 +91,10 @@ typedef struct prc_curve_sampling_info_s
 static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
     prc_surface_sampling_info *sampling_info);
 
+/* Forward declaration - used by prc_evaluate_composite before the function body appears */
+static int prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
+    prc_curve_sampling_info *sample_info);
+
 /* A version of the 3D transform that we use for exact geometry. This one is limited
    to Identity, Translate, Rotate and Scale */
 static int
@@ -686,6 +690,79 @@ prc_evaluate_crv_nurbs(prc_context *ctx, void *params, double u)
     return output;
 }
 
+static prc_vec3
+prc_evaluate_composite(prc_context *ctx, void *params, double u)
+{
+    prc_crv_composite *composite = (prc_crv_composite *)params;
+    prc_vec3 output = { 0.0, 0.0, 0.0 };
+    double implicit_parameter;
+    uint32_t subcurve_index;
+    double delta;
+    double local_param;
+    prc_curve_sampling_info subcurve_info;
+    prc_composite_subcurve *subcurve;
+    curve_func subcurve_eval;
+    void *subcurve_params;
+    int code;
+
+    if (composite == NULL || composite->subcurves == NULL || composite->number_of_subcurves == 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid composite curve in prc_evaluate_composite\n");
+        return output;
+    }
+
+    if (composite->parameterization.coeff_a != 0.0)
+    {
+        implicit_parameter = (u - composite->parameterization.coeff_b) / composite->parameterization.coeff_a;
+    }
+    else
+    {
+        implicit_parameter = u;
+    }
+
+    if (implicit_parameter < 0.0)
+        implicit_parameter = 0.0;
+    else if (implicit_parameter > (double)composite->number_of_subcurves)
+        implicit_parameter = (double)composite->number_of_subcurves;
+
+    subcurve_index = (uint32_t)implicit_parameter;
+    if (subcurve_index >= composite->number_of_subcurves)
+        subcurve_index = composite->number_of_subcurves - 1;
+
+    subcurve = &composite->subcurves[subcurve_index];
+    memset(&subcurve_info, 0, sizeof(subcurve_info));
+    code = prc_get_curve_sample_info(ctx, NULL, &subcurve->ptr_curve, &subcurve_info);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Failed to sample composite subcurve in prc_evaluate_composite\n");
+        return output;
+    }
+
+    if (subcurve->base_func != NULL && subcurve->base_params != NULL)
+    {
+        subcurve_eval = (curve_func)subcurve->base_func;
+        subcurve_params = subcurve->base_params;
+    }
+    else
+    {
+        subcurve_eval = subcurve_info.curve_eval_func;
+        subcurve_params = subcurve_info.curve_params;
+    }
+
+    delta = implicit_parameter - (double)subcurve_index;
+    if (subcurve->sense)
+    {
+        local_param = subcurve_info.start + delta * (subcurve_info.end - subcurve_info.start);
+    }
+    else
+    {
+        local_param = subcurve_info.end - delta * (subcurve_info.end - subcurve_info.start);
+    }
+
+    output = subcurve_eval(ctx, subcurve_params, local_param);
+    return output;
+}
+
 static int 
 prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
     prc_curve_sampling_info *sample_info)
@@ -808,6 +885,19 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             {
                 return code;
             }
+            break;
+        }
+
+        case PRC_TYPE_CRV_Composite:
+        {
+            prc_crv_composite *composite = ptr_curve->crv_composite;
+
+            sample_info->curve_params = (void *)composite;
+            sample_info->curve_eval_func = prc_evaluate_composite;
+            sample_info->start = 0.0;
+            sample_info->end = (double)(composite->number_of_subcurves);
+            sample_info->num_samples = (composite->number_of_subcurves > 0) ?
+                (composite->number_of_subcurves * 2U + 1U) : 1U;
             break;
         }
 
@@ -937,6 +1027,106 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
             break;
         }
 
+        case PRC_TYPE_CRV_Composite:
+        {
+            prc_crv_composite *composite = curve->ptr_curve.crv_composite;
+            uint32_t num_sub_curves = composite->number_of_subcurves;
+            uint32_t k;
+
+            /* Get the needed data to evaluate each of the subcurves and determine
+               how many samples each needs to achieve the same curvature tolerance. */
+            for (k = 0; k < num_sub_curves; k++)
+            {
+                prc_composite_subcurve *sub_curve = &composite->subcurves[k];
+                prc_curve_sampling_info sub_curve_info;
+                curve_func subcurve_eval_func;
+                void *subcurve_params;
+                uint32_t subcurve_num_samples;
+                uint8_t subcurve_approx_good = 0;
+                uint32_t j;
+
+                memset(&sub_curve_info, 0, sizeof(sub_curve_info));
+                code = prc_get_curve_sample_info(ctx, data, &sub_curve->ptr_curve, &sub_curve_info);
+                if (code < 0)
+                {
+                    return code;
+                }
+
+                subcurve_eval_func = sub_curve_info.curve_eval_func;
+                subcurve_params = sub_curve_info.curve_params;
+                subcurve_num_samples = sub_curve_info.num_samples;
+
+                switch (sub_curve->ptr_curve.curve_type)
+                {
+                    case PRC_TYPE_CRV_Line:
+                        subcurve_num_samples = 2;
+                        break;
+
+                    case PRC_TYPE_CRV_PolyLine:
+                        subcurve_num_samples = (uint32_t)((prc_crv_polyline *)sub_curve->ptr_curve.crv_polyline)->number_of_points;
+                        if (subcurve_num_samples < 2)
+                            subcurve_num_samples = 2;
+                        break;
+
+                    default:
+                        if (subcurve_num_samples == 0)
+                            subcurve_num_samples = 2;
+
+                        while (!subcurve_approx_good)
+                        {
+                            subcurve_approx_good = 1;
+                            for (j = 0; j < subcurve_num_samples - 1; j++)
+                            {
+                                double t0 = sub_curve_info.start +
+                                    (sub_curve_info.end - sub_curve_info.start) *
+                                    ((double)j / (double)(subcurve_num_samples - 1));
+                                double t1 = sub_curve_info.start +
+                                    (sub_curve_info.end - sub_curve_info.start) *
+                                    ((double)(j + 1) / (double)(subcurve_num_samples - 1));
+                                prc_vec3 p0 = subcurve_eval_func(ctx, subcurve_params, t0);
+                                prc_vec3 p1 = subcurve_eval_func(ctx, subcurve_params, t1);
+                                prc_vec3 mid = subcurve_eval_func(ctx, subcurve_params, (t0 + t1) / 2.0);
+                                prc_vec3 seg_mid = { 0.0, 0.0, 0.0 };
+                                double dist;
+
+                                seg_mid.x = (p0.x + p1.x) / 2.0;
+                                seg_mid.y = (p0.y + p1.y) / 2.0;
+                                seg_mid.z = (p0.z + p1.z) / 2.0;
+
+                                dist = sqrt((mid.x - seg_mid.x) * (mid.x - seg_mid.x) +
+                                    (mid.y - seg_mid.y) * (mid.y - seg_mid.y) +
+                                    (mid.z - seg_mid.z) * (mid.z - seg_mid.z));
+                                if (dist > CURVE_PRECISION)
+                                {
+                                    subcurve_approx_good = 0;
+                                    break;
+                                }
+                            }
+                            if (!subcurve_approx_good)
+                            {
+                                subcurve_num_samples *= 2;
+                            }
+                        }
+                        break;
+                }
+
+                sub_curve->base_func = sub_curve_info.curve_eval_func;
+                sub_curve->base_params = sub_curve_info.curve_params;
+                sub_curve->num_samples = subcurve_num_samples;
+            }
+
+            /* Use the aggregate per-subcurve sample budget for the composite's global sample count. */
+            num_samples = 0;
+            for (k = 0; k < num_sub_curves; k++)
+            {
+                num_samples += composite->subcurves[k].num_samples;
+            }
+            if (num_samples == 0)
+                num_samples = 1;
+            curve_approx_good = 1;
+            break;
+        }
+
         default:
             data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
             return 0;
@@ -954,44 +1144,55 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
 
     /* Create a set of samples across the range, evaluate the curve
      * then evaluate at the midpoint of each segment and see if the distance is within tolerance.
-     * If not, subdivide the segment and repeat until we have a good set of samples */
+     * If not, subdivide the segment and repeat until we have a good set of samples.
+     * Composite curves are piecewise-defined; the midpoint test is not valid across subcurve joins,
+     * so their sample count is based on the sum of the subcurve sample counts instead of global
+     * recursive subdivision. */
 
     if (curve_eval_func == NULL)
     {
         prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid curve evaluation function in prc_sample_curve\n");
         return PRC_ERROR_INTERNAL;
     }
-    while (!curve_approx_good)
+
+    if (curve->ptr_curve.curve_type == PRC_TYPE_CRV_Composite)
     {
         curve_approx_good = 1;
-
-        for (i = 0; i < num_samples - 1; i++)
+    }
+    else
+    {
+        while (!curve_approx_good)
         {
-            t0 = start + (end - start) * ((double)i / (double)(num_samples - 1));
-            t1 = start + (end - start) * ((double)(i + 1) / (double)(num_samples - 1));
-            p0 = curve_eval_func(ctx, curve_params, t0);
-            p1 = curve_eval_func(ctx, curve_params, t1);
-            mid = curve_eval_func(ctx, curve_params, (t0 + t1) / 2.0);
+            curve_approx_good = 1;
 
-            /* Evaluate the midpoint of the segment */
-            seg_mid;
-            seg_mid.x = (p0.x + p1.x) / 2.0;
-            seg_mid.y = (p0.y + p1.y) / 2.0;
-            seg_mid.z = (p0.z + p1.z) / 2.0;
-
-            /* Calculate the distance from the midpoint to the curve */
-            dist = sqrt((mid.x - seg_mid.x) * (mid.x - seg_mid.x) +
-                (mid.y - seg_mid.y) * (mid.y - seg_mid.y) +
-                (mid.z - seg_mid.z) * (mid.z - seg_mid.z));
-            if (dist > CURVE_PRECISION)
+            for (i = 0; i < num_samples - 1; i++)
             {
-                curve_approx_good = 0;
-                break;
+                t0 = start + (end - start) * ((double)i / (double)(num_samples - 1));
+                t1 = start + (end - start) * ((double)(i + 1) / (double)(num_samples - 1));
+                p0 = curve_eval_func(ctx, curve_params, t0);
+                p1 = curve_eval_func(ctx, curve_params, t1);
+                mid = curve_eval_func(ctx, curve_params, (t0 + t1) / 2.0);
+
+                /* Evaluate the midpoint of the segment */
+                seg_mid;
+                seg_mid.x = (p0.x + p1.x) / 2.0;
+                seg_mid.y = (p0.y + p1.y) / 2.0;
+                seg_mid.z = (p0.z + p1.z) / 2.0;
+
+                /* Calculate the distance from the midpoint to the curve */
+                dist = sqrt((mid.x - seg_mid.x) * (mid.x - seg_mid.x) +
+                    (mid.y - seg_mid.y) * (mid.y - seg_mid.y) +
+                    (mid.z - seg_mid.z) * (mid.z - seg_mid.z));
+                if (dist > CURVE_PRECISION)
+                {
+                    curve_approx_good = 0;
+                    break;
+                }
             }
-        }
-        if (!curve_approx_good)
-        {
-            num_samples *= 2;
+            if (!curve_approx_good)
+            {
+                num_samples *= 2;
+            }
         }
     }
 
@@ -1014,10 +1215,37 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         return PRC_ERROR_MEMORY;
     }
 
-    for (i = 0; i < num_samples; i++)
+    if (curve->ptr_curve.curve_type == PRC_TYPE_CRV_Composite)
     {
-        t = start + (end - start) * ((double)i / (double)(num_samples - 1));
-        wire_data->points[i] = curve_eval_func(ctx, curve_params, t);
+        prc_crv_composite *composite = curve->ptr_curve.crv_composite;
+        uint32_t point_index = 0;
+
+        for (i = 0; i < composite->number_of_subcurves; i++)
+        {
+            prc_composite_subcurve *sub_curve = &composite->subcurves[i];
+            uint32_t j;
+            uint32_t sub_count = sub_curve->num_samples;
+
+            if (sub_count == 0)
+                sub_count = 2;
+
+            for (j = 0; j < sub_count; j++)
+            {
+                double sub_t = (sub_count > 1) ?
+                    ((double)j / (double)(sub_count - 1)) : 0.0;
+                double composite_t = (double)i + sub_t;
+
+                wire_data->points[point_index++] = curve_eval_func(ctx, curve_params, composite_t);
+            }
+        }
+    }
+    else
+    {
+        for (i = 0; i < num_samples; i++)
+        {
+            t = start + (end - start) * ((double)i / (double)(num_samples - 1));
+            wire_data->points[i] = curve_eval_func(ctx, curve_params, t);
+        }
     }
 
 #if 0
