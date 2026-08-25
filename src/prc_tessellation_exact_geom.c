@@ -3034,6 +3034,98 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
 }
 
 static int
+prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_index, uint32_t face_index,
+    prc_compressed_face *topo_face)
+{
+    int code;
+
+    switch (topo_face->tag)
+    {
+        case PRC_HCG_IsoPlane:
+        {
+            prc_hcg_iso_plane hcg_iso_plane = topo_face->hcg_iso_plane;
+            break;
+        }
+
+        case PRC_HCG_IsoCylinder:
+        {
+            prc_hcg_iso_cylinder hcg_iso_cylinder = topo_face->hcg_iso_cylinder;
+            break;
+        }
+
+        case PRC_HCG_IsoTorus:
+        {
+            prc_hcg_iso_torus hcg_iso_torus = topo_face->hcg_iso_torus;
+            break;
+        }
+
+        case PRC_HCG_IsoSphere:
+        {
+            prc_hcg_iso_sphere hcg_iso_sphere = topo_face->hcg_iso_sphere;
+            break;
+        }
+
+        case PRC_HCG_IsoCone:
+        {
+            prc_hcg_iso_cone hcg_iso_cone = topo_face->hcg_iso_cone;
+            break;
+        }
+
+        case PRC_HCG_IsoNURBS:
+        {
+            prc_hcg_iso_nurbs hcg_iso_nurbs = topo_face->hcg_iso_nurbs;
+            break;
+        }
+
+        case PRC_HCG_AnaPlane:
+        {
+            prc_hcg_ana_plane hcg_ana_plane = topo_face->hcg_ana_plane;
+            break;
+        }
+
+        case PRC_HCG_AnaCylinder:
+        {
+            prc_hcg_ana_cylinder hcg_ana_cylinder = topo_face->hcg_ana_cylinder;
+            break;
+        }
+
+        case PRC_HCG_AnaTorus:
+        {
+            prc_hcg_ana_torus hcg_ana_torus = topo_face->hcg_ana_torus;
+            break;
+        }
+
+        case PRC_HCG_AnaSphere:
+        {
+            prc_hcg_ana_sphere hcg_ana_sphere = topo_face->hcg_ana_sphere;
+            break;
+        }
+
+        case PRC_HCG_AnaCone:
+        {
+            prc_hcg_ana_cone hcg_ana_cone = topo_face->hcg_ana_cone;
+            break;
+        }
+
+        case PRC_HCG_AnaNURBS:
+        {
+            prc_hcg_ana_nurbs hcg_ana_nurbs = topo_face->hcg_ana_nurbs;
+            break;
+        }
+
+        case PRC_HCG_AnaGenericFace:
+        {
+            prc_hcg_ana_generic_face hcg_ana_generic_face = topo_face->hcg_ana_generic_face;
+            break;
+        }
+        default:
+            prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type in prc_tessellate_compressed_face: %u\n", entity_type);
+            return PRC_ERROR_PARSE;
+    }
+    return 0;
+}
+
+static int
 prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, uint32_t face_index,
                             prc_topo_face *topo_face, uint8_t orientation)
 {
@@ -3499,6 +3591,7 @@ prc_count_shells_faces_in_topo(prc_context *ctx, prc_topo *topo,
         prc_topo_brep_data *brep_data = topo->topo_brep_data;
         if (brep_data->number_of_connex > 0)
         {
+            /* Do we need to worry about multiple connex here? */
             prc_topo_connex *connex = brep_data->connex[0].topo->topo_connex;
             *num_shells = connex->number_of_shells;
             for (uint32_t i = 0; i < connex->number_of_shells; i++)
@@ -3507,6 +3600,22 @@ prc_count_shells_faces_in_topo(prc_context *ctx, prc_topo *topo,
                 *num_faces += prc_count_faces_in_shell(ctx, shell);
             }
         }
+    }
+    else if (topo->tag == PRC_TYPE_TOPO_BrepDataCompress)
+    {
+        /* The number of faces in the compressed brep is calculated as the
+           number of faces in all of the shells in all of the connex entities.*/
+        prc_topo_brep_data_compress *brep_data_comp = topo->topo_brep_data_compress;
+
+        /* We will handle just the single_connex compressed at this time. */
+        if (!brep_data_comp->single_connex_test)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Multi-connex in compressed brep not yet supported");
+            return;
+        }
+        /* In this case we just have a single shell and how every many faces that shell has */
+        *num_shells = 1;
+        *num_faces = brep_data_comp->number_of_faces;
     }
 }
 
@@ -3572,7 +3681,17 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
     data->exact_geom_tess[geom_count].number_of_shells = num_shells;
     for (i = 0; i < num_shells; i++)
     {
-        uint32_t num_faces_in_shell = (num_wires == 1) ? 1 : prc_count_faces_in_shell(ctx, topo->topo_brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell);
+        uint32_t num_faces_in_shell = 0;
+
+        if (topo->tag == PRC_TYPE_TOPO_BrepData)
+        {
+            num_faces_in_shell = (num_wires == 1) ? 1 : prc_count_faces_in_shell(ctx, topo->topo_brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell);
+        }
+        else if (topo->tag == PRC_TYPE_TOPO_BrepDataCompress)
+        {
+            /* Note we only handle the single connex case for now.. */
+            num_faces_in_shell = topo->topo_brep_data_compress->single_connex.number_of_faces;
+        }
         data->exact_geom_tess[geom_count].shells[i].faces = (prc_exact_geom_face *)prc_calloc(ctx, num_faces, sizeof(prc_exact_geom_face));
         if (data->exact_geom_tess[geom_count].shells[i].faces == NULL)
         {
@@ -3673,8 +3792,33 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                 break;
 
-            case PRC_TYPE_TOPO_Body:
             case PRC_TYPE_TOPO_BrepDataCompress:
+            {
+                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_3D;
+                prc_topo_brep_data_compress *brep_data_comp = topo->topo_brep_data_compress;
+                uint8_t orientation = 0;
+                prc_compressed_face *compressed_face;
+
+                /* Skip a number of cases as we learn to walk before running */
+                if (!brep_data_comp->single_connex_test)
+                {
+                    /* We don't handle multi-connex here yet */
+                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    return 0;
+                }
+
+                data->exact_geom_tess[geom_count].shells[i].faces[j].orientation = orientation;
+                compressed_face = &brep_data_comp->single_connex.faces[j];
+                code = prc_tessellate_compressed_face(ctx, data, i, j, compressed_face);
+                if (code < 0)
+                {
+                    prc_error(ctx, code, "Failed in prc_sample_curve\n");
+                    return code;
+                }
+                (*num_tessellations)++;
+                break;
+            }
+            case PRC_TYPE_TOPO_Body:
             case PRC_TYPE_TOPO_Face:
                 data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                 break;
