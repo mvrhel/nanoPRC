@@ -5671,6 +5671,7 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
         code = prc_parse_brep_data_compress(ctx, bit_state, data->topo_brep_data_compress, DONT_READ_TAG);
 
         /* For now, done with this data. Release it */
+#if 0
         prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
         if (compressed_data != NULL)
         {
@@ -5689,6 +5690,7 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
             prc_free(ctx, compressed_data);
             ctx->internal.nano_brep_data = NULL;
         }
+#endif
         break;
 
     default:
