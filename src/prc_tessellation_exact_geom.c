@@ -87,6 +87,23 @@ typedef struct prc_curve_sampling_info_s
     curve_func curve_eval_func;
 } prc_curve_sampling_info;
 
+typedef struct prc_hcg_circle_information_s
+{
+    uint8_t has_center;
+    uint8_t has_normal;
+    uint8_t has_start_end_points;
+    uint8_t is_full_circle;
+    uint8_t is_arc_of_zero_pi_or_twopi;
+    uint8_t has_middle_of_arc_point;
+    uint8_t has_circle_angle_bit;
+    prc_vec3 center;
+    prc_vec3 normal;
+    prc_vec3 start_point;
+    prc_vec3 end_point;
+    prc_vec3 middle_of_arc_point;
+    uint8_t circle_angle_bit; /* If has_circle_angle_bit is true, then this is set to true means circle_angle > pi */
+} prc_hcg_circle_information;
+
 /* Forward declaration - populates sampling_info (including the valid parametric domain)
    for any prc_type_surf; needed early by the Blend02 bound-projection helpers */
 static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
@@ -3034,6 +3051,687 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
 }
 
 static int
+prc_get_curve_by_id(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data,
+    uint32_t index_compressed_curve, prc_compressed_curve **curve)
+{
+    if (index_compressed_curve >= compressed_data->current_curve_index)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Invalid compressed curve index: %u\n", index_compressed_curve);
+        return PRC_ERROR_PARSE;
+    }
+    *curve = &compressed_data->curves[index_compressed_curve];
+    return 0;
+}
+
+static int
+prc_get_vertex_by_id(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data,
+    uint32_t index_compressed_vertex, prc_compressed_vertex **vertex)
+{
+    if (index_compressed_vertex >= compressed_data->current_vertex_index)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Invalid compressed vertex index: %u\n", index_compressed_vertex);
+        return PRC_ERROR_PARSE;
+    }
+    *vertex = &compressed_data->vertices[index_compressed_vertex];
+    return 0;
+}
+
+static int
+prc_get_compressed_curve(prc_context *ctx, prc_ref_or_compressed_curve *ref_or_comp_curve,
+    prc_compressed_curve **comp_curve)
+{
+    int code = 0;
+
+    if (ref_or_comp_curve->curve_is_not_already_stored ||
+        ref_or_comp_curve->is_deduced_curve)
+    {
+        *comp_curve = ref_or_comp_curve->compressed_curve;
+    }
+    else
+    {
+        prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
+        code = prc_get_curve_by_id(ctx, compressed_data,
+            ref_or_comp_curve->index_compressed_curve, comp_curve);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed to get curve by id in prc_get_compressed_curve\n");
+            return code;
+        }
+    }
+    return 0;
+}
+
+static int
+prc_get_compressed_vertex(prc_context *ctx, prc_compressed_vertex *comp_vertex,
+                         prc_vec3 *vertex)
+{
+    int code = 0;
+
+    if (comp_vertex->not_already_stored)
+    {
+        *vertex = comp_vertex->point_data.point;
+        return 0;
+    }
+    else
+    {
+        prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
+        prc_compressed_vertex *vertex_store = NULL;
+        code = prc_get_vertex_by_id(ctx, compressed_data, comp_vertex->point_index,
+                                    &vertex_store);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed to get common vertex by id in prc_get_compressed_point\n");
+            return code;
+        }
+        *vertex = vertex_store->point_data.point;
+    }
+    return 0;
+}
+
+static void
+prc_get_compressed_point(prc_context *ctx, prc_compressed_point *comp_point,
+    prc_vec3 *vertex)
+{
+    *vertex = comp_point->point;
+}
+
+static int
+prc_get_start_end_data(prc_context *ctx, prc_start_end_data *data,
+    prc_vec3 *start, prc_vec3 *end)
+{
+    int code = 0;
+
+    if (data->is_vertex)
+    {
+        code = prc_get_compressed_vertex(ctx, &data->start_vertex, start);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed to get start vertex by id in prc_get_start_end_data\n");
+            return code;
+        }
+        code = prc_get_compressed_vertex(ctx, &data->end_vertex, end);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed to get end vertex by id in prc_get_start_end_data\n");
+            return code;
+        }
+    }
+    else
+    {
+        prc_get_compressed_point(ctx, &data->start_point, start);
+        prc_get_compressed_point(ctx, &data->end_point, end);
+    }
+    return 0;
+}
+
+static int
+prc_get_hcg_line_data(prc_context *ctx, prc_hcg_line *data,
+    prc_vec3 *start, prc_vec3 *end)
+{
+    int code;
+
+    code = prc_get_start_end_data(ctx, &data->start_end_data, start, end);
+
+    return code;
+}
+
+static int
+prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle, prc_hcg_circle_information *info)
+{
+    int code;
+
+    memset(info, 0, sizeof(*info));
+
+    if (hcg_circle->is_particular_circle)
+    {
+        info->is_arc_of_zero_pi_or_twopi = 1;
+        info->is_full_circle = hcg_circle->particular_circle.full_circle;
+        if (!hcg_circle->particular_circle.compressed_iso_spline)
+        {
+            info->has_start_end_points = 1;
+            code = prc_get_start_end_data(ctx, &hcg_circle->particular_circle.start_end_data,
+                &info->start_point, &info->end_point);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get start end in prc_get_hcg_circle_data\n");
+                return code;
+            }
+        }
+        if (info->is_full_circle)
+        {
+            info->has_center = 1;
+            info->center = hcg_circle->particular_circle.center.point;
+            info->has_normal = 1;
+            info->normal = hcg_circle->particular_circle.normal_plane.point;
+        }
+        else
+        {
+            info->has_middle_of_arc_point = 1;
+            info->middle_of_arc_point = hcg_circle->particular_circle.middle_of_arc.point;
+        }
+    }
+    else
+    {
+        if (!hcg_circle->general_circle.compressed_iso_spline)
+        {
+            info->has_start_end_points = 1;
+            info->start_point = hcg_circle->general_circle.start_end_data.start_point.point;
+            info->end_point = hcg_circle->general_circle.start_end_data.end_point.point;
+        }
+        info->has_center = 1;
+        info->center = hcg_circle->general_circle.center.point;
+        info->has_circle_angle_bit = 1;
+        info->circle_angle_bit = hcg_circle->general_circle.circle_angle;
+    }
+
+    if (!info->has_center && !info->is_full_circle && info->has_start_end_points)
+    {
+        prc_vec3 midpoint;
+
+        if (prc_vec_dist_between_two_points(info->start_point, info->end_point) <= CURVE_PRECISION)
+        {
+            if (info->has_middle_of_arc_point &&
+                prc_vec_dist_between_two_points(info->start_point, info->middle_of_arc_point) > CURVE_PRECISION)
+            {
+                /* Full circle: the opposite point is the arc midpoint and the center is
+                   at the midpoint between the repeated start/end and that opposite point. */
+                prc_vec_avg(info->start_point, info->middle_of_arc_point, &midpoint);
+                info->center = midpoint;
+                info->has_center = 1;
+                info->is_arc_of_zero_pi_or_twopi = 1;
+            }
+            else
+            {
+                /* Zero-angle arc: nothing to infer; treat as degenerate and reject. */
+                info->is_arc_of_zero_pi_or_twopi = 1;
+            }
+        }
+        else if (info->has_middle_of_arc_point)
+        {
+            /* Half-circle: the circle center lies at the midpoint of the diameter endpoints. */
+            prc_vec_avg(info->start_point, info->end_point, &midpoint);
+            info->center = midpoint;
+            info->has_center = 1;
+            info->is_arc_of_zero_pi_or_twopi = 1;
+        }
+    }
+    return 0;
+}
+
+static double
+prc_get_hcg_circle_radius(const prc_hcg_circle_information *info)
+{
+    prc_vec3 center_to_point;
+    double radius = 0.0;
+
+    if (!info->has_center)
+    {
+        return 0.0;
+    }
+
+    if (info->has_start_end_points)
+    {
+        prc_vec_sub(info->start_point, info->center, &center_to_point);
+        radius = prc_vec_length(center_to_point);
+        if (radius > 0.0)
+        {
+            return radius;
+        }
+        prc_vec_sub(info->end_point, info->center, &center_to_point);
+        radius = prc_vec_length(center_to_point);
+        if (radius > 0.0)
+        {
+            return radius;
+        }
+    }
+
+    if (info->has_middle_of_arc_point)
+    {
+        prc_vec_sub(info->middle_of_arc_point, info->center, &center_to_point);
+        radius = prc_vec_length(center_to_point);
+        if (radius > 0.0)
+        {
+            return radius;
+        }
+    }
+
+    return 0.0;
+}
+
+static int
+prc_build_iso_cylinder_from_circle_data(prc_context *ctx,
+    const prc_hcg_circle_information *circle_info,
+    const prc_vec3 *line_start,
+    const prc_vec3 *line_end,
+    const prc_vec3 *common_vertex,
+    prc_surf_cylinder *cylinder)
+{
+    prc_vec3 axis;
+    prc_vec3 center;
+    prc_vec3 radial_vec;
+    prc_vec3 x_axis;
+    prc_vec3 y_axis;
+    prc_vec3 ref_axis;
+    prc_vec3 line_dir;
+    double radius = 0.0;
+    int code;
+
+    if (circle_info == NULL || cylinder == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Invalid cylinder circle data in prc_build_iso_cylinder_from_circle_data\n");
+        return PRC_ERROR_PARSE;
+    }
+    if (!circle_info->has_center)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "Missing cylinder circle center in prc_build_iso_cylinder_from_circle_data\n");
+        return PRC_ERROR_PARSE;
+    }
+
+    memset(cylinder, 0, sizeof(*cylinder));
+    center = circle_info->center;
+
+    if (circle_info->has_normal)
+    {
+        axis = circle_info->normal;
+    }
+    else if (line_start != NULL && line_end != NULL)
+    {
+        prc_vec_sub(*line_end, *line_start, &line_dir);
+        axis = line_dir;
+    }
+    else
+    {
+        axis.x = 0.0;
+        axis.y = 0.0;
+        axis.z = 1.0;
+    }
+    code = prc_vec_normalize(&axis);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Degenerate cylinder axis in prc_build_iso_cylinder_from_circle_data\n");
+        return code;
+    }
+
+    if (common_vertex != NULL)
+    {
+        prc_vec_sub(*common_vertex, center, &radial_vec);
+    }
+    else if (line_start != NULL && line_end != NULL)
+    {
+        prc_vec3 line_mid;
+        prc_vec_avg(*line_start, *line_end, &line_mid);
+        prc_vec_sub(line_mid, center, &radial_vec);
+    }
+    else if (circle_info->has_start_end_points)
+    {
+        prc_vec_sub(circle_info->start_point, center, &radial_vec);
+    }
+    else
+    {
+        radial_vec.x = 1.0;
+        radial_vec.y = 0.0;
+        radial_vec.z = 0.0;
+    }
+
+    if (prc_vec_length(radial_vec) > 0.0)
+    {
+        double axial_component = prc_vec_dot_product(radial_vec, axis);
+        prc_vec3 axial_vec = axis;
+        prc_vec_scale(axial_component, &axial_vec);
+        prc_vec_sub(radial_vec, axial_vec, &radial_vec);
+        radius = prc_vec_length(radial_vec);
+    }
+    if (radius <= 0.0 && circle_info->has_start_end_points)
+    {
+        prc_vec_sub(circle_info->start_point, center, &radial_vec);
+        if (prc_vec_length(radial_vec) > 0.0)
+        {
+            double axial_component = prc_vec_dot_product(radial_vec, axis);
+            prc_vec3 axial_vec = axis;
+            prc_vec_scale(axial_component, &axial_vec);
+            prc_vec_sub(radial_vec, axial_vec, &radial_vec);
+            radius = prc_vec_length(radial_vec);
+        }
+    }
+    if (radius <= 0.0 && circle_info->has_middle_of_arc_point)
+    {
+        prc_vec_sub(circle_info->middle_of_arc_point, center, &radial_vec);
+        if (prc_vec_length(radial_vec) > 0.0)
+        {
+            double axial_component = prc_vec_dot_product(radial_vec, axis);
+            prc_vec3 axial_vec = axis;
+            prc_vec_scale(axial_component, &axial_vec);
+            prc_vec_sub(radial_vec, axial_vec, &radial_vec);
+            radius = prc_vec_length(radial_vec);
+        }
+    }
+    if (radius <= 0.0)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Invalid cylinder radius in prc_build_iso_cylinder_from_circle_data\n");
+        return PRC_ERROR_PARSE;
+    }
+
+    if (prc_vec_length(radial_vec) > 0.0)
+    {
+        prc_vec_scale(1.0 / prc_vec_length(radial_vec), &radial_vec);
+        x_axis = radial_vec;
+    }
+    else
+    {
+        if (fabs(axis.z) > 0.9)
+        {
+            ref_axis.x = 1.0;
+            ref_axis.y = 0.0;
+            ref_axis.z = 0.0;
+        }
+        else
+        {
+            ref_axis.x = 0.0;
+            ref_axis.y = 0.0;
+            ref_axis.z = 1.0;
+        }
+        prc_vec_cross(ref_axis, axis, &x_axis);
+        code = prc_vec_normalize(&x_axis);
+        if (code < 0)
+        {
+            x_axis.x = 1.0;
+            x_axis.y = 0.0;
+            x_axis.z = 0.0;
+        }
+    }
+
+    prc_vec_cross(axis, x_axis, &y_axis);
+    code = prc_vec_normalize(&y_axis);
+    if (code < 0)
+    {
+        y_axis.x = 0.0;
+        y_axis.y = 1.0;
+        y_axis.z = 0.0;
+    }
+
+    cylinder->tag = PRC_TYPE_SURF_Cylinder;
+    cylinder->has_transform = 1;
+    cylinder->transform.behavior = PRC_TRANSFORMATION_Translate | PRC_TRANSFORMATION_Rotate;
+    cylinder->transform.translation = center;
+    cylinder->transform.rotation[0] = x_axis;
+    cylinder->transform.rotation[1] = y_axis;
+    cylinder->transform.scale = 1.0;
+    cylinder->radius = radius;
+    cylinder->parameterization.swap_uv = 0;
+    cylinder->parameterization.surface_domain.min_uv.x = 0.0;
+    cylinder->parameterization.surface_domain.min_uv.y = 0.0;
+    cylinder->parameterization.surface_domain.max_uv.x = 2.0 * PRC_PI;
+    cylinder->parameterization.surface_domain.max_uv.y = 1.0;
+
+    if (prc_exact_geom_set_transform(ctx, &cylinder->exact_geom_transform, &cylinder->transform) < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to initialize cylinder transform in prc_build_iso_cylinder_from_circle_data\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    return 0;
+}
+
+static void
+prc_compute_circle_angle_basis(const prc_vec3 *plane_normal, prc_vec3 *u_axis, prc_vec3 *v_axis)
+{
+    prc_vec3 ref_axis;
+    prc_vec3 normal = *plane_normal;
+
+    if (fabs(normal.z) > 0.9)
+    {
+        ref_axis.x = 1.0;
+        ref_axis.y = 0.0;
+        ref_axis.z = 0.0;
+    }
+    else
+    {
+        ref_axis.x = 0.0;
+        ref_axis.y = 0.0;
+        ref_axis.z = 1.0;
+    }
+
+    prc_vec_cross(ref_axis, normal, u_axis);
+    prc_vec_normalize(u_axis);
+    prc_vec_cross(normal, *u_axis, v_axis);
+    prc_vec_normalize(v_axis);
+}
+
+static double
+prc_compute_circle_angle(const prc_vec3 *center, const prc_vec3 *plane_normal,
+    const prc_vec3 *point)
+{
+    prc_vec3 u_axis;
+    prc_vec3 v_axis;
+    prc_vec3 rel;
+    double x;
+    double y;
+
+    prc_compute_circle_angle_basis(plane_normal, &u_axis, &v_axis);
+    prc_vec_sub(*point, *center, &rel);
+    x = prc_vec_dot_product(rel, u_axis);
+    y = prc_vec_dot_product(rel, v_axis);
+    return atan2(y, x);
+}
+
+static void
+prc_normalize_angle_range(double *min_angle, double *max_angle)
+{
+    double span = *max_angle - *min_angle;
+
+    if (span < 0.0)
+    {
+        span += 2.0 * PRC_PI;
+        *max_angle = *min_angle + span;
+    }
+    if (span <= 0.0)
+    {
+        *max_angle = *min_angle + 2.0 * PRC_PI;
+    }
+}
+
+static int
+prc_build_iso_torus_from_circle_data(prc_context *ctx,
+    const prc_hcg_circle_information *major_radius_circle_info,
+    const prc_hcg_circle_information *minor_radius_circle_info,
+    const prc_vec3 *common_vertex, prc_surf_torus *torus)
+{
+    prc_vec3 torus_center;
+    prc_vec3 torus_axis;
+    prc_vec3 minor_center_to_major_center;
+    prc_vec3 major_center_to_common;
+    prc_vec3 torus_reference;
+    prc_vec3 x_axis;
+    prc_vec3 y_axis;
+    double major_radius;
+    double minor_radius;
+    double u_min = 0.0;
+    double u_max = 2.0 * PRC_PI;
+    double v_min = 0.0;
+    double v_max = 2.0 * PRC_PI;
+    int code;
+
+    if (major_radius_circle_info == NULL || minor_radius_circle_info == NULL || torus == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Invalid torus circle data in prc_build_iso_torus_from_circle_data\n");
+        return PRC_ERROR_PARSE;
+    }
+    if (!major_radius_circle_info->has_center || !minor_radius_circle_info->has_center)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "Missing torus circle center: a zero/π/2π compressed circle cannot define a torus without a resolvable center\n");
+        return PRC_ERROR_PARSE;
+    }
+
+    memset(torus, 0, sizeof(*torus));
+    torus_center = major_radius_circle_info->center;
+    torus->tag = PRC_TYPE_SURF_Torus;
+    torus->has_transform = 1;
+    torus->transform.behavior = PRC_TRANSFORMATION_Translate | PRC_TRANSFORMATION_Rotate;
+    torus->transform.translation = torus_center;
+    torus->transform.scale = 1.0;
+
+    if (major_radius_circle_info->has_normal)
+    {
+        torus_axis = major_radius_circle_info->normal;
+    }
+    else if (common_vertex != NULL)
+    {
+        prc_vec_sub(minor_radius_circle_info->center, major_radius_circle_info->center, &minor_center_to_major_center);
+        prc_vec_sub(*common_vertex, major_radius_circle_info->center, &major_center_to_common);
+        prc_vec_cross(minor_center_to_major_center, major_center_to_common, &torus_axis);
+    }
+    else
+    {
+        torus_axis.x = 0.0;
+        torus_axis.y = 0.0;
+        torus_axis.z = 1.0;
+    }
+    code = prc_vec_normalize(&torus_axis);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Degenerate torus axis in prc_build_iso_torus_from_circle_data\n");
+        return code;
+    }
+
+    major_radius = prc_get_hcg_circle_radius(major_radius_circle_info);
+    minor_radius = prc_get_hcg_circle_radius(minor_radius_circle_info);
+    if (major_radius <= 0.0 || minor_radius <= 0.0)
+    {
+        if (common_vertex != NULL)
+        {
+            prc_vec_sub(*common_vertex, torus_center, &major_center_to_common);
+            if (prc_vec_length(major_center_to_common) > 0.0)
+            {
+                major_radius = prc_vec_length(major_center_to_common);
+            }
+        }
+        if (major_radius <= 0.0 || minor_radius <= 0.0)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE, "Invalid torus radii in prc_build_iso_torus_from_circle_data\n");
+            return PRC_ERROR_PARSE;
+        }
+    }
+    torus->major_radius = major_radius;
+    torus->minor_radius = minor_radius;
+
+    if (common_vertex != NULL)
+    {
+        prc_vec_sub(minor_radius_circle_info->center, torus_center, &minor_center_to_major_center);
+        if (prc_vec_length(minor_center_to_major_center) > 0.0)
+        {
+            prc_vec_scale(1.0 / prc_vec_length(minor_center_to_major_center), &minor_center_to_major_center);
+            x_axis = minor_center_to_major_center;
+        }
+        else
+        {
+            prc_vec_sub(*common_vertex, torus_center, &major_center_to_common);
+            if (prc_vec_length(major_center_to_common) > 0.0)
+            {
+                prc_vec_scale(1.0 / prc_vec_length(major_center_to_common), &major_center_to_common);
+                x_axis = major_center_to_common;
+            }
+            else
+            {
+                x_axis.x = 1.0;
+                x_axis.y = 0.0;
+                x_axis.z = 0.0;
+            }
+        }
+    }
+    else
+    {
+        x_axis.x = 1.0;
+        x_axis.y = 0.0;
+        x_axis.z = 0.0;
+    }
+
+    if (fabs(torus_axis.z) > 0.9)
+    {
+        torus_reference.x = 1.0;
+        torus_reference.y = 0.0;
+        torus_reference.z = 0.0;
+    }
+    else
+    {
+        torus_reference.x = 0.0;
+        torus_reference.y = 0.0;
+        torus_reference.z = 1.0;
+    }
+
+    prc_vec_cross(torus_reference, torus_axis, &x_axis);
+    code = prc_vec_normalize(&x_axis);
+    if (code < 0)
+    {
+        x_axis.x = 1.0;
+        x_axis.y = 0.0;
+        x_axis.z = 0.0;
+        code = prc_vec_normalize(&x_axis);
+        if (code < 0)
+        {
+            return code;
+        }
+    }
+    prc_vec_cross(torus_axis, x_axis, &y_axis);
+    code = prc_vec_normalize(&y_axis);
+    if (code < 0)
+    {
+        y_axis.x = 0.0;
+        y_axis.y = 1.0;
+        y_axis.z = 0.0;
+    }
+
+    torus->transform.rotation[0] = x_axis;
+    torus->transform.rotation[1] = y_axis;
+    torus->parameterization.swap_uv = 0;
+
+    if (major_radius_circle_info->has_start_end_points && major_radius_circle_info->has_center)
+    {
+        double theta_start = prc_compute_circle_angle(&major_radius_circle_info->center, &torus_axis,
+            &major_radius_circle_info->start_point);
+        double theta_end = prc_compute_circle_angle(&major_radius_circle_info->center, &torus_axis,
+            &major_radius_circle_info->end_point);
+        u_min = theta_start;
+        u_max = theta_end;
+        prc_normalize_angle_range(&u_min, &u_max);
+    }
+    if (minor_radius_circle_info->has_start_end_points && minor_radius_circle_info->has_center)
+    {
+        double theta_start = prc_compute_circle_angle(&minor_radius_circle_info->center, &torus_axis,
+            &minor_radius_circle_info->start_point);
+        double theta_end = prc_compute_circle_angle(&minor_radius_circle_info->center, &torus_axis,
+            &minor_radius_circle_info->end_point);
+        v_min = theta_start;
+        v_max = theta_end;
+        prc_normalize_angle_range(&v_min, &v_max);
+    }
+    if (major_radius_circle_info->is_full_circle)
+    {
+        u_min = 0.0;
+        u_max = 2.0 * PRC_PI;
+    }
+    if (minor_radius_circle_info->is_full_circle)
+    {
+        v_min = 0.0;
+        v_max = 2.0 * PRC_PI;
+    }
+
+    torus->parameterization.surface_domain.min_uv.x = u_min;
+    torus->parameterization.surface_domain.min_uv.y = v_min;
+    torus->parameterization.surface_domain.max_uv.x = u_max;
+    torus->parameterization.surface_domain.max_uv.y = v_max;
+
+    if (prc_exact_geom_set_transform(ctx, &torus->exact_geom_transform, &torus->transform) < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to initialize torus transform in prc_build_iso_torus_from_circle_data\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    return 0;
+}
+
+static int
 prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_index, uint32_t face_index,
     prc_compressed_face *topo_face)
 {
@@ -3045,17 +3743,393 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
         {
             prc_hcg_iso_plane hcg_iso_plane = topo_face->hcg_iso_plane;
             break;
-        }
+        }  
 
         case PRC_HCG_IsoCylinder:
         {
-            prc_hcg_iso_cylinder hcg_iso_cylinder = topo_face->hcg_iso_cylinder;
+            /* For this we have one circle and one line plus a vertex, where
+             * the circle defines the radius and axis and the line supplies an
+             * axis direction; we then synthesize a normal prc_surf_cylinder and
+             * tessellate it through the standard surface path. */
+            prc_hcg_iso_cylinder *hcg_iso_cylinder = &topo_face->hcg_iso_cylinder;
+            prc_content_compressed_face *face = &hcg_iso_cylinder->face;
+            prc_compressed_curve *first_trim_curve = NULL;
+            prc_compressed_curve *second_trim_curve = NULL;
+            prc_compressed_curve *third_trim_curve = NULL;
+            prc_compressed_curve *fourth_trim_curve = NULL;
+            prc_compressed_curve *line_curve = first_trim_curve;
+            prc_compressed_curve *circle_curve = second_trim_curve;
+            prc_vec3 line_start, line_end;
+            prc_hcg_circle_information circle_info;
+            prc_vec3 common_vertex;
+            prc_surf_cylinder cylinder = { 0 };
+            prc_topo_face synthetic_face = { 0 };
+            prc_type_surf synthetic_surface = { 0 };
+
+            code = prc_get_compressed_curve(ctx, &face->iso_face.first_trim_curve,
+                &first_trim_curve);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get first trim curve by id in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            code = prc_get_compressed_curve(ctx, &face->iso_face.second_trim_curve,
+                &second_trim_curve);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            if (first_trim_curve->curve_type == PRC_HCG_Circle && second_trim_curve->curve_type == PRC_HCG_Line)
+            {
+                circle_curve = first_trim_curve;
+                line_curve = second_trim_curve;
+            }
+            else if (first_trim_curve->curve_type == PRC_HCG_Line && second_trim_curve->curve_type == PRC_HCG_Circle)
+            {
+                line_curve = first_trim_curve;
+                circle_curve = second_trim_curve;
+            }
+            else
+            {
+                prc_error(ctx, PRC_ERROR_PARSE, "Invalid curve types for cylinder in prc_tessellate_compressed_face\n");
+                return PRC_ERROR_PARSE;
+            }
+
+            code = prc_get_hcg_circle_data(ctx, &circle_curve->hcg_circle, &circle_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get circle data in prc_tessellate_compressed_face\n");
+                return code;
+            }
+            code = prc_get_hcg_line_data(ctx, &line_curve->hcg_line, &line_start, &line_end);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get line data in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            code = prc_get_compressed_vertex(ctx, &face->iso_face.common_third_fourth_vertex,
+                &common_vertex);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get common vertex in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            /* The missing bounds close the ISO cylinder parameter rectangle.
+               Curve 3 is the line parallel to the supplied axis line, while
+               curve 4 is the same circle translated by the line length along the axis. */
+            {
+                prc_vec3 axis_dir;
+                prc_vec3 axis_offset;
+                prc_vec3 right_boundary_start;
+                double height;
+
+                prc_vec_sub(line_end, line_start, &axis_dir);
+                height = prc_vec_length(axis_dir);
+                if (height <= CURVE_PRECISION)
+                {
+                    axis_dir.x = 0.0;
+                    axis_dir.y = 0.0;
+                    axis_dir.z = 1.0;
+                    height = 1.0;
+                }
+                else
+                {
+                    prc_vec_scale(1.0 / height, &axis_dir);
+                }
+                axis_offset = axis_dir;
+                prc_vec_scale(height, &axis_offset);
+
+                if (circle_info.has_start_end_points)
+                {
+                    double start_dist = prc_vec_dist_between_two_points(circle_info.start_point, common_vertex);
+                    double end_dist = prc_vec_dist_between_two_points(circle_info.end_point, common_vertex);
+                    right_boundary_start = (start_dist <= end_dist) ? circle_info.end_point : circle_info.start_point;
+                }
+                else
+                {
+                    right_boundary_start = common_vertex;
+                }
+
+                if (face->iso_face.third_trim_curve_is_not_yet_saved)
+                {
+                    code = prc_get_compressed_curve(ctx, &face->iso_face.third_trim_curve,
+                        &third_trim_curve);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Failed to get third trim curve by id in prc_tessellate_compressed_face\n");
+                        return code;
+                    }
+
+                    memset(&third_trim_curve->hcg_line, 0, sizeof(third_trim_curve->hcg_line));
+                    third_trim_curve->curve_type = PRC_HCG_Line;
+                    third_trim_curve->hcg_line.type = PRC_HCG_Line;
+                    third_trim_curve->hcg_line.start_end_data.is_vertex = 0;
+                    third_trim_curve->hcg_line.start_end_data.start_point.point = right_boundary_start;
+                    prc_vec_add(right_boundary_start, axis_offset,
+                        &third_trim_curve->hcg_line.start_end_data.end_point.point);
+                }
+
+                if (face->iso_face.fourth_trim_curve_is_not_yet_saved)
+                {
+                    code = prc_get_compressed_curve(ctx, &face->iso_face.fourth_trim_curve,
+                        &fourth_trim_curve);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Failed to get fourth trim curve by id in prc_tessellate_compressed_face\n");
+                        return code;
+                    }
+
+                    memset(&fourth_trim_curve->hcg_circle, 0, sizeof(fourth_trim_curve->hcg_circle));
+                    fourth_trim_curve->curve_type = PRC_HCG_Circle;
+                    fourth_trim_curve->hcg_circle.type = PRC_HCG_Circle;
+                    fourth_trim_curve->hcg_circle.is_particular_circle = 1;
+                    fourth_trim_curve->hcg_circle.particular_circle.full_circle = circle_info.is_full_circle;
+                    fourth_trim_curve->hcg_circle.particular_circle.compressed_iso_spline = 0;
+                    fourth_trim_curve->hcg_circle.particular_circle.start_end_data.is_vertex = 0;
+                    fourth_trim_curve->hcg_circle.particular_circle.center.point = circle_info.center;
+                    prc_vec_add(fourth_trim_curve->hcg_circle.particular_circle.center.point, axis_offset,
+                        &fourth_trim_curve->hcg_circle.particular_circle.center.point);
+                    if (circle_info.has_normal)
+                    {
+                        fourth_trim_curve->hcg_circle.particular_circle.normal_plane.point = circle_info.normal;
+                    }
+                    else
+                    {
+                        fourth_trim_curve->hcg_circle.particular_circle.normal_plane.point = axis_dir;
+                    }
+                    if (circle_info.has_start_end_points)
+                    {
+                        prc_vec3 translated_start = circle_info.start_point;
+                        prc_vec3 translated_end = circle_info.end_point;
+                        prc_vec_add(translated_start, axis_offset, &translated_start);
+                        prc_vec_add(translated_end, axis_offset, &translated_end);
+                        fourth_trim_curve->hcg_circle.particular_circle.start_end_data.start_point.point = translated_start;
+                        fourth_trim_curve->hcg_circle.particular_circle.start_end_data.end_point.point = translated_end;
+                    }
+                    if (circle_info.has_middle_of_arc_point)
+                    {
+                        prc_vec3 translated_mid = circle_info.middle_of_arc_point;
+                        prc_vec_add(translated_mid, axis_offset, &translated_mid);
+                        fourth_trim_curve->hcg_circle.particular_circle.middle_of_arc.point = translated_mid;
+                    }
+                }
+            }
+
+            code = prc_build_iso_cylinder_from_circle_data(ctx, &circle_info, &line_start, &line_end,
+                &common_vertex, &cylinder);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to reconstruct cylinder from compressed circle data\n");
+                return code;
+            }
+
+            synthetic_surface.surface_type = PRC_TYPE_SURF_Cylinder;
+            synthetic_surface.surf_cylinder = &cylinder;
+            synthetic_face.surface_geometry.is_referenced = 0;
+            synthetic_face.surface_geometry.surface = synthetic_surface;
+
+            code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
+                face->orientation_surface_with_shell);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO cylinder\n");
+                return code;
+            }
+
             break;
         }
 
         case PRC_HCG_IsoTorus:
         {
-            prc_hcg_iso_torus hcg_iso_torus = topo_face->hcg_iso_torus;
+            /* is_major_radius TRUE indicates if the first serialized circle defines
+               the major radius. */
+            prc_hcg_iso_torus *hcg_iso_torus = &topo_face->hcg_iso_torus;
+            uint8_t is_major_radius = hcg_iso_torus->is_major_radius;
+            prc_content_compressed_face *face = &hcg_iso_torus->face;
+            prc_compressed_curve *first_trim_curve = NULL;
+            prc_compressed_curve *second_trim_curve = NULL;
+            prc_compressed_curve *third_trim_curve = NULL;
+            prc_compressed_curve *fourth_trim_curve = NULL;
+            prc_compressed_curve *major_radius_curve = first_trim_curve;
+            prc_compressed_curve *minor_radius_curve = second_trim_curve;
+            prc_vec3 common_vertex;
+            prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
+            prc_hcg_circle_information minor_radius_circle_info;
+            prc_hcg_circle_information major_radius_circle_info;
+            prc_surf_torus torus = {0};
+            prc_topo_face synthetic_face = {0};
+            prc_type_surf synthetic_surface = {0};
+
+            code = prc_get_compressed_curve(ctx, &face->iso_face.first_trim_curve,
+                                            &first_trim_curve);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            code = prc_get_compressed_curve(ctx, &face->iso_face.second_trim_curve,
+                                            &second_trim_curve);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
+                return code;
+            }
+
+            if (is_major_radius)
+            {
+                major_radius_curve = first_trim_curve;
+                minor_radius_curve = second_trim_curve;
+            }
+            else
+            {
+                major_radius_curve = second_trim_curve;
+                minor_radius_curve = first_trim_curve;
+            }
+
+            code = prc_get_compressed_vertex(ctx, &face->iso_face.common_third_fourth_vertex,
+                &common_vertex);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to reconstruct torus from compressed circle data\n");
+                return code;
+            }
+
+            if (minor_radius_curve->curve_type != PRC_HCG_Circle || major_radius_curve->curve_type != PRC_HCG_Circle)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE, "Invalid curve type for torus in prc_tessellate_compressed_face\n");
+                return PRC_ERROR_PARSE;
+            }
+
+            prc_get_hcg_circle_data(ctx, &minor_radius_curve->hcg_circle, &minor_radius_circle_info);
+            prc_get_hcg_circle_data(ctx, &major_radius_curve->hcg_circle, &major_radius_circle_info);
+
+            code = prc_build_iso_torus_from_circle_data(ctx,
+                &major_radius_circle_info, &minor_radius_circle_info,
+                &common_vertex, &torus);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed to reconstruct torus from compressed circle data\n");
+                return code;
+            }
+
+            /* We have to construct the deduced curves in case they are later
+               referenced. These are the implicit right/top boundaries of the
+               torus patch and must remain in the same torus parameter space as the
+               supplied trim curves. */
+            {
+                prc_vec3 torus_axis;
+                prc_vec3 major_dir = torus.transform.rotation[0];
+                prc_vec3 minor_dir = torus.transform.rotation[1];
+                const double u_min = torus.parameterization.surface_domain.min_uv.x;
+                const double u_max = torus.parameterization.surface_domain.max_uv.x;
+                const double v_min = torus.parameterization.surface_domain.min_uv.y;
+                const double v_max = torus.parameterization.surface_domain.max_uv.y;
+
+                prc_vec_cross(major_dir, minor_dir, &torus_axis);
+                code = prc_vec_normalize(&torus_axis);
+                if (code < 0)
+                {
+                    prc_error(ctx, code, "Degenerate torus axis while constructing implied trim curves\n");
+                    return code;
+                }
+
+                /* This curve *could* be referencing another curve, in which case,
+                   we don't do the implied creation */
+                if (face->iso_face.third_trim_curve_is_not_yet_saved)
+                {
+                    /* Curve 3: fixed u = u_max, sweep v = v_min..v_max. */
+                    code = prc_get_compressed_curve(ctx, &face->iso_face.third_trim_curve,
+                        &third_trim_curve);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Failed to get third trim curve by id in prc_tessellate_compressed_face\n");
+                        return code;
+                    }
+
+                    memset(&third_trim_curve->hcg_circle, 0, sizeof(third_trim_curve->hcg_circle));
+                    third_trim_curve->curve_type = PRC_HCG_Circle;
+                    third_trim_curve->hcg_circle.type = PRC_HCG_Circle;
+                    third_trim_curve->hcg_circle.is_particular_circle = 1;
+                    third_trim_curve->hcg_circle.particular_circle.full_circle = 0;
+                    third_trim_curve->hcg_circle.particular_circle.compressed_iso_spline = 0;
+                    third_trim_curve->hcg_circle.particular_circle.start_end_data.is_vertex = 0;
+                    third_trim_curve->hcg_circle.particular_circle.start_end_data.start_point.point =
+                        prc_evaluate_surf_torus(ctx, &torus, u_max, v_min);
+                    third_trim_curve->hcg_circle.particular_circle.start_end_data.end_point.point =
+                        prc_evaluate_surf_torus(ctx, &torus, u_max, v_max);
+                    third_trim_curve->hcg_circle.particular_circle.center.point =
+                        torus.transform.translation;
+                    {
+                        prc_vec3 offset = major_dir;
+                        prc_vec_scale(torus.major_radius * cos(u_max), &offset);
+                        {
+                            prc_vec3 offset2 = minor_dir;
+                            prc_vec_scale(torus.major_radius * sin(u_max), &offset2);
+                            prc_vec_add(offset, offset2, &offset);
+                        }
+                        prc_vec_add(third_trim_curve->hcg_circle.particular_circle.center.point, offset,
+                            &third_trim_curve->hcg_circle.particular_circle.center.point);
+                    }
+                    third_trim_curve->hcg_circle.particular_circle.normal_plane.point = torus_axis;
+                    third_trim_curve->hcg_circle.particular_circle.middle_of_arc.point =
+                        prc_evaluate_surf_torus(ctx, &torus, u_max, 0.5 * (v_min + v_max));
+                }
+
+                /* Only do this creation if we have not referenced it */
+                if (face->iso_face.fourth_trim_curve_is_not_yet_saved)
+                {
+                    /* Curve 4: fixed v = v_max, sweep u = u_min..u_max. */
+                    code = prc_get_compressed_curve(ctx, &face->iso_face.fourth_trim_curve,
+                        &fourth_trim_curve);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Failed to get fourth trim curve by id in prc_tessellate_compressed_face\n");
+                        return code;
+                    }
+
+                    memset(&fourth_trim_curve->hcg_circle, 0, sizeof(fourth_trim_curve->hcg_circle));
+                    fourth_trim_curve->curve_type = PRC_HCG_Circle;
+                    fourth_trim_curve->hcg_circle.type = PRC_HCG_Circle;
+                    fourth_trim_curve->hcg_circle.is_particular_circle = 1;
+                    fourth_trim_curve->hcg_circle.particular_circle.full_circle = 0;
+                    fourth_trim_curve->hcg_circle.particular_circle.compressed_iso_spline = 0;
+                    fourth_trim_curve->hcg_circle.particular_circle.start_end_data.is_vertex = 0;
+                    fourth_trim_curve->hcg_circle.particular_circle.start_end_data.start_point.point =
+                        prc_evaluate_surf_torus(ctx, &torus, u_min, v_max);
+                    fourth_trim_curve->hcg_circle.particular_circle.start_end_data.end_point.point =
+                        prc_evaluate_surf_torus(ctx, &torus, u_max, v_max);
+                    fourth_trim_curve->hcg_circle.particular_circle.center.point = torus.transform.translation;
+                    {
+                        prc_vec3 offset = torus_axis;
+                        prc_vec_scale(torus.minor_radius * sin(v_max), &offset);
+                        prc_vec_add(fourth_trim_curve->hcg_circle.particular_circle.center.point, offset,
+                            &fourth_trim_curve->hcg_circle.particular_circle.center.point);
+                    }
+                    fourth_trim_curve->hcg_circle.particular_circle.normal_plane.point = torus_axis;
+                    fourth_trim_curve->hcg_circle.particular_circle.middle_of_arc.point =
+                        prc_evaluate_surf_torus(ctx, &torus, 0.5 * (u_min + u_max), v_max);
+                }
+            }
+
+            synthetic_surface.surface_type = PRC_TYPE_SURF_Torus;
+            synthetic_surface.surf_torus = &torus;
+            synthetic_face.surface_geometry.is_referenced = 0;
+            synthetic_face.surface_geometry.surface = synthetic_surface;
+
+            code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
+                face->orientation_surface_with_shell);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO torus\n");
+                return code;
+            }
+
             break;
         }
 
