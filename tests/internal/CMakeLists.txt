@@ -159,3 +159,11 @@ target_include_directories(bisect_tess_positions PRIVATE tests)
 add_executable(inspect_position_bits tests/internal/inspect_position_bits.c)
 target_link_libraries(inspect_position_bits prc_static)
 target_include_directories(inspect_position_bits PRIVATE tests)
+
+add_executable(census_orient_flip tests/internal/census_orient_flip.c)
+target_link_libraries(census_orient_flip prc_static)
+target_include_directories(census_orient_flip PRIVATE tests)
+
+add_executable(census_origin_offset tests/internal/census_origin_offset.c)
+target_link_libraries(census_origin_offset prc_static)
+target_include_directories(census_origin_offset PRIVATE tests)
