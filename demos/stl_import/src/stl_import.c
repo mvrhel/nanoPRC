@@ -1970,7 +1970,7 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
                PRC_DIAG_LUMP_THRESHOLD is also set (this env var alone does
                nothing since force_lump already covers the real, non-diagnostic
                path). */
-            uint8_t check_nm = (uint8_t)(force_lump || getenv("PRC_DIAG_FORCE_LUMP_NONMANIFOLD_CHECK") != NULL);
+            uint8_t check_nm = (uint8_t)(force_lump || prc_diag_getenv("PRC_DIAG_FORCE_LUMP_NONMANIFOLD_CHECK") != NULL);
             ok = stl_import_build_single_lumped_model(mesh, welded_positions, num_welded, weld_index,
                 original_normals, global_normal_index, dedup_normals, weld_tolerance_fraction,
                 quant_tolerance_fraction, check_nm, parts);
