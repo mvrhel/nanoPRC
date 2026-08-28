@@ -18,6 +18,7 @@
 
 #include "prc_data.h"
 #include "prc_parse_common.h"
+#include "prc_diag_env.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -3330,23 +3331,44 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         }
     }
 
-    printf("prc_tessellate_surface: surface_type=%u orientation=%u wrap_u=%u wrap_v=%u u_linear=%u v_linear=%u num_samples_u=%u num_samples_v=%u vertex_samples_u=%u vertex_samples_v=%u cell_count_u=%u cell_count_v=%u start_u=%f end_u=%f start_v=%f end_v=%f\n",
-        topo_face->surface_geometry.surface.surface_type,
-        orientation,
-        wrap_u,
-        wrap_v,
-        sampling_info.u_linear,
-        sampling_info.v_linear,
-        num_samples_u,
-        num_samples_v,
-        vertex_samples_u,
-        vertex_samples_v,
-        cell_count_u,
-        cell_count_v,
-        start_u,
-        end_u,
-        start_v,
-        end_v);
+    /* Per-surface developer trace. Gated, and on stderr rather than stdout:
+       it fired 7171 times over a 310-file corpus, and being on stdout it
+       corrupts any consumer that emits machine-readable output there -- it
+       was found by it landing in the middle of a generated CSV. The env
+       lookup is cached so the hot path pays one getenv for the whole run,
+       mirroring prc_debug_hooks_init in prc_decode_compressed_tess.c, and
+       the whole hook compiles out when PRC_ENABLE_DIAG_ENV is OFF.
+       Set PRC_DIAG_TESSELLATE_SURFACE=1 to get the old always-on output. */
+    {
+        static int surf_trace_read = 0;
+        static int surf_trace_on = 0;
+
+        if (!surf_trace_read)
+        {
+            const char *v = prc_diag_getenv("PRC_DIAG_TESSELLATE_SURFACE");
+            surf_trace_read = 1;
+            surf_trace_on = (v != NULL && v[0] != 0 && v[0] != '0');
+        }
+
+        if (surf_trace_on)
+            fprintf(stderr, "prc_tessellate_surface: surface_type=%u orientation=%u wrap_u=%u wrap_v=%u u_linear=%u v_linear=%u num_samples_u=%u num_samples_v=%u vertex_samples_u=%u vertex_samples_v=%u cell_count_u=%u cell_count_v=%u start_u=%f end_u=%f start_v=%f end_v=%f\n",
+                topo_face->surface_geometry.surface.surface_type,
+                orientation,
+                wrap_u,
+                wrap_v,
+                sampling_info.u_linear,
+                sampling_info.v_linear,
+                num_samples_u,
+                num_samples_v,
+                vertex_samples_u,
+                vertex_samples_v,
+                cell_count_u,
+                cell_count_v,
+                start_u,
+                end_u,
+                start_v,
+                end_v);
+    }
 
     /* At this point we have the tessellation data */
     data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].tess_data =
