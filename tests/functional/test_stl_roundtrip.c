@@ -146,6 +146,27 @@ count_triangles_and_bbox(prc_context *ctx, const char *path, roundtrip_stats *ou
         if (tess->type != PRC_API_TESS_3D && tess->type != PRC_API_TESS_3D_Compressed)
             continue;
 
+        /* A COMPRESSED tessellation exposes ONE whole-mesh primitive, and
+           prc_api_get_graphics_primitive returns that same primitive for
+           every face_index -- its compressed branch hands back
+           face->vertex_indices with no per-face filtering, because the
+           format does not cleanly separate per-face index data (a "face"
+           there only carries style, not its own triangles). Verified on
+           examples/cube.pdf: 6 faces, each reporting the identical
+           36-index primitive.
+
+           So walking faces here counted the whole mesh once per face and
+           multiplied the triangle total by num_faces -- 12 real triangles
+           censused as 72 on the cube, which is what made this test fail
+           against the 12 that nano_prc_stl_export correctly writes. The
+           library was right and this helper was wrong; it is the same
+           defect class fixed in demos/stl_export/src/stl_export.c (which
+           re-emitted whole COMPRESSED tessellations once per PRC face),
+           never applied to this counting helper.
+
+           Count the compressed case once, from face 0 only. The
+           uncompressed TESS_3D case is genuinely per-face and still needs
+           the full loop. */
         for (f = 0; f < tess->num_faces; f++)
         {
             prc_api_face *face = &tess->tess_faces[f];
@@ -210,6 +231,13 @@ count_triangles_and_bbox(prc_context *ctx, const char *path, roundtrip_stats *ou
                     }
                 }
             }
+
+            /* See the comment above this loop: every face_index of a
+               COMPRESSED tessellation yields the same whole-mesh primitive,
+               so one pass counts the entire entry. Continuing would count
+               it again per face. */
+            if (tess->type == PRC_API_TESS_3D_Compressed)
+                break;
         }
     }
 
