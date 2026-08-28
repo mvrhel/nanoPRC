@@ -455,30 +455,33 @@ prc_vec_compute_basis_origin(prc_vec3 v0, prc_vec3 v1, prc_vec3 v3, prc_basis *b
     return 0;
 }
 
-/* A slightly different version for the normal case. This is exactly what the
-   the spec shows */
+/* The degenerate-frame fallback for the normal case (7.8.9.4). There is only
+   ONE MakeOrthoRep in the spec: 7.8.9.3 (apex frame) and the normal-angle
+   text on p.90 both say the null-axis case is "computed by the function
+   MakeOrthoRep(), using the unit axis X as input", and that function is
+   defined once, in 10.3 "Basis pseudo code". So this is deliberately a thin
+   wrapper over prc_vec_make_orth_basis rather than a second implementation.
+
+   FIXED 2026-08-28: this used to be an independent copy whose degenerate
+   fallback picked trial axis (0,0,1) where 10.3 picks (1,0,0), under a
+   comment claiming it was "exactly what the spec shows" -- it was not. Both
+   choices yield a valid orthonormal basis, but different ones: for X
+   parallel to (0,1,0) the two differ by a 90-degree rotation about X, which
+   changes the decoded normal in exactly the case the clause is there to
+   cover. The bug was reachable -- prc_compute_vertex_normal and
+   prc_derive_normal (src/prc_decode_compressed_tess.c) both route their
+   null-axis case here.
+
+   Worth recording why it survived: 7.8.9.3 and 7.8.9.4 name MakeOrthoRep
+   without cross-referencing 10.3, which sits ~180 pages away under an
+   annex-like heading, so the function reads as named-but-undefined and
+   invites improvisation. An independent implementer reported losing months
+   to the same gap and hand-rolling a different orthonormal basis; a defect
+   entry asking for the cross-reference is being filed on that basis. */
 int
 prc_vec_make_orth_basis_normals(prc_basis *basis)
 {
-    if (prc_vec_normalize(&basis->X) < 0)
-        return PRC_VEC_ERROR;
-
-    prc_vec_set(&basis->Y, 0, 1, 0);
-    prc_vec_cross(basis->X, basis->Y, &basis->Z);
-
-    if (prc_vec_normalize(&basis->Z) < 0)
-    {
-        prc_vec_set(&basis->Y, 0, 0, 1);
-        prc_vec_cross(basis->X, basis->Y, &basis->Z);
-        if (prc_vec_normalize(&basis->Z) < 0)
-            return PRC_VEC_ERROR;
-    }
-
-    prc_vec_cross(basis->Z, basis->X, &basis->Y);
-    if (prc_vec_normalize(&basis->Y) < 0)
-        return PRC_VEC_ERROR;
-
-    return 0;
+    return prc_vec_make_orth_basis(basis);
 }
 
 /* This is the MakeOrthoRep method from the spec.
