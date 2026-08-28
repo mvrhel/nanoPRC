@@ -1920,18 +1920,35 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
 
     data->num_rep_items = prc_bitread_uint32(ctx, bit_state);
 
-    /* A zero-volume bounding box on a PartDefinition -- most often seen on
-       an otherwise-empty wrapper node (num_rep_items == 0) inserted purely
-       for tree structure -- was confirmed real-Acrobat-causal for a
-       silently blanked model tree beneath that node, even when the actual
-       geometry a level or two further down is completely valid (see
-       demos/stl_import/src/stl_import.c's has_empty_part fix). This is a
-       READ-side warning only: nanoPRC's own decoder tolerates it fine (that
-       tolerance is exactly why the bug went unnoticed for so long), so this
-       does not fail the parse -- it just surfaces a real, previously-silent
-       risk factor for anyone debugging a blank-tree report against a file
-       from a different writer. */
-    if (data->bounding_box.minimum_corner.x == data->bounding_box.maximum_corner.x &&
+    /* A zero-volume bounding box on an otherwise-empty wrapper PartDefinition
+       (num_rep_items == 0), inserted purely for tree structure, was confirmed
+       real-Acrobat-causal for a silently blanked model tree beneath that node,
+       even when the actual geometry a level or two further down is completely
+       valid (see demos/stl_import/src/stl_import.c's has_empty_part fix). This
+       is a READ-side warning only: nanoPRC's own decoder tolerates it fine
+       (that tolerance is exactly why the bug went unnoticed for so long), so
+       this does not fail the parse -- it just surfaces a real, previously-
+       silent risk factor for anyone debugging a blank-tree report against a
+       file from a different writer.
+
+       NARROWED 2026-08-28 to require num_rep_items == 0. It previously fired
+       on ANY zero-volume box, which made it overwhelmingly a false alarm: an
+       all-zero box is the ordinary "not set" sentinel on a node that does
+       carry geometry, and such files are accepted by Acrobat perfectly
+       happily. Measured across the 310-file prc-db corpus, the unnarrowed
+       condition fired 1478 times, of which only 18 (1.2%) were the empty-
+       wrapper shape actually implicated -- 843 of the false positives were
+       num_rep_items == 1. It also fired on our own examples/cube.pdf, a
+       shipped sample Acrobat opens without complaint, which is how the
+       over-firing was noticed. An independent implementer reports the same
+       pattern from the other side: 406 such parts across 258 of 512
+       Acrobat-ACCEPTED files in their corpus.
+
+       Keeping the warning honest matters more than keeping it loud -- a
+       diagnostic that cries wolf on 98.8% of its hits trains its reader to
+       ignore the 1.2% that are real. */
+    if (data->num_rep_items == 0 &&
+        data->bounding_box.minimum_corner.x == data->bounding_box.maximum_corner.x &&
         data->bounding_box.minimum_corner.y == data->bounding_box.maximum_corner.y &&
         data->bounding_box.minimum_corner.z == data->bounding_box.maximum_corner.z)
     {
