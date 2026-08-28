@@ -4052,6 +4052,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
             code = PRC_API_ERROR_MEMORY;
             goto uncompressed_failure;
         }
+        face_out_reserved->owns_vertex_indices = 1; /* this face's own allocation, not a shared cache */
 
         /* For the mapping tables we have to take the max of the indices and the
            number of vertices */
@@ -4741,6 +4742,11 @@ uncompressed_done:
         uint32_t prc_normal_index;
         uint8_t all_tess_has_single_style = false;
         int32_t face_style_file_index;
+        /* Set at the vertex_indices cache-lookup site below; gates the
+           fill loop further down (skip it entirely on a cache hit, since
+           face_out_reserved->vertex_indices already points at a fully-
+           built, valid array in that case). */
+        uint8_t vertex_indices_cache_hit = false;
 
         /* If the global data of this tessellation does not have any styles
            then we don't have any in the tessellation data. We can have
@@ -4813,22 +4819,48 @@ uncompressed_done:
             each unique position/normal/color/style and an appropriate triangle indice.
         */
 
-        /* Allocate the new indices. Same length as current one. This is
-           per-face-owned (each face's tess_faces[j].reserved is a separate
-           struct, freed individually in prc_api_release_data), so unlike
-           the cache-guarded block below it must be (re)allocated on every
-           call, not just the first. */
-        face_out_reserved->vertex_indices = (uint32_t *)prc_calloc(ctx,
-                                                num_prc_indices, sizeof(uint32_t));
-        if (face_out_reserved->vertex_indices == NULL)
+        /* FIXED: this array (the whole tessellation's index list) is
+           identical across every face_index of a GIVEN api_tess instance
+           -- see prc_internal_api_position_normal_lookup's
+           vertex_indices_cache field (prc_internal_api.h) for the full
+           history: this used to be reallocated and rebuilt from scratch on
+           every single face_index call, confirmed reaching 60-90+GB and
+           still climbing on a real ~26000-face compressed tessellation
+           before being killed. Cache it on api_tess->reserved (the SAME
+           per-instance slot the style-table cache above already
+           allocated, if this instance has reached this point with
+           has_face true -- see that cache's own build-site comment) so a
+           later face_index call for the SAME instance borrows the pointer
+           instead of rebuilding it. A cache miss (first call for this
+           instance, or the defensive fallback if api_tess->reserved
+           somehow isn't allocated yet) allocates+builds it as before, then
+           publishes it once the fill loop below completes;
+           owns_vertex_indices stays at its calloc'd default of 0 either
+           way (this array is never this face's own allocation for the
+           compressed branch, only ever borrowed from the cache -- mirrors
+           owns_style's identical convention above). */
+        cache = (prc_internal_api_position_normal_lookup *)api_tess->reserved;
+        vertex_indices_cache_hit = (cache != NULL && cache->vertex_indices_cache_valid);
+        if (vertex_indices_cache_hit)
         {
-            prc_error(ctx, PRC_API_ERROR_MEMORY,
-                "Memory allocation failed for face_out_reserved->vertex_indices in compressed branch\n");
-            code = PRC_API_ERROR_MEMORY;
-            goto compressed_failure;
+            face_out_reserved->vertex_indices = cache->vertex_indices_cache;
+            face_out_reserved->num_indices = cache->vertex_indices_cache_count;
+            face_out_reserved->capacity = cache->vertex_indices_cache_count;
         }
-        face_out_reserved->num_indices = num_prc_indices;
-        face_out_reserved->capacity = num_prc_indices;
+        else
+        {
+            face_out_reserved->vertex_indices = (uint32_t *)prc_calloc(ctx,
+                                                    num_prc_indices, sizeof(uint32_t));
+            if (face_out_reserved->vertex_indices == NULL)
+            {
+                prc_error(ctx, PRC_API_ERROR_MEMORY,
+                    "Memory allocation failed for face_out_reserved->vertex_indices in compressed branch\n");
+                code = PRC_API_ERROR_MEMORY;
+                goto compressed_failure;
+            }
+            face_out_reserved->num_indices = num_prc_indices;
+            face_out_reserved->capacity = num_prc_indices;
+        }
 
         /* Set a the color state and style state */
         if (has_vertex_colors)
@@ -5466,38 +5498,63 @@ uncompressed_done:
         /* So now that we have all the normal and position variants contained in
            position_normal_pair and all the vertex_out data set, lets step through
            the indices from the prc data and create new indices that go to the
-           vertex_out values */
-        for (k = 0; k < num_prc_indices; k++)
+           vertex_out values.
+
+           Skipped entirely on a cache hit: face_out_reserved->vertex_indices
+           already points at a fully-built, valid array in that case (see
+           the cache lookup above and vertex_indices_cache's own comment in
+           prc_internal_api.h) -- rerunning this loop would just recompute
+           and overwrite it with the identical values every face_index
+           call, which was the whole O(face_number) cost this cache
+           eliminates. */
+        if (!vertex_indices_cache_hit)
         {
-            /* Get the position index in the PRC data */
-            uint32_t prc_position_index = prc_vertex_indices[k];
-
-            /* Get the normal index in the PRC data */
-            uint32_t prc_normal_index = prc_normal_indices[k];
-
-            /* Find the position in the position_normal_pair list */
-            current = &position_normal_pair[prc_position_index];
-            while (current->prc_normal_index != prc_normal_index)
+            for (k = 0; k < num_prc_indices; k++)
             {
-                current = current->next;
-            }
+                /* Get the position index in the PRC data */
+                uint32_t prc_position_index = prc_vertex_indices[k];
 
-            /* Now we have the correct position and normal index.  We can get the
-                vertex index */
-            face_out_reserved->vertex_indices[k] = current->api_vertex_index;
+                /* Get the normal index in the PRC data */
+                uint32_t prc_normal_index = prc_normal_indices[k];
+
+                /* Find the position in the position_normal_pair list */
+                current = &position_normal_pair[prc_position_index];
+                while (current->prc_normal_index != prc_normal_index)
+                {
+                    current = current->next;
+                }
+
+                /* Now we have the correct position and normal index.  We can get the
+                    vertex index */
+                face_out_reserved->vertex_indices[k] = current->api_vertex_index;
 
 #if DEBUG_COMPRESSED_API_INDEX_MAP
-            {
-                uint32_t api_index = face_out_reserved->vertex_indices[k];
-                if (api_index == DEBUG_COMPRESSED_API_INDEX_A ||
-                    api_index == DEBUG_COMPRESSED_API_INDEX_C)
                 {
-                    printf("[CompressedMap] k=%d tri=%u prc_pos=%u prc_norm=%u -> api=%u (num_prc_vertices=%d num_api_vertices=%zu)\n",
-                        k, (uint32_t)(k / 3), prc_position_index, prc_normal_index,
-                        api_index, num_prc_vertices, vertex_out->num_vertices);
+                    uint32_t api_index = face_out_reserved->vertex_indices[k];
+                    if (api_index == DEBUG_COMPRESSED_API_INDEX_A ||
+                        api_index == DEBUG_COMPRESSED_API_INDEX_C)
+                    {
+                        printf("[CompressedMap] k=%d tri=%u prc_pos=%u prc_norm=%u -> api=%u (num_prc_vertices=%d num_api_vertices=%zu)\n",
+                            k, (uint32_t)(k / 3), prc_position_index, prc_normal_index,
+                            api_index, num_prc_vertices, vertex_out->num_vertices);
+                    }
                 }
-            }
 #endif
+            }
+
+            /* Publish for reuse by later face_index calls for THIS SAME
+               api_tess instance -- see vertex_indices_cache's own comment
+               in prc_internal_api.h. `cache` should always be non-NULL
+               here (the style-table cache above already allocated
+               api_tess->reserved for any compressed instance that reaches
+               this point with has_face true), but the NULL check keeps
+               this defensive rather than relying on that ordering. */
+            if (cache != NULL)
+            {
+                cache->vertex_indices_cache = face_out_reserved->vertex_indices;
+                cache->vertex_indices_cache_count = num_prc_indices;
+                cache->vertex_indices_cache_valid = 1;
+            }
         }
 #if 0
         /* DEBUG. Print out all the vertex positions, normals and diffuse color */
@@ -5571,6 +5628,20 @@ compressed_failure:
                     }
                 }
                 prc_free(ctx, fail_cache->position_normal_pair);
+            }
+            /* Same reasoning as position_normal_pair above -- see this
+               label's own header comment. Any face_out_reserved-
+               >vertex_indices left pointing at this (now-freed) cache
+               entry (a borrowed pointer from a cache-hit call, or a
+               freshly-built-and-just-published one from this same call)
+               is a stale reference in a face struct the caller's own
+               failure-path cleanup (this function's outer `failure:`
+               label) is about to discard without dereferencing -- see
+               that label's own handling of `style`/owns_style for the
+               identical, already-established pattern this mirrors. */
+            if (fail_cache->vertex_indices_cache != NULL)
+            {
+                prc_free(ctx, fail_cache->vertex_indices_cache);
             }
             prc_free(ctx, fail_cache);
             api_tess->reserved = NULL;
