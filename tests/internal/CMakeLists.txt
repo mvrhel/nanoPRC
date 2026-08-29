@@ -167,3 +167,7 @@ target_include_directories(census_orient_flip PRIVATE tests)
 add_executable(census_origin_offset tests/internal/census_origin_offset.c)
 target_link_libraries(census_origin_offset prc_static)
 target_include_directories(census_origin_offset PRIVATE tests)
+
+add_executable(dump_schema_programs tests/internal/dump_schema_programs.c)
+target_link_libraries(dump_schema_programs prc_static)
+target_include_directories(dump_schema_programs PRIVATE tests)
