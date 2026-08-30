@@ -3614,6 +3614,15 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
+    data->curve_tolerance = prc_bitread_double(ctx, bit_state);
+    code = prc_parse_compressed_curve(ctx, bit_state, ctx->internal.nano_brep_data,
+                                      &data->compressed_curve);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_compressed_curve\n");
+        return code;
+    }
+
     return 0;
 }
 
