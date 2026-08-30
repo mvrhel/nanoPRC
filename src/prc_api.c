@@ -4146,12 +4146,44 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                         {
                             data->exact_geom_capacity = 1;
                         }
-                        if (data->exact_geom_capacity > (UINT32_MAX / 2u))
+
+                        /* Grow until the capacity actually covers the write below,
+                           not just once. A single doubling is not enough because
+                           exact_geom_tess_count does not advance by one per entry
+                           written here: prc_approximate_objects_exact_geom (called
+                           further down) fills exactly ONE array slot --
+                           exact_geom_tess[exact_geom_tess_count] -- but reports back
+                           the number of renderable TESSELLATIONS it produced, which
+                           is incremented once per face, and the caller adds that to
+                           exact_geom_tess_count. So the count can jump by an
+                           arbitrary amount in a single step.
+
+                           Measured on a real corpus file (5-14230-00.prc): the first
+                           part reports num_new = 7, taking the count 0 -> 7 while
+                           capacity was 2. On the next part the old single `*= 2` took
+                           capacity to 4, still below 7, and the writes immediately
+                           below then ran off the end of a 4-element array --
+                           a heap-buffer-overflow WRITE confirmed by AddressSanitizer
+                           at this function, and a hard segfault in release builds.
+
+                           NOTE for follow-up: growing to fit makes the write safe and
+                           is strictly a memory-safety fix, but the underlying count
+                           mismatch above is a separate question -- it leaves the
+                           slots between one written entry and the next zero-filled
+                           (shells == NULL, number_of_shells == 0), i.e. empty
+                           tessellations. Whether the array should instead carry one
+                           entry per produced tessellation is a design decision for
+                           the exact-geometry work and is deliberately NOT changed
+                           here. */
+                        while (data->exact_geom_capacity <= data->exact_geom_tess_count)
                         {
-                            prc_error(ctx, PRC_ERROR_MEMORY, "exact_geom_capacity overflow in prc_api_get_number_tessellations\n");
-                            return PRC_ERROR_MEMORY;
+                            if (data->exact_geom_capacity > (UINT32_MAX / 2u))
+                            {
+                                prc_error(ctx, PRC_ERROR_MEMORY, "exact_geom_capacity overflow in prc_api_get_number_tessellations\n");
+                                return PRC_ERROR_MEMORY;
+                            }
+                            data->exact_geom_capacity *= 2;
                         }
-                        data->exact_geom_capacity *= 2;
                         new_capacity = data->exact_geom_capacity;
 
                         if ((size_t)new_capacity > (SIZE_MAX / sizeof(prc_exact_geom_tess)))
