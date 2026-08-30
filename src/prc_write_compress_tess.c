@@ -4477,6 +4477,209 @@ prc_api_mesh_weld_and_split_free(prc_context *ctx, double *positions, uint32_t *
     if (tri_indices != NULL) prc_free(ctx, tri_indices);
 }
 
+/* Per-face coplanarity detection for the is_face_planar flag (Table 175,
+   §7.8.9.7 "Mesh Attribute Structure").
+
+   A face is reported planar only if BOTH hold across every one of its
+   triangles:
+
+     - all triangle normals agree in direction with the first triangle's
+       normal to within PRC_PLANAR_NORMAL_TOL (a dot-product bound), and
+     - every vertex lies within PRC_PLANAR_DIST_TOL_SCALE * tolerance_mm of
+       the plane through the first triangle.
+
+   Both are required, and neither alone is sufficient. Normal agreement alone
+   would accept two parallel-but-offset sheets of triangles grouped into one
+   face -- their normals match while their geometry is not coplanar. The plane
+   test alone would accept a face whose triangles lie in one plane but wind
+   inconsistently, which is geometrically coplanar yet cannot use the format's
+   normal-sharing shortcut, because that shortcut assigns a SINGLE normal to
+   every vertex of the face and the oppositely-wound triangles need its
+   negation.
+
+   Direction agreement is therefore tested with a signed dot product, not
+   fabs(): antiparallel normals are deliberately rejected.
+
+   The tolerances are deliberately strict. A false negative merely forgoes an
+   optimisation -- the face is encoded per-vertex, exactly as today. A false
+   positive writes a flag contradicted by the geometry, which at least one
+   real reader is reported to validate and reject. Asymmetric cost, so err
+   toward reporting non-planar.
+
+   WHY THIS IS NOT YET WIRED INTO THE WRITER
+   -----------------------------------------
+   is_face_planar cannot be enabled independently of the normal encoding. Two
+   facts combine to make that so:
+
+   1. The field exists in the stream ONLY when must_recalculate_normals is
+      FALSE -- Table 175 gives it as "(Optional; if must_recalculate_normals
+      is FALSE)". On the TRUE path it is absent altogether, so there is no
+      "declare planarity but change nothing" position available.
+
+   2. Where it does exist it is load-bearing, not advisory. The base text is
+      explicit: "The is_face_planar field is TRUE if the face is planar. In
+      this case, only one normal per face is stored." The decoder
+      (prc_handle_normal_calculation, src/prc_decode_compressed_tess.c)
+      implements exactly that: for a planar face it consumes four bits plus
+      two angles at the FIRST vertex of the face's FIRST triangle and nothing
+      at all for every other vertex and triangle of that face, reusing the one
+      decoded normal throughout.
+
+   prc_encode_normals_c2 is strictly per-vertex and has no face awareness: it
+   emits for every first-encountered point regardless of which face the point
+   belongs to. Setting is_face_planar[f] = 1 against that stream would leave
+   the decoder reading per-vertex data under per-face rules, desynchronising
+   normal reconstruction from that point on.
+
+   Enabling the flag therefore requires prc_encode_normals_c2 to mirror the
+   decoder's per-face state machine, including the interaction where a vertex
+   shared between a planar and a non-planar face must be registered in the
+   multiple-normals table by whichever face reaches it first. That work is not
+   done. Until it is, the writer passes NULL and every face is encoded
+   per-vertex, which is correct if unoptimised.
+
+   This function is exposed so the planarity census tool can report how much
+   the optimisation would be worth before that work is undertaken. */
+
+#define PRC_PLANAR_NORMAL_TOL       (1.0 - 1.0e-9)
+#define PRC_PLANAR_DIST_TOL_SCALE   (1.0)
+
+static void
+prc_encode_tri_normal(const prc_encode_mesh *mesh, uint32_t tri, prc_vec3 *out)
+{
+    const uint32_t *idx = &mesh->tri_indices[(size_t)tri * 3];
+    prc_vec3 a, b, c, e1, e2;
+
+    a.x = mesh->positions[(size_t)idx[0] * 3 + 0];
+    a.y = mesh->positions[(size_t)idx[0] * 3 + 1];
+    a.z = mesh->positions[(size_t)idx[0] * 3 + 2];
+    b.x = mesh->positions[(size_t)idx[1] * 3 + 0];
+    b.y = mesh->positions[(size_t)idx[1] * 3 + 1];
+    b.z = mesh->positions[(size_t)idx[1] * 3 + 2];
+    c.x = mesh->positions[(size_t)idx[2] * 3 + 0];
+    c.y = mesh->positions[(size_t)idx[2] * 3 + 1];
+    c.z = mesh->positions[(size_t)idx[2] * 3 + 2];
+
+    prc_vec_sub(b, a, &e1);
+    prc_vec_sub(c, a, &e2);
+    prc_vec_cross(e1, e2, out);
+}
+
+/* Fill is_face_planar_out[0..num_faces-1] with 1 where the face's triangles
+   are coplanar and consistently wound, 0 otherwise. Caller owns the array.
+   face_indices maps post-preprocessing triangle index -> face id. */
+int
+prc_encode_compute_face_planarity(prc_context *ctx, const prc_encode_mesh *mesh,
+    const uint32_t *face_indices, uint32_t num_faces, uint8_t **is_face_planar_out)
+{
+    uint8_t *planar = NULL;
+    uint8_t *have_ref = NULL;
+    prc_vec3 *ref_n = NULL;
+    prc_vec3 *ref_p = NULL;
+    double dist_tol;
+    uint32_t k, f, c;
+
+    *is_face_planar_out = NULL;
+    if (face_indices == NULL || num_faces == 0 || mesh->num_triangles == 0)
+        return 0;
+
+    planar   = (uint8_t *)prc_calloc(ctx, num_faces, sizeof(uint8_t));
+    have_ref = (uint8_t *)prc_calloc(ctx, num_faces, sizeof(uint8_t));
+    ref_n    = (prc_vec3 *)prc_calloc(ctx, num_faces, sizeof(prc_vec3));
+    ref_p    = (prc_vec3 *)prc_calloc(ctx, num_faces, sizeof(prc_vec3));
+    if (planar == NULL || have_ref == NULL || ref_n == NULL || ref_p == NULL)
+    {
+        if (planar != NULL)   prc_free(ctx, planar);
+        if (have_ref != NULL) prc_free(ctx, have_ref);
+        if (ref_n != NULL)    prc_free(ctx, ref_n);
+        if (ref_p != NULL)    prc_free(ctx, ref_p);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_compute_face_planarity\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    dist_tol = mesh->tolerance_mm * PRC_PLANAR_DIST_TOL_SCALE;
+    if (!(dist_tol > 0.0))
+        dist_tol = 1.0e-9;
+
+    /* optimistic; any failing triangle clears the face */
+    for (f = 0; f < num_faces; f++)
+        planar[f] = 1;
+
+    /* Pass 1: establish each face's reference plane from its first triangle
+       that has a usable (non-degenerate) normal. */
+    for (k = 0; k < mesh->num_triangles; k++)
+    {
+        prc_vec3 n;
+
+        f = face_indices[k];
+        if (f >= num_faces || have_ref[f])
+            continue;
+        prc_encode_tri_normal(mesh, k, &n);
+        if (prc_vec_normalize(&n) < 0)
+            continue;               /* degenerate; try the next triangle */
+        ref_n[f] = n;
+        ref_p[f].x = mesh->positions[(size_t)mesh->tri_indices[(size_t)k * 3] * 3 + 0];
+        ref_p[f].y = mesh->positions[(size_t)mesh->tri_indices[(size_t)k * 3] * 3 + 1];
+        ref_p[f].z = mesh->positions[(size_t)mesh->tri_indices[(size_t)k * 3] * 3 + 2];
+        have_ref[f] = 1;
+    }
+
+    /* Pass 2: test every triangle against its face's reference plane. */
+    for (k = 0; k < mesh->num_triangles; k++)
+    {
+        prc_vec3 n;
+
+        f = face_indices[k];
+        if (f >= num_faces || !planar[f])
+            continue;
+        if (!have_ref[f])
+        {
+            /* no usable normal anywhere on the face -- cannot assert planarity */
+            planar[f] = 0;
+            continue;
+        }
+
+        prc_encode_tri_normal(mesh, k, &n);
+        if (prc_vec_normalize(&n) < 0)
+        {
+            /* A degenerate triangle has no direction to agree with. It does
+               not disprove coplanarity (its vertices are still tested below),
+               so skip only the direction test. */
+        }
+        else if (prc_vec_dot_product(n, ref_n[f]) < PRC_PLANAR_NORMAL_TOL)
+        {
+            planar[f] = 0;
+            continue;
+        }
+
+        for (c = 0; c < 3; c++)
+        {
+            uint32_t vi = mesh->tri_indices[(size_t)k * 3 + c];
+            prc_vec3 v, d;
+            double dist;
+
+            v.x = mesh->positions[(size_t)vi * 3 + 0];
+            v.y = mesh->positions[(size_t)vi * 3 + 1];
+            v.z = mesh->positions[(size_t)vi * 3 + 2];
+            prc_vec_sub(v, ref_p[f], &d);
+            dist = prc_vec_dot_product(d, ref_n[f]);
+            if (dist < 0.0)
+                dist = -dist;
+            if (dist > dist_tol)
+            {
+                planar[f] = 0;
+                break;
+            }
+        }
+    }
+
+    prc_free(ctx, have_ref);
+    prc_free(ctx, ref_n);
+    prc_free(ctx, ref_p);
+    *is_face_planar_out = planar;
+    return 0;
+}
+
 int
 prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
     const double *positions, uint32_t num_positions,
@@ -4707,6 +4910,9 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
     }
     if (code != 0) goto cleanup;
 
+    /* NOTE -- is_face_planar is deliberately still NULL here.
+       See prc_encode_compute_face_planarity's header comment for why the flag
+       cannot be enabled independently of the C2 normal encoder. */
     code = prc_write_compress_tess_to_stream(ctx, s, &trav, mesh.tolerance_mm,
         rev, crease_angle_degrees, angles, acount, bin, bsize, must_recalculate_normals, NULL);
     ret = code;

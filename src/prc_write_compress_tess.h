@@ -215,6 +215,17 @@ int prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
    this parameter exists for diagnostics re-encoding a real file's
    already-decoded per-face planarity, which must be reproduced exactly
    to keep that file's own normal_angle_array/normal_binary_data valid). */
+/* Per-face coplanarity for the is_face_planar flag (Table 175, "Optional; if
+   must_recalculate_normals is FALSE"). Sets is_face_planar_out[f] to 1 where
+   face f's triangles are coplanar AND consistently wound, 0 otherwise; the
+   caller owns and frees the array. face_indices maps post-preprocessing
+   triangle index -> face id, as built by prc_write_compress_tess_entry.
+   Returns 0 and leaves *is_face_planar_out NULL when there is nothing to do.
+   See the definition's header comment for the tolerance rationale and for
+   why the flag cannot yet be written. */
+int prc_encode_compute_face_planarity(prc_context *ctx, const prc_encode_mesh *mesh,
+    const uint32_t *face_indices, uint32_t num_faces, uint8_t **is_face_planar_out);
+
 int prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
     const prc_encode_traversal_result *trav, double tolerance_mm,
     const uint8_t *normal_is_reversed_c1, double crease_angle_degrees,
