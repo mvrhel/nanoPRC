@@ -175,3 +175,7 @@ target_include_directories(dump_schema_programs PRIVATE tests)
 add_executable(face_planarity_census tests/internal/face_planarity_census.c)
 target_link_libraries(face_planarity_census prc_static)
 target_include_directories(face_planarity_census PRIVATE tests)
+
+add_executable(planar_roundtrip tests/internal/planar_roundtrip.c)
+target_link_libraries(planar_roundtrip prc_static)
+target_include_directories(planar_roundtrip PRIVATE tests)

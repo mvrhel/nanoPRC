@@ -200,6 +200,8 @@ int prc_encode_normals_c1(prc_context *ctx, const prc_encode_mesh *mesh,
    decoder's non-planar path consumes; both are owned by the caller. */
 int prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
     const prc_encode_traversal_result *trav, const double *corner_normals,
+    const uint8_t *face_planar_candidate, uint32_t face_count,
+    uint8_t **face_planar_effective_out,
     int32_t **normal_angle_array_out, uint32_t *normal_angle_count_out,
     uint8_t **normal_binary_data_out, uint32_t *normal_binary_data_size_out);
 

@@ -3782,13 +3782,112 @@ prc_encode_point_norm_append(prc_context *ctx, prc_encode_point_norm *p,
     return 0;
 }
 
+/* Emit the normal-encoding bits for ONE vertex visit, mirroring the decoder's
+   per-vertex state machine in prc_handle_normal_calculation
+   (src/prc_decode_compressed_tess.c).
+
+   Both the ordinary per-vertex path and the planar-face path go through this,
+   so the two cannot drift. The decoder uses the identical three-case machine
+   in both of its branches -- a planar face differs only in WHICH visits are
+   encoded (corner 0 of the face's first triangle, once) and not in HOW one is
+   encoded. Returns, via assigned_out, the normal the decoder will
+   reconstruct; the caller needs it for the corner-0 reversed check. */
+static int
+prc_encode_emit_vertex_normal(prc_context *ctx, prc_encode_point_norm *p,
+    const prc_encode_normal_tuple *t, prc_vec3 bxk, prc_vec3 byk, prc_vec3 bzk,
+    prc_vec3 input_normal, uint8_t *bin, uint32_t *bin_count,
+    int32_t *angles, uint32_t *angle_count, prc_vec3 *assigned_out)
+{
+    prc_vec3 assigned;
+    int code;
+
+    if (p->state == PRC_VERTEX_NORM_NOT_ENCOUNTERED)
+    {
+        uint8_t hm = (uint8_t)!p->all_same;
+
+        bin[(*bin_count)++] = hm;
+        bin[(*bin_count)++] = t->tri_reversed;
+        bin[(*bin_count)++] = t->x_reversed;
+        bin[(*bin_count)++] = t->y_reversed;
+        angles[(*angle_count)++] = t->theta_q;
+        angles[(*angle_count)++] = t->phi_q;
+        prc_encode_simulate_decoded_normal(bxk, byk, bzk, t, &assigned);
+        if (hm)
+        {
+            p->state = PRC_VERTEX_NORM_IS_MULTIPLE;
+            code = prc_encode_point_norm_append(ctx, p, input_normal, assigned);
+            if (code < 0)
+                return code;
+        }
+        else
+        {
+            p->state = PRC_VERTEX_NORM_IS_NOT_MULTIPLE;
+            p->single_decoded = assigned;
+        }
+    }
+    else if (p->state == PRC_VERTEX_NORM_IS_NOT_MULTIPLE)
+    {
+        /* the decoder reuses the single stored normal without reading any
+           bits; valid because all_same guaranteed every incident visit wants
+           this normal */
+        assigned = p->single_decoded;
+    }
+    else
+    {
+        uint32_t s, found = UINT32_MAX;
+
+        for (s = 0; s < p->num_stored; s++)
+        {
+            if (prc_vec_dot_product(p->slot_input[s], input_normal) > 1.0 - 1.0e-9)
+            {
+                found = s;
+                break;
+            }
+        }
+        if (found != UINT32_MAX)
+        {
+            /* inverse of the decoder's
+               ref_index = (num_stored - 1) - read_index, emitted LSB-first
+               over exactly the bit width the decoder will compute from its
+               own num_stored */
+            uint32_t number_bits = get_number_bits_to_store_unsigned_integer2(p->num_stored - 1);
+            uint32_t read_index = (p->num_stored - 1) - found;
+            uint32_t b;
+
+            bin[(*bin_count)++] = 1;
+            for (b = 0; b < number_bits; b++)
+                bin[(*bin_count)++] = (uint8_t)((read_index >> b) & 1u);
+            assigned = p->slot_decoded[found];
+        }
+        else
+        {
+            bin[(*bin_count)++] = 0;
+            bin[(*bin_count)++] = t->tri_reversed;
+            bin[(*bin_count)++] = t->x_reversed;
+            bin[(*bin_count)++] = t->y_reversed;
+            angles[(*angle_count)++] = t->theta_q;
+            angles[(*angle_count)++] = t->phi_q;
+            prc_encode_simulate_decoded_normal(bxk, byk, bzk, t, &assigned);
+            code = prc_encode_point_norm_append(ctx, p, input_normal, assigned);
+            if (code < 0)
+                return code;
+        }
+    }
+    *assigned_out = assigned;
+    return 0;
+}
+
 int
 prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
     const prc_encode_traversal_result *trav, const double *corner_normals,
+    const uint8_t *face_planar_candidate, uint32_t face_count,
+    uint8_t **face_planar_effective_out,
     int32_t **normal_angle_array_out, uint32_t *normal_angle_count_out,
     uint8_t **normal_binary_data_out, uint32_t *normal_binary_data_size_out)
 {
     uint32_t num_tris, npts, k, c, v;
+    uint8_t *planar_eff = NULL, *face_done = NULL, *face_has_ref = NULL;
+    prc_vec3 *face_assigned = NULL, *face_ref_normal = NULL;
     prc_vec3 *visit_normals = NULL;
     prc_vec3 *bx = NULL, *by = NULL, *bz = NULL;
     prc_encode_normal_tuple *tuples = NULL;
@@ -3809,6 +3908,8 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
     *normal_angle_count_out = 0;
     *normal_binary_data_out = NULL;
     *normal_binary_data_size_out = 0;
+    if (face_planar_effective_out != NULL)
+        *face_planar_effective_out = NULL;
 
     code = prc_encode_check_trav_arrays(ctx, mesh, trav);
     if (code < 0)
@@ -3904,107 +4005,139 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
         }
     }
 
+    /* Effective planarity. A face may only be ENCODED as planar if it is both
+       geometrically planar (the caller's candidate, from
+       prc_encode_compute_face_planarity) AND every supplied normal across the
+       whole face agrees, because the format stores exactly one normal for a
+       planar face and the decoder assigns it to every vertex of that face.
+
+       Geometry alone is not sufficient: a flat face lying against curved
+       neighbours can legitimately carry smoothly-varying per-vertex normals,
+       and encoding it as planar would silently replace them all with one.
+       Filtering here rather than in the geometric detector keeps the flag and
+       the normal stream consistent by construction -- the caller writes the
+       array this function returns, not the candidate it passed in. */
+    if (face_planar_candidate != NULL && face_count > 0 &&
+        trav->triangle_face_array != NULL)
+    {
+        planar_eff = (uint8_t *)prc_calloc(ctx, face_count, sizeof(uint8_t));
+        face_done = (uint8_t *)prc_calloc(ctx, face_count, sizeof(uint8_t));
+        face_assigned = (prc_vec3 *)prc_calloc(ctx, face_count, sizeof(prc_vec3));
+        face_ref_normal = (prc_vec3 *)prc_calloc(ctx, face_count, sizeof(prc_vec3));
+        face_has_ref = (uint8_t *)prc_calloc(ctx, face_count, sizeof(uint8_t));
+        if (planar_eff == NULL || face_done == NULL || face_assigned == NULL ||
+            face_ref_normal == NULL || face_has_ref == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_encode_normals_c2\n");
+            ret = PRC_ERROR_MEMORY;
+            goto fail;
+        }
+        for (v = 0; v < face_count; v++)
+            planar_eff[v] = face_planar_candidate[v];
+
+        for (k = 0; k < num_tris && k < trav->triangle_face_array_size; k++)
+        {
+            int32_t f = trav->triangle_face_array[k];
+
+            if (f < 0 || (uint32_t)f >= face_count || !planar_eff[f])
+                continue;
+            for (c = 0; c < 3; c++)
+            {
+                prc_vec3 n = visit_normals[(size_t)k * 3 + c];
+
+                if (!face_has_ref[f])
+                {
+                    face_ref_normal[f] = n;
+                    face_has_ref[f] = 1;
+                }
+                else if (prc_vec_dot_product(face_ref_normal[f], n) < 1.0 - 1.0e-9)
+                {
+                    planar_eff[f] = 0;
+                    break;
+                }
+            }
+        }
+    }
+
     for (k = 0; k < num_tris; k++)
     {
         const int32_t *idx = &trav->triangle_point_indices[(size_t)k * 3];
         prc_vec3 corner0_decoded;
+        int32_t face = -1;
+        uint8_t planar_here = 0;
 
         corner0_decoded.x = corner0_decoded.y = corner0_decoded.z = 0.0;
-        for (c = 0; c < 3; c++)
+
+        if (planar_eff != NULL && k < trav->triangle_face_array_size)
         {
-            uint32_t visit = k * 3 + c;
-            const prc_encode_normal_tuple *t = &tuples[visit];
-            prc_encode_point_norm *p = &pn[idx[c]];
-            prc_vec3 assigned;
+            face = trav->triangle_face_array[k];
+            if (face >= 0 && (uint32_t)face < face_count && planar_eff[face])
+                planar_here = 1;
+        }
 
-            if (p->state == PRC_VERTEX_NORM_NOT_ENCOUNTERED)
-            {
-                uint8_t hm = (uint8_t)!p->all_same;
+        if (planar_here)
+        {
+            /* One normal for the entire face, encoded at corner 0 of the
+               face's FIRST triangle; every other corner and triangle of the
+               face emits nothing. This mirrors the decoder's face_is_planar
+               branch, which consumes bits only when
+               face_normal_decoded[face] is still clear and looks only at
+               treated_index[0].
 
-                bin[bin_count++] = hm;
-                bin[bin_count++] = t->tri_reversed;
-                bin[bin_count++] = t->x_reversed;
-                bin[bin_count++] = t->y_reversed;
-                angles[angle_count++] = t->theta_q;
-                angles[angle_count++] = t->phi_q;
-                prc_encode_simulate_decoded_normal(bx[k], by[k], bz[k], t, &assigned);
-                if (hm)
-                {
-                    p->state = PRC_VERTEX_NORM_IS_MULTIPLE;
-                    code = prc_encode_point_norm_append(ctx, p, visit_normals[visit], assigned);
-                    if (code < 0)
-                    {
-                        ret = code;
-                        goto fail;
-                    }
-                }
-                else
-                {
-                    p->state = PRC_VERTEX_NORM_IS_NOT_MULTIPLE;
-                    p->single_decoded = assigned;
-                }
-            }
-            else if (p->state == PRC_VERTEX_NORM_IS_NOT_MULTIPLE)
+               Note corners 1 and 2 are deliberately NOT registered in pn[]:
+               the decoder never touches multiple_normals for them either, so
+               a vertex first met at corner 1 of a planar face is still
+               NOT_ENCOUNTERED when a later non-planar face reaches it. */
+            if (face_done[face])
             {
-                /* the decoder reuses the single stored normal without reading
-                   any bits; valid because all_same guaranteed every incident
-                   visit wants this normal */
-                assigned = p->single_decoded;
+                corner0_decoded = face_assigned[face];
             }
             else
             {
-                uint32_t s, found = UINT32_MAX;
-
-                for (s = 0; s < p->num_stored; s++)
+                code = prc_encode_emit_vertex_normal(ctx, &pn[idx[0]],
+                    &tuples[(size_t)k * 3], bx[k], by[k], bz[k],
+                    visit_normals[(size_t)k * 3], bin, &bin_count,
+                    angles, &angle_count, &corner0_decoded);
+                if (code < 0)
                 {
-                    if (prc_vec_dot_product(p->slot_input[s], visit_normals[visit]) > 1.0 - 1.0e-9)
-                    {
-                        found = s;
-                        break;
-                    }
+                    ret = code;
+                    goto fail;
                 }
-                if (found != UINT32_MAX)
-                {
-                    /* inverse of the decoder's
-                       ref_index = (num_stored - 1) - read_index, emitted
-                       LSB-first over exactly the bit width the decoder will
-                       compute from its own num_stored */
-                    uint32_t number_bits = get_number_bits_to_store_unsigned_integer2(p->num_stored - 1);
-                    uint32_t read_index = (p->num_stored - 1) - found;
-                    uint32_t b;
-
-                    bin[bin_count++] = 1;
-                    for (b = 0; b < number_bits; b++)
-                        bin[bin_count++] = (uint8_t)((read_index >> b) & 1u);
-                    assigned = p->slot_decoded[found];
-                }
-                else
-                {
-                    bin[bin_count++] = 0;
-                    bin[bin_count++] = t->tri_reversed;
-                    bin[bin_count++] = t->x_reversed;
-                    bin[bin_count++] = t->y_reversed;
-                    angles[angle_count++] = t->theta_q;
-                    angles[angle_count++] = t->phi_q;
-                    prc_encode_simulate_decoded_normal(bx[k], by[k], bz[k], t, &assigned);
-                    code = prc_encode_point_norm_append(ctx, p, visit_normals[visit], assigned);
-                    if (code < 0)
-                    {
-                        ret = code;
-                        goto fail;
-                    }
-                }
+                face_done[face] = 1;
+                face_assigned[face] = corner0_decoded;
             }
             if (ctx->trace_normals)
+                fprintf(stderr, "ENCNORM k=%u PLANAR face=%d first=%u assigned=(%.6f,%.6f,%.6f)%c",
+                    k, face, (unsigned)!face_done[face], corner0_decoded.x,
+                    corner0_decoded.y, corner0_decoded.z, 10);
+        }
+        else
+        {
+            for (c = 0; c < 3; c++)
             {
-                prc_vec3 pos = prc_encode_decoded_vec(trav, idx[c]);
-                fprintf(stderr, "ENCNORM k=%u c=%u pt=%d rev=%u xrev=%u yrev=%u theta=%d phi=%d input_normal=(%.6f,%.6f,%.6f) assigned=(%.6f,%.6f,%.6f) pos=(%.6f,%.6f,%.6f)\n",
-                    k, c, idx[c], t->tri_reversed, t->x_reversed, t->y_reversed, t->theta_q, t->phi_q,
-                    visit_normals[visit].x, visit_normals[visit].y, visit_normals[visit].z,
-                    assigned.x, assigned.y, assigned.z, pos.x, pos.y, pos.z);
+                uint32_t visit = k * 3 + c;
+                const prc_encode_normal_tuple *t = &tuples[visit];
+                prc_vec3 assigned;
+
+                code = prc_encode_emit_vertex_normal(ctx, &pn[idx[c]], t,
+                    bx[k], by[k], bz[k], visit_normals[visit], bin, &bin_count,
+                    angles, &angle_count, &assigned);
+                if (code < 0)
+                {
+                    ret = code;
+                    goto fail;
+                }
+                if (ctx->trace_normals)
+                {
+                    prc_vec3 pos = prc_encode_decoded_vec(trav, idx[c]);
+                    fprintf(stderr, "ENCNORM k=%u c=%u pt=%d rev=%u xrev=%u yrev=%u theta=%d phi=%d input_normal=(%.6f,%.6f,%.6f) assigned=(%.6f,%.6f,%.6f) pos=(%.6f,%.6f,%.6f)%c",
+                        k, c, idx[c], t->tri_reversed, t->x_reversed, t->y_reversed, t->theta_q, t->phi_q,
+                        visit_normals[visit].x, visit_normals[visit].y, visit_normals[visit].z,
+                        assigned.x, assigned.y, assigned.z, pos.x, pos.y, pos.z, 10);
+                }
+                if (c == 0)
+                    corner0_decoded = assigned;
             }
-            if (c == 0)
-                corner0_decoded = assigned;
         }
 
         /* The decoder derives normal_was_reversed from the corner-0 normal
@@ -4080,6 +4213,13 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
     *normal_binary_data_size_out = bin_count;
     angles = NULL;
     bin = NULL;
+    /* Hand back the planarity actually encoded, not the candidate: the caller
+       must write THIS array, or the flag and the normal stream disagree. */
+    if (face_planar_effective_out != NULL)
+    {
+        *face_planar_effective_out = planar_eff;
+        planar_eff = NULL;
+    }
     ret = 0;
 
 fail:
@@ -4087,6 +4227,16 @@ fail:
         prc_free(ctx, angles);
     if (bin != NULL)
         prc_free(ctx, bin);
+    if (planar_eff != NULL)
+        prc_free(ctx, planar_eff);
+    if (face_done != NULL)
+        prc_free(ctx, face_done);
+    if (face_assigned != NULL)
+        prc_free(ctx, face_assigned);
+    if (face_ref_normal != NULL)
+        prc_free(ctx, face_ref_normal);
+    if (face_has_ref != NULL)
+        prc_free(ctx, face_has_ref);
     if (visit_normals != NULL)
         prc_free(ctx, visit_normals);
     if (bx != NULL)
@@ -4696,6 +4846,8 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
                                             into prc_encode_traversal as real_normals so it can decide
                                             each triangle's normal_was_reversed bit inline */
     uint8_t *rev = NULL;
+    uint8_t *face_planar_candidate = NULL;  /* geometry only */
+    uint8_t *is_face_planar = NULL;         /* what was actually encoded */
     int32_t *angles = NULL;
     uint8_t *bin = NULL;
     uint32_t acount = 0, bsize = 0;
@@ -4859,7 +5011,22 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
 
     if (!must_recalculate_normals)
     {
-        code = prc_encode_normals_c2(ctx, &mesh, &trav, corner_normals, &angles, &acount, &bin, &bsize);
+        /* Candidate planarity from geometry; prc_encode_normals_c2 narrows it
+           to faces whose supplied normals also agree, and hands back the array
+           it actually encoded. */
+        if (face_indices_post != NULL && num_faces > 0)
+        {
+            code = prc_encode_compute_face_planarity(ctx, &mesh, face_indices_post,
+                num_faces, &face_planar_candidate);
+            if (code < 0)
+            {
+                ret = code;
+                goto cleanup;
+            }
+        }
+        code = prc_encode_normals_c2(ctx, &mesh, &trav, corner_normals,
+            face_planar_candidate, num_faces, &is_face_planar,
+            &angles, &acount, &bin, &bsize);
         if (prc_diag_getenv("PRC_DIAG_C2_FALLBACK") != NULL)
             printf("PRC_DIAG_C2_FALLBACK: prc_encode_normals_c2 code=%d (0=succeeded, nonzero=fell back to C1)\n", code);
         if (code != 0)
@@ -4910,11 +5077,12 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
     }
     if (code != 0) goto cleanup;
 
-    /* NOTE -- is_face_planar is deliberately still NULL here.
-       See prc_encode_compute_face_planarity's header comment for why the flag
-       cannot be enabled independently of the C2 normal encoder. */
+    /* is_face_planar is whatever prc_encode_normals_c2 actually encoded --
+       never the geometric candidate, and NULL on the C1 path where the
+       field does not exist in the stream at all. */
     code = prc_write_compress_tess_to_stream(ctx, s, &trav, mesh.tolerance_mm,
-        rev, crease_angle_degrees, angles, acount, bin, bsize, must_recalculate_normals, NULL);
+        rev, crease_angle_degrees, angles, acount, bin, bsize, must_recalculate_normals,
+        is_face_planar);
     ret = code;
 
 cleanup:
@@ -4922,6 +5090,8 @@ cleanup:
     if (face_indices_post != NULL) prc_free(ctx, face_indices_post);
     if (corner_normals != NULL) prc_free(ctx, corner_normals);
     if (rev != NULL) prc_free(ctx, rev);
+    if (face_planar_candidate != NULL) prc_free(ctx, face_planar_candidate);
+    if (is_face_planar != NULL) prc_free(ctx, is_face_planar);
     if (angles != NULL) prc_free(ctx, angles);
     if (bin != NULL) prc_free(ctx, bin);
     if (trav_ready) prc_encode_traversal_free(ctx, &trav);

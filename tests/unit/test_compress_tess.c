@@ -754,7 +754,11 @@ test_cube_c2_roundtrip(prc_context *ctx)
     PRC_ASSERT_EQ(mesh.num_triangles, 12);
     PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
 
+    /* NULL planarity candidate / 0 faces: this test covers the ordinary
+       per-vertex path. The planar-face path is exercised separately by
+       tests/internal/planar_roundtrip.c. */
     code = prc_encode_normals_c2(ctx, &mesh, &res, corner_normals,
+        NULL, 0, NULL,
         &angles, &acount, &bin, &bsize);
     if (code < 0)
         prc_print_error_stack(ctx);
