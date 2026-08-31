@@ -4179,6 +4179,43 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
             prc_vec_sub(P2, mid, &e2);
             prc_vec_cross(e2, e1, &cross1);
             derived_reversed = (uint8_t)(prc_vec_dot_product(cross1, corner0_decoded) < 0.0);
+            /* WHY THIS FIRES, AND WHY IT MUST STAY (investigated 2026-08-31).
+               This is the single reason C2 falls back to C1 on hard-edged
+               meshes, and therefore the reason is_face_planar -- a C2-only
+               field -- cannot currently reach the stream. It is a real check,
+               not a false alarm, and suppressing it corrupts files.
+
+               Two different decisions produce this triangle's reversed bit,
+               and they can disagree:
+
+                 - trav->triangle_reversed[k] is what gets WRITTEN. For a
+                   GROWING triangle prc_encode_traversal does not decide it
+                   geometrically at all -- it inherits the parent's value (the
+                   2026-08-10 winding fix, 42.4% -> 1.9% wrong-normal rate).
+                 - t->tri_reversed inside each normal tuple, which is what the
+                   ENCODED NORMAL is projected against, is decided per corner
+                   and purely geometrically by prc_encode_project_normal
+                   (`t->tri_reversed = (nz < 0.0)`).
+
+               So on a grown triangle whose own winding differs from its
+               parent's, the normal is encoded in one frame and the written bit
+               claims the other. corner0_decoded is reconstructed from the
+               tuple, so comparing it against the written bit detects exactly
+               that inconsistency.
+
+               Measured both ways. Suppressing this check for growing
+               triangles: a flat two-face plate (uniform +Z normals) then
+               encodes and round-trips correctly, and is_face_planar reaches
+               the stream -- but a hard-edged cube with per-face normals
+               produces a file its own decoder CANNOT READ
+               ("Failed in prc_handle_normal_calculation"). The C1 fallback
+               this triggers is a safety net, and removing it turns a
+               correct-but-unoptimised file into a corrupt one.
+
+               The real fix is to reconcile the two decisions -- most likely by
+               having prc_encode_project_normal use the traversal's already-
+               decided bit instead of deriving its own -- not to weaken this
+               test. Until then the fallback is the correct behaviour. */
             if (derived_reversed != trav->triangle_reversed[k] &&
                 trav->edge_status_array[k] != 0)
             {
