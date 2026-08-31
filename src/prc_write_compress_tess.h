@@ -168,11 +168,17 @@ typedef struct prc_vertex_analysis_s
    "left" (mirroring the decoder's prc_set_left_right_edge_indices swap),
    and is ALSO returned via out->triangle_reversed so the caller doesn't
    need a separate post-pass to recover it. */
+/* normals_are_proxy: 1 when real_normals holds the smoothed proxy normals
+   synthesised for the must_recalculate_normals path, 0 when it holds the
+   caller's genuine per-corner normals. It selects how a GROWING triangle's
+   normal_was_reversed bit is decided -- inherited from the parent for
+   proxies, decided geometrically for real normals. See the branch itself
+   for why the right answer differs between the two. */
 int prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     const uint32_t *face_indices, double tolerance_mm,
     prc_encode_traversal_result *out,
     prc_vertex_analysis **analysis_out, uint32_t *analysis_count_out,
-    const double *real_normals);
+    const double *real_normals, uint8_t normals_are_proxy);
 
 void prc_encode_traversal_free(prc_context *ctx, prc_encode_traversal_result *out);
 

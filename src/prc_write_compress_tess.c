@@ -2538,7 +2538,7 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     const uint32_t *face_indices, double tolerance_mm,
     prc_encode_traversal_result *out,
     prc_vertex_analysis **analysis_out, uint32_t *analysis_count_out,
-    const double *real_normals)
+    const double *real_normals, uint8_t normals_are_proxy)
 {
     prc_encode_state st;
     uint32_t i, num_tris, num_pos;
@@ -3031,7 +3031,21 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
                overrides both cases to 0, for comparison/regression testing. */
             if (prc_diag_getenv("PRC_DIAG_FORCE_UNREVERSED") != NULL)
                 st.tri_reversed[cur] = 0;
-            else if (is_growing)
+            /* Inherit ONLY when the normals driving this decision are the
+               smoothed proxies built for the must_recalculate_normals path.
+               That is what the inheritance rule was for: a per-triangle
+               geometric call taken from an approximation is noisy, and
+               inheriting the chain's value beat it decisively (42.4% -> 1.9%
+               wrong-normal rate, 2026-08-10).
+
+               When the caller supplied REAL per-corner normals the argument
+               inverts. There is no proxy noise, and the decoder derives each
+               triangle's winding from the decoded corner-0 normal
+               (prc_is_normal_reversed_single_normal) -- so inheriting a
+               parent's value is what creates a disagreement with what the
+               decoder will conclude. Deciding geometrically here is what
+               makes the two agree. */
+            else if (is_growing && normals_are_proxy)
                 st.tri_reversed[cur] = entering_reversed;
             else
                 st.tri_reversed[cur] = prc_encode_decide_reversed(&st, cur, idx, mv);
@@ -4212,10 +4226,28 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
                this triggers is a safety net, and removing it turns a
                correct-but-unoptimised file into a corrupt one.
 
-               The real fix is to reconcile the two decisions -- most likely by
-               having prc_encode_project_normal use the traversal's already-
-               decided bit instead of deriving its own -- not to weaken this
-               test. Until then the fallback is the correct behaviour. */
+               A NOTE ON WHAT THE FIX IS NOT. An earlier version of this
+               comment proposed making prc_encode_project_normal use the
+               traversal's already-decided bit instead of deriving its own.
+               That is wrong: t->tri_reversed selects the spherical frame the
+               normal is ENCODED in (it is handed to prc_decode_normal
+               alongside theta/phi), not the winding. Overwriting it would
+               corrupt the reconstructed normal, not reconcile anything.
+
+               The conflict is between the traversal's inherited bit and the
+               winding the decoder DERIVES from the decoded corner-0 normal
+               (prc_is_normal_reversed_single_normal). Note where the
+               inheritance rule came from: it exists because on the C1 path
+               the traversal is fed SMOOTHED PROXY normals, and per-triangle
+               geometric decisions taken from an approximation are noisy --
+               see prc_encode_grow_op's comment. On the C2 path the traversal
+               is fed the caller's REAL per-corner normals, and the decoder
+               derives its winding from those same normals, so the noise
+               argument does not apply and inheriting is the thing that
+               creates the disagreement. Deciding geometrically when the
+               normals are real is the candidate fix; it needs measuring
+               against the files the inheritance rule was built for before it
+               is adopted. Until then the fallback is the correct behaviour. */
             if (derived_reversed != trav->triangle_reversed[k] &&
                 trav->edge_status_array[k] != 0)
             {
@@ -5042,7 +5074,8 @@ prc_write_compress_tess_entry(prc_context *ctx, prc_bit_write_state *s,
        baseline's assumptions for those triangles. Measured on turbine tess
        902: 49% of triangles diverged between a baseline-computed value and
        reality, confirming this isn't a rare edge case. */
-    code = prc_encode_traversal(ctx, &mesh, face_indices_post, mesh.tolerance_mm, &trav, NULL, NULL, corner_normals);
+    code = prc_encode_traversal(ctx, &mesh, face_indices_post, mesh.tolerance_mm, &trav, NULL, NULL,
+                                corner_normals, must_recalculate_normals);
     if (code != 0) goto cleanup;
     trav_ready = 1;
 

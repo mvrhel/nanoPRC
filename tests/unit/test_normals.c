@@ -131,7 +131,7 @@ encode_and_parse_c2(prc_context *ctx, const double *positions, uint32_t npos,
         prc_write_tol_absolute(1e-4), &mesh), 0);
     PRC_ASSERT_EQ(mesh.num_positions, npos);
     PRC_ASSERT_EQ(mesh.num_triangles, ntris);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_NOT_NULL(res.triangle_point_indices);
     PRC_ASSERT_NOT_NULL(res.decoded_positions);
 
