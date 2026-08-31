@@ -281,7 +281,7 @@ prc_pdf_compute_c2w_co(const prc_pdf_view_spec *v, double c2w[12], double *co_ou
 
 static int
 prc_pdf_write_view_obj(prc_context *ctx, prc_pdf_writer *w, uint32_t obj_num,
-    const prc_pdf_view_spec *v)
+    const prc_pdf_view_spec *v, uint32_t lighting_num)
 {
     double c2w[12];
     double co;
@@ -303,7 +303,10 @@ prc_pdf_write_view_obj(prc_context *ctx, prc_pdf_writer *w, uint32_t obj_num,
        /CO actually are, and is the value examples/cube.pdf's own working
        view objects use. Without it, a reader has no defined way to know
        what /C2W/CO mean. */
-    if (fprintf(w->fid, "]/CO %.6f/MS/M>>", co) < 0) goto io_fail;
+    /* /LS: without a lighting scheme the reader has no defined lighting for
+       this view and renders the scene unlit. Emitted as an indirect
+       reference to one shared object, matching examples/cube.pdf. */
+    if (fprintf(w->fid, "]/CO %.6f/LS %u 0 R/MS/M>>", co, lighting_num) < 0) goto io_fail;
     if (prc_pdf_end_obj(ctx, w) != 0) return PRC_ERROR_IO;
 
     return 0;
@@ -329,6 +332,8 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     double title_width, title_x, title_y;
     int appearance_content_len;
     uint32_t catalog_num, pages_num, page_num, annots_num, annot_num, appearance_num, stream_num, border_style_num, info_num;
+    uint32_t lighting_num;
+    uint32_t lit_default_view_num = 0;
     uint32_t *view_nums = NULL;
     uint32_t default_view_index = 0;
     uint32_t i;
@@ -395,6 +400,15 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     stream_num = prc_pdf_writer_alloc_obj(ctx, &w);
     border_style_num = prc_pdf_writer_alloc_obj(ctx, &w);
     info_num = prc_pdf_writer_alloc_obj(ctx, &w);
+    lighting_num = prc_pdf_writer_alloc_obj(ctx, &w);
+    /* With no caller-supplied views there is nothing to hang /LS on, and
+       the scene renders unlit. Synthesise one minimal view that carries
+       only a name and the lighting scheme -- no camera, so the reader
+       keeps whatever default the PRC itself declares and this adds
+       lighting without overriding the framing. examples/cube.pdf shows
+       the camera-less form is legal: `<</Type/3DView/XN(Default)>>`. */
+    if (options->num_views == 0)
+        lit_default_view_num = prc_pdf_writer_alloc_obj(ctx, &w);
     for (i = 0; i < options->num_views; i++)
         view_nums[i] = prc_pdf_writer_alloc_obj(ctx, &w);
     if (w.error) { ret = PRC_ERROR_MEMORY; goto cleanup; }
@@ -402,8 +416,14 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     /* 3DView objects. */
     for (i = 0; i < options->num_views; i++)
     {
-        code = prc_pdf_write_view_obj(ctx, &w, view_nums[i], &options->views[i]);
+        code = prc_pdf_write_view_obj(ctx, &w, view_nums[i], &options->views[i], lighting_num);
         if (code != 0) { ret = code; goto cleanup; }
+    }
+    if (lit_default_view_num != 0)
+    {
+        if (prc_pdf_begin_obj(ctx, &w, lit_default_view_num) != 0) goto io_fail;
+        if (fprintf(fid, "<</Type/3DView/XN(Default)/LS %u 0 R>>", lighting_num) < 0) goto io_fail;
+        if (prc_pdf_end_obj(ctx, &w) != 0) goto io_fail;
     }
 
     /* 3D stream: /Type/3D /Subtype/PRC, raw PRC bytes, no PDF-level
@@ -422,6 +442,10 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
         for (i = 0; i < options->num_views; i++)
             if (fprintf(fid, "%u 0 R ", view_nums[i]) < 0) goto io_fail;
         if (fprintf(fid, "]") < 0) goto io_fail;
+    }
+    else if (lit_default_view_num != 0)
+    {
+        if (fprintf(fid, "/VA[%u 0 R]/DV 0", lit_default_view_num) < 0) goto io_fail;
     }
     if (fprintf(fid, "/Length %lu>>", (unsigned long)prc_size) < 0) goto io_fail;
     if (prc_pdf_write_stream_body(ctx, &w, prc_data, prc_size) != 0) goto io_fail;
@@ -462,6 +486,24 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     if (fprintf(fid, "<</S/S/Type/Border/W 0>>") < 0) goto io_fail;
     if (prc_pdf_end_obj(ctx, &w) != 0) goto io_fail;
 
+    /* 3D lighting scheme, as its own indirect object referenced by every
+       3DView's /LS -- the same shape examples/cube.pdf uses (`/LS 23 0 R`
+       -> `<</Subtype/Headlamp/Type/3DLightingScheme>>`).
+
+       Without an /LS entry a view has no defined lighting and readers
+       render the scene unlit, which is what every file this writer
+       produced did until now.
+
+       /CAD is the scheme intended for engineering geometry (PDF 32000-1
+       Table 314 lists the permitted subtypes: Artwork, None, White, Day,
+       Night, Hard, Primary, Blue, Red, Cube, CAD, Headlamp). Headlamp,
+       which the reference file uses, lights only from the camera and
+       leaves surfaces facing away flat; CAD's multi-light rig reads
+       better on mechanical parts, which is what this writer wraps. */
+    if (prc_pdf_begin_obj(ctx, &w, lighting_num) != 0) goto io_fail;
+    if (fprintf(fid, "<</Type/3DLightingScheme/Subtype/CAD>>") < 0) goto io_fail;
+    if (prc_pdf_end_obj(ctx, &w) != 0) goto io_fail;
+
     /* Annotation. /3DA's AIS/DIS/NP/TB values based on five real,
        independently-produced, Acrobat-confirmed-working %PDF-1.7 files
        (ElevationMeshIS_ePRC.pdf, xml-sample-{wrl,iv,3ds}_ePRC.pdf,
@@ -486,8 +528,19 @@ prc_write_pdf_3d_annotation(prc_context *ctx, const char *pdf_path,
     if (fprintf(fid, "<</Type/Annot/Subtype/3D/Rect[%.2f %.2f %.2f %.2f]/P %u 0 R",
                 rect_x0, rect_y0, rect_x1, rect_y1, page_num) < 0) goto io_fail;
     if (fprintf(fid, "/3DD %u 0 R", stream_num) < 0) goto io_fail;
+    /* Braces are load-bearing here: without them the `else` binds to the
+       inner `if (fprintf(...) < 0)` rather than to the view-count test, so
+       the no-views branch never runs and the annotation ships with no /3DV
+       at all. That is exactly what happened on the first cut of this
+       change, and it compiles without a warning. */
     if (options->num_views > 0)
+    {
         if (fprintf(fid, "/3DV %u 0 R", view_nums[default_view_index]) < 0) goto io_fail;
+    }
+    else if (lit_default_view_num != 0)
+    {
+        if (fprintf(fid, "/3DV %u 0 R", lit_default_view_num) < 0) goto io_fail;
+    }
 #if PRC_PDF_AUTO_ACTIVATE_3D
     if (fprintf(fid, "/3DI true/3DA<</A/PV/AIS/L/D/PI/DIS/L/NP false/TB true>>") < 0) goto io_fail;
 #else
