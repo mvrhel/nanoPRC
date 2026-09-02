@@ -55,7 +55,7 @@ check_roundtrip(prc_context *ctx, const double *positions, uint32_t npos,
 
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, npos, tris, ntris,
         prc_write_tol_absolute(1e-4), &mesh), 0);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT(res.point_reference_array_size >= min_references);
 
     memset(&data, 0, sizeof(data));
@@ -278,7 +278,7 @@ main(void)
     PRC_ASSERT_EQ(mesh.num_triangles, 2);
     PRC_ASSERT_EQ(mesh.num_positions, 4);
 
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_NOT_NULL(res.point_array);
     PRC_ASSERT_NOT_NULL(res.edge_status_array);
     PRC_ASSERT_NOT_NULL(res.points_is_reference_array);

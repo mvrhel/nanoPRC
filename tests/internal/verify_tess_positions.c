@@ -119,7 +119,7 @@ int main(void)
     code = prc_encode_preprocess(ctx, positions, 5, tris, 4, prc_write_tol_absolute(1e-4), &mesh);
     if (code != 0) { printf("preprocess failed: %d\n", code); return 1; }
 
-    code = prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL);
+    code = prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0);
     if (code != 0) { printf("traversal failed: %d\n", code); return 1; }
 
     printf("\n=== Traversal result ===\n");

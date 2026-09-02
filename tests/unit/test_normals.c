@@ -131,11 +131,15 @@ encode_and_parse_c2(prc_context *ctx, const double *positions, uint32_t npos,
         prc_write_tol_absolute(1e-4), &mesh), 0);
     PRC_ASSERT_EQ(mesh.num_positions, npos);
     PRC_ASSERT_EQ(mesh.num_triangles, ntris);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_NOT_NULL(res.triangle_point_indices);
     PRC_ASSERT_NOT_NULL(res.decoded_positions);
 
+    /* NULL planarity candidate / 0 faces: this test covers the ordinary
+       per-vertex path. The planar-face path is exercised separately by
+       tests/internal/planar_roundtrip.c. */
     code = prc_encode_normals_c2(ctx, &mesh, &res, corner_normals,
+        NULL, 0, NULL,
         &angles, &acount, &bin, &bsize);
     if (code < 0)
         prc_print_error_stack(ctx);

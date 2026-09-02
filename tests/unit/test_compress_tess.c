@@ -395,7 +395,7 @@ test_single_triangle_roundtrip(prc_context *ctx)
 
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 3, tris, 1,
         prc_write_tol_absolute(1e-4), &mesh), 0);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ(prc_encode_normals_c1(ctx, &mesh, &res, NULL, &rev), 0);
     PRC_ASSERT_NOT_NULL(rev);
 
@@ -460,7 +460,7 @@ test_quad_roundtrip(prc_context *ctx)
 
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 4, tris, 2,
         prc_write_tol_absolute(1e-4), &mesh), 0);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ(res.edge_status_array_size, 2);
     PRC_ASSERT(res.edge_status_array[0] != 0 || res.edge_status_array[1] != 0);
     PRC_ASSERT_EQ(res.num_decoded_points, 4);
@@ -534,7 +534,7 @@ test_disjoint_roundtrip(prc_context *ctx)
 
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 6, tris, 2,
         prc_write_tol_absolute(1e-4), &mesh), 0);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ((res.points_is_reference_array_size - mesh.num_triangles) % 2, 0);
     PRC_ASSERT_EQ((res.points_is_reference_array_size - mesh.num_triangles) / 2, 2);
     PRC_ASSERT_EQ(res.num_decoded_points, 6);
@@ -616,7 +616,7 @@ test_cube_c1_roundtrip(prc_context *ctx)
         prc_write_tol_absolute(1e-4), &mesh), 0);
     PRC_ASSERT_EQ(mesh.num_positions, 8);
     PRC_ASSERT_EQ(mesh.num_triangles, 12);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_NOT_NULL(res.triangle_point_indices);
     PRC_ASSERT_NOT_NULL(res.decoded_positions);
     PRC_ASSERT_EQ(res.num_decoded_points, 8);
@@ -752,9 +752,13 @@ test_cube_c2_roundtrip(prc_context *ctx)
         prc_write_tol_absolute(1e-4), &mesh), 0);
     PRC_ASSERT_EQ(mesh.num_positions, 8);
     PRC_ASSERT_EQ(mesh.num_triangles, 12);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
 
+    /* NULL planarity candidate / 0 faces: this test covers the ordinary
+       per-vertex path. The planar-face path is exercised separately by
+       tests/internal/planar_roundtrip.c. */
     code = prc_encode_normals_c2(ctx, &mesh, &res, corner_normals,
+        NULL, 0, NULL,
         &angles, &acount, &bin, &bsize);
     if (code < 0)
         prc_print_error_stack(ctx);
@@ -864,7 +868,7 @@ test_c1_sign_convention(prc_context *ctx, double nz)
 
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 3, tris, 1,
         prc_write_tol_absolute(1e-4), &mesh), 0);
-    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL), 0);
+    PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ(prc_encode_normals_c1(ctx, &mesh, &res, normals, &rev), 0);
     PRC_ASSERT_NOT_NULL(rev);
 
@@ -920,7 +924,7 @@ test_vertex_analysis_stub(prc_context *ctx)
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, 4, tris, 2,
         prc_write_tol_absolute(1e-4), &mesh), 0);
     PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res,
-        &analysis, &analysis_count, NULL), 0);
+        &analysis, &analysis_count, NULL, 0), 0);
     PRC_ASSERT_NOT_NULL(analysis);
     PRC_ASSERT_EQ(analysis_count, res.num_decoded_points);
     PRC_ASSERT_EQ(analysis_count, 4);
@@ -1009,7 +1013,7 @@ test_million_triangle_grid(prc_context *ctx)
     PRC_ASSERT_EQ(prc_encode_preprocess(ctx, positions, num_pos, tris, num_tris,
         prc_write_tol_relative(1e-6), &mesh), 0);
     PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res,
-        NULL, NULL, NULL), 0);
+        NULL, NULL, NULL, 0), 0);
     elapsed = (double)(clock() - start) / CLOCKS_PER_SEC;
     printf("    preprocess + traversal wall time: %.3f s\n", elapsed);
     PRC_ASSERT(elapsed < 30.0);
@@ -1084,7 +1088,7 @@ test_large_offset_cube(prc_context *ctx)
     PRC_ASSERT_EQ(mesh.num_positions, 8);
     PRC_ASSERT_EQ(mesh.num_triangles, 12);
     PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, NULL, mesh.tolerance_mm, &res,
-        NULL, NULL, NULL), 0);
+        NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ(res.num_decoded_points, 8);
     PRC_ASSERT_EQ(res.edge_status_array_size, 12);
 
@@ -1454,7 +1458,7 @@ test_teapot_face_groups(prc_context *ctx)
     PRC_ASSERT_EQ(mesh.num_triangles, TEAPOT_TOTAL_TRIS);
 
     PRC_ASSERT_EQ(prc_encode_traversal(ctx, &mesh, face_indices, mesh.tolerance_mm,
-        &res, NULL, NULL, NULL), 0);
+        &res, NULL, NULL, NULL, 0), 0);
     PRC_ASSERT_EQ(prc_encode_normals_c1(ctx, &mesh, &res, NULL, &rev), 0);
 
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 4096), 0);

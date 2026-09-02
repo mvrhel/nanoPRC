@@ -168,11 +168,17 @@ typedef struct prc_vertex_analysis_s
    "left" (mirroring the decoder's prc_set_left_right_edge_indices swap),
    and is ALSO returned via out->triangle_reversed so the caller doesn't
    need a separate post-pass to recover it. */
+/* normals_are_proxy: 1 when real_normals holds the smoothed proxy normals
+   synthesised for the must_recalculate_normals path, 0 when it holds the
+   caller's genuine per-corner normals. It selects how a GROWING triangle's
+   normal_was_reversed bit is decided -- inherited from the parent for
+   proxies, decided geometrically for real normals. See the branch itself
+   for why the right answer differs between the two. */
 int prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     const uint32_t *face_indices, double tolerance_mm,
     prc_encode_traversal_result *out,
     prc_vertex_analysis **analysis_out, uint32_t *analysis_count_out,
-    const double *real_normals);
+    const double *real_normals, uint8_t normals_are_proxy);
 
 void prc_encode_traversal_free(prc_context *ctx, prc_encode_traversal_result *out);
 
@@ -200,6 +206,8 @@ int prc_encode_normals_c1(prc_context *ctx, const prc_encode_mesh *mesh,
    decoder's non-planar path consumes; both are owned by the caller. */
 int prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
     const prc_encode_traversal_result *trav, const double *corner_normals,
+    const uint8_t *face_planar_candidate, uint32_t face_count,
+    uint8_t **face_planar_effective_out,
     int32_t **normal_angle_array_out, uint32_t *normal_angle_count_out,
     uint8_t **normal_binary_data_out, uint32_t *normal_binary_data_size_out);
 
@@ -215,6 +223,17 @@ int prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
    this parameter exists for diagnostics re-encoding a real file's
    already-decoded per-face planarity, which must be reproduced exactly
    to keep that file's own normal_angle_array/normal_binary_data valid). */
+/* Per-face coplanarity for the is_face_planar flag (Table 175, "Optional; if
+   must_recalculate_normals is FALSE"). Sets is_face_planar_out[f] to 1 where
+   face f's triangles are coplanar AND consistently wound, 0 otherwise; the
+   caller owns and frees the array. face_indices maps post-preprocessing
+   triangle index -> face id, as built by prc_write_compress_tess_entry.
+   Returns 0 and leaves *is_face_planar_out NULL when there is nothing to do.
+   See the definition's header comment for the tolerance rationale and for
+   why the flag cannot yet be written. */
+int prc_encode_compute_face_planarity(prc_context *ctx, const prc_encode_mesh *mesh,
+    const uint32_t *face_indices, uint32_t num_faces, uint8_t **is_face_planar_out);
+
 int prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
     const prc_encode_traversal_result *trav, double tolerance_mm,
     const uint8_t *normal_is_reversed_c1, double crease_angle_degrees,
