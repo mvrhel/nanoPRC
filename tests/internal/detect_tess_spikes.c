@@ -202,7 +202,7 @@ int main(int argc, char **argv)
                 {
                     prc_api_graphic_primitive prim;
                     size_t idx;
-                    code = prc_api_get_graphics_primitive(ctx, data, tess, (uint8_t)f, p, &prim);
+                    code = prc_api_get_graphics_primitive(ctx, data, tess, f, p, &prim);
                     if (code < 0) continue;
 
                     if (prim.type == PRC_API_TRIANGLES)
