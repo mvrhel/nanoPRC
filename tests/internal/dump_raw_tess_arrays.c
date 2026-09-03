@@ -50,8 +50,9 @@ int main(int argc, char **argv)
     uint8_t *buf;
     size_t read_size;
     const uint8_t *p;
-    uint32_t section_count;
-    uint32_t *section_offsets;
+    uint32_t section_count = 0;
+    uint32_t *section_offsets = NULL;
+    uint32_t fs_count;
     uint32_t i;
     uint8_t *tess_inflated = NULL;
     prc_bit_state bit_state;
@@ -72,14 +73,43 @@ int main(int argc, char **argv)
     if (read_size != (size_t)fsize) { printf("short read\n"); return 1; }
     if (memcmp(buf, "PRC", 3) != 0) { printf("not a raw PRC file\n"); return 1; }
 
+    /* A PRC file holds "one or more FileStructures" (ISO 14739 4.3.2, "File
+       structure") -- assembly component units, ordered parts first, then
+       subassemblies, then the root assembly. Each carries its own complete set
+       of sections, so a real assembly's tessellation is spread across all of
+       them and dumping only the first sees a fraction of the model.
+
+       Header layout, per file structure in turn: uid(16) + reserved(4) +
+       section_count(4) + section_count * section_offset(4). Select which one to
+       dump with PRC_DIAG_FS_INDEX (default 0). */
     p = buf + 3 + 4 + 4 + 16 + 16;
-    if (read_le_u32(p) != 1) { printf("only single-file-structure inputs supported\n"); return 1; }
-    p += 4;
-    p += 16;
-    p += 4;
-    section_count = read_le_u32(p); p += 4;
-    section_offsets = (uint32_t *)malloc(sizeof(uint32_t) * section_count);
-    for (i = 0; i < section_count; i++) { section_offsets[i] = read_le_u32(p); p += 4; }
+    fs_count = read_le_u32(p); p += 4;
+    if (fs_count == 0) { printf("file_structure_count=0\n"); return 1; }
+    {
+        const char *fs_env = getenv("PRC_DIAG_FS_INDEX");
+        uint32_t want_fs = (fs_env != NULL) ? (uint32_t)atoi(fs_env) : 0;
+        uint32_t fs;
+
+        if (want_fs >= fs_count)
+        {
+            printf("file_structure_count=%u, requested index %u out of range\n", fs_count, want_fs);
+            return 1;
+        }
+        for (fs = 0; fs < fs_count; fs++)
+        {
+            p += 16;    /* file structure unique id */
+            p += 4;     /* reserved */
+            section_count = read_le_u32(p); p += 4;
+            if (fs == want_fs)
+            {
+                section_offsets = (uint32_t *)malloc(sizeof(uint32_t) * section_count);
+                for (i = 0; i < section_count; i++) { section_offsets[i] = read_le_u32(p); p += 4; }
+                break;
+            }
+            p += 4 * section_count;   /* skip this file structure's offset table */
+        }
+        fprintf(stderr, "file_structure_count=%u, dumping index %u\n", fs_count, want_fs);
+    }
     if (section_count < 5) { printf("unexpected section_count=%u\n", section_count); return 1; }
 
     ctx = prc_api_new_context(NULL);
@@ -167,6 +197,18 @@ int main(int argc, char **argv)
 
     fprintf(out, "edge_status_array");
     for (i = 0; i < parsed->triangle_face_array_size; i++) fprintf(out, " %u", parsed->edge_status_array[i]);
+    fprintf(out, "\n");
+
+    /* triangle -> face id, one entry per triangle. This is the only place the
+       per-face grouping of a compressed tessellation is available: the public
+       API returns one aggregate primitive per compressed tessellation and
+       ignores the face index, so is_face_planar[] cannot otherwise be checked
+       against the geometry of the face it describes. */
+    fprintf(out, "triangle_face_array_size %u\n", parsed->triangle_face_array_size);
+    fprintf(out, "triangle_face_array");
+    if (parsed->triangle_face_array != NULL)
+        for (i = 0; i < parsed->triangle_face_array_size; i++)
+            fprintf(out, " %u", parsed->triangle_face_array[i]);
     fprintf(out, "\n");
 
     fprintf(out, "points_is_reference_array");
