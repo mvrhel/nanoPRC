@@ -378,6 +378,50 @@ prc_evaluate_line(prc_context *ctx, void *params, double input)
     return output;
 }
 
+/* For the compressed cirlce, we will always be running from zero to one
+   and falling along the circle arc. */
+static prc_vec3
+prc_evaluate_circle_compressed(prc_context *ctx, void *params, double input)
+{
+    prc_vec3 output = { 0 };
+    prc_hcg_circle *circle = (prc_hcg_circle *)params;
+    prc_vec3 point1;
+    prc_vec3 point2;
+
+    return output;
+}
+
+/* For the compressed line, which has the start_end_data as its parameters
+   and we just run from zero to one.  We really should only be here if the
+   data is given as a point not a vertex. */
+static prc_vec3
+prc_evaluate_line_compressed(prc_context *ctx, void *params, double input)
+{
+    prc_vec3 output;
+    prc_start_end_data *line = (prc_start_end_data *)params;
+    prc_vec3 point1;
+    prc_vec3 point2;
+
+    if (input <= 0)
+    {
+        output = line->start_point.point;
+        return output;
+    }
+    if (input >= 1)
+    {
+        output = line->end_point.point;
+        return output;
+    }
+
+    point1 = line->start_point.point;
+    point2 = line->start_point.point;
+    prc_vec_scale(1 - input, &point1);
+    prc_vec_scale(input, &point2);
+    prc_vec_add(point1, point2, &output);
+
+    return output;
+}
+
 /* Evaluate hyperbola at a single point */
 static prc_vec3
 prc_evaluate_hyperbola(prc_context *ctx, void *params, double input)
@@ -795,6 +839,54 @@ prc_evaluate_composite(prc_context *ctx, void *params, double u)
     return output;
 }
 
+static int
+prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compressed_curve *curve,
+    prc_curve_sampling_info *sample_info)
+{
+    int code;
+
+    switch (curve->curve_type)
+    {
+        case PRC_HCG_Line:
+        {
+            /* We will sample from 0 to 1 and run along the start and end data */
+            sample_info->curve_params = &curve->hcg_line.start_end_data;
+            sample_info->curve_eval_func = prc_evaluate_line_compressed;
+            sample_info->start = 0;
+            sample_info->end = 1;
+            sample_info->num_samples = 2;
+            break;
+        }
+        case PRC_HCG_Circle:
+        {
+            /* We will sample from 0 to 1 and run along the circle arc length
+               specified */
+            sample_info->curve_params = &curve->hcg_circle;
+            sample_info->curve_eval_func = prc_evaluate_circle_compressed;
+            sample_info->start = 0;
+            sample_info->end = 1;
+            sample_info->num_samples = CURVE_SAMPLES;
+            break;
+        }
+
+        case PRC_HCG_BsplineHermiteCurve:
+        {
+            break;
+        }
+
+        case PRC_HCG_CompositeCurve:
+        {
+            break;
+        }
+
+        default:
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid base base curve type in prc_get_compressed_curve_sample_info\n");
+            return PRC_ERROR_INTERNAL;
+
+        }
+    return 0;
+}
+
 static int 
 prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
     prc_curve_sampling_info *sample_info)
@@ -989,6 +1081,42 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             return PRC_ERROR_INTERNAL;
         }
     }
+    return 0;
+}
+
+static int
+prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
+    uint32_t face_index, prc_compressed_curve *curve)
+{
+    uint32_t geom_count = data->exact_geom_tess_count;
+    uint32_t file_index = data->exact_geom_tess[geom_count].file_index;
+    uint32_t topo_index = data->exact_geom_tess[geom_count].topo_context_index;
+    uint32_t body_index = data->exact_geom_tess[geom_count].body_index;
+    uint8_t curve_approx_good = 0;
+    void *curve_params = NULL;
+    curve_func curve_eval_func = NULL;
+    double start;
+    double end;
+    uint32_t i;
+    double t, t0, t1, dist;
+    prc_vec3 p0, p1, mid, seg_mid;
+    uint32_t num_samples;
+    prc_exact_geom_transform *exact_geom_trans = NULL;
+    prc_trans_3d *transform = NULL;
+    prc_curve_sampling_info sample_info;
+    int code;
+
+    code = prc_get_compressed_curve_sample_info(ctx, data, curve, &sample_info);
+    if (code < 0)
+    {
+        return code;
+    }
+    start = sample_info.start;
+    end = sample_info.end;
+    num_samples = sample_info.num_samples;
+    curve_params = sample_info.curve_params;
+    curve_eval_func = sample_info.curve_eval_func;
+
     return 0;
 }
 
@@ -3513,10 +3641,10 @@ prc_count_shells_faces_in_topo(prc_context *ctx, prc_topo *topo,
 static uint32_t
 prc_count_wires_in_topo(prc_context *ctx, prc_topo *topo)
 {   
-    if (topo->tag == PRC_TYPE_TOPO_SingleWireBody ||
-        topo->tag == PRC_TYPE_TOPO_SingleWireBodyCompress)
+    if (topo->tag == PRC_TYPE_TOPO_SingleWireBody)
     {
         prc_topo_single_wire_body *body = topo->topo_single_wire_body;
+        /* This one could be referenced... */
         if (body->wire_body.is_stored == 0)
         {
             if (body->wire_body.topo->tag == PRC_TYPE_TOPO_WireEdge)
@@ -3524,6 +3652,11 @@ prc_count_wires_in_topo(prc_context *ctx, prc_topo *topo)
                 return 1;
             }
         }
+    }
+    else if (topo->tag == PRC_TYPE_TOPO_SingleWireBodyCompress)
+    {
+        /* I *think* this is never referenced */
+        return 1;
     }
     return 0;
 }
@@ -3589,6 +3722,20 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
         {
             switch (topo->tag)
             {
+            case PRC_TYPE_TOPO_SingleWireBodyCompress:
+            {
+                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
+                 
+                prc_topo_single_wire_compress *body = topo->topo_single_wire_compress;
+                code = prc_sample_compressed_curve(ctx, data, i, j, &body->compressed_curve);
+                if (code < 0)
+                {
+                    prc_error(ctx, code, "Failed in prc_sample_compressed_curve\n");
+                    return code;
+                }
+                (*num_tessellations)++;
+                break;
+            }
             case PRC_TYPE_TOPO_SingleWireBody:
             {
                 data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
@@ -3668,7 +3815,6 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             case PRC_TYPE_TOPO_Edge:
             case PRC_TYPE_TOPO_CoEdge:
             case PRC_TYPE_TOPO_Loop:
-            case PRC_TYPE_TOPO_SingleWireBodyCompress:
             case PRC_TYPE_TOPO_WireBody:
                 data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                 break;

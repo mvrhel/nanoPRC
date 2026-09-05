@@ -411,6 +411,65 @@ prc_parse_hcg_bspline_hermite_curve(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
+/* Table 239 PRC_HCG_CompositeCurve */
+static int
+prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
+    prc_nano_brep_compressed_data *compressed_data, prc_hcg_composite_curve *data,
+    uint8_t read_tag)
+{
+    int code;
+    uint32_t k;
+
+    /* There is an opp optional item in the spec with regard to the tag */
+    if (read_tag)
+    {
+        data->type = prc_bitread_uint32(ctx, bit_state);
+        if (data->type != PRC_HCG_CompositeCurve)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_hcg_composite_curve\n");
+            return PRC_ERROR_PARSE;
+        }
+    }
+    else
+    {
+        data->type = PRC_HCG_CompositeCurve; /* Preread for abstract switch */
+    }
+
+    code = prc_parse_start_end_data(ctx, bit_state, compressed_data,
+        &data->start_end_data);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Failed in prc_parse_start_end_data\n");
+        return code;
+    }
+
+    data->dimension = prc_bitread_uint32(ctx, bit_state);
+    data->is_closed = prc_bitread_bit(ctx, bit_state);
+    data->number_of_curves = prc_bitread_uint32(ctx, bit_state);
+
+    if (data->number_of_curves > 0)
+    {
+        data->curves = (prc_ref_or_compressed_curve *)prc_calloc(ctx, data->number_of_curves,
+            sizeof(prc_ref_or_compressed_curve));
+        if (data->curves == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate data->curves\n");
+            return PRC_ERROR_MEMORY;
+        }
+        for (k = 0; k < data->number_of_curves; k++)
+        {
+            code = prc_parse_ref_or_compressed_curve(ctx, bit_state, &data->curves[k]);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_parse_ref_or_compressed_curve\n");
+                return code;
+            }
+        }
+    }
+
+    return 0;
+}
+
 /* Table 234 PRC_HCG_Circle */
 static int
 prc_parse_hcg_circle(prc_context *ctx, prc_bit_state *bit_state,
@@ -542,8 +601,8 @@ prc_parse_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
             break;
 
         case PRC_HCG_CompositeCurve:
-          //  code = prc_parse_hcg_composite_curve(ctx, bit_state, compressed_data,
-          //      &data->hcg_composite_curve);
+            code = prc_parse_hcg_composite_curve(ctx, bit_state, compressed_data,
+                &data->hcg_composite_curve, 0);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_hcg_composite_curve\n");
@@ -902,8 +961,7 @@ prc_parse_content_compressed_ana_face(prc_context *ctx, prc_bit_state *bit_state
     return 0;
 }
 
-/* Table 229 ContentCompressedIsoFace. This has some serious flaws in the
-   specification. */
+/* Table 229 ContentCompressedIsoFace. */
 static int
 prc_parse_content_compressed_iso_face(prc_context *ctx, prc_bit_state *bit_state,
     prc_nano_brep_compressed_data *compressed_data, prc_content_compressed_iso_face *data)
@@ -3591,6 +3649,19 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
                                     uint8_t read_tag)
 {
     int code;
+    prc_nano_brep_compressed_data *compressed_data;
+    prc_ref_or_compressed_curve *curve;
+
+    if (ctx->internal.nano_brep_data == NULL)
+    {
+        ctx->internal.nano_brep_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_compressed_data));
+        if (ctx->internal.nano_brep_data == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_brep_data_compress\n");
+            return PRC_ERROR_MEMORY;
+        }
+    }
+    compressed_data = ctx->internal.nano_brep_data;
 
     if (read_tag)
     {
@@ -3615,11 +3686,29 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
     }
 
     data->curve_tolerance = prc_bitread_double(ctx, bit_state);
-    code = prc_parse_compressed_curve(ctx, bit_state, ctx->internal.nano_brep_data,
-                                      &data->compressed_curve);
+
+    compressed_data->curve_trimming_face = 0;
+    compressed_data->is_a_SingleWireBodyCompress = 1;
+    compressed_data->tolerance = data->curve_tolerance;
+
+    /* Deal with this ref_or_compressed_curve as a special case as it does NOT
+       get added to any referencing */
+    curve = &data->ref_or_compressed_curve;
+    curve->curve_is_not_already_stored = prc_bitread_bit(ctx, bit_state);
+    curve->compressed_curve = &data->compressed_curve;
+
+    /* Per the spec, that value HAS to be one */
+    if (!curve->curve_is_not_already_stored)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_single_wire_body_compress: curve_is_not_already_stored must be 1\n");
+        return PRC_ERROR_PARSE;
+    }
+
+    code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
+                                      curve->compressed_curve);
     if (code < 0)
     {
-        prc_error(ctx, code, "Parsing error in prc_parse_compressed_curve\n");
+        prc_error(ctx, code, "Failed in prc_parse_compressed_curve\n");
         return code;
     }
 
@@ -3810,6 +3899,7 @@ prc_parse_brep_data_compress(prc_context *ctx, prc_bit_state *bit_state,
     /* True if PRC_TYPE_TOPO_BrepDataCompress False if
        PRC_TYPE_TOPO_SingleWireBodyCompress */
     compressed_data->curve_trimming_face = 1;
+    compressed_data->is_a_SingleWireBodyCompress = 0;
 
     if (data->single_connex_test)
     {
