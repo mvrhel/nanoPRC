@@ -3411,6 +3411,7 @@ struct prc_content_compressed_iso_face_s
     prc_ref_or_compressed_curve fourth_trim_curve;
     prc_compressed_vertex common_third_fourth_vertex;
     prc_compressed_point common_third_fourth_point;
+    uint8_t is_a_SingleWireBodyCompress; /* Ugly but then again the spec is ugly on this */
 };
 
 /* Table 231 */
@@ -3699,7 +3700,7 @@ struct prc_topo_single_wire_compress_s
     prc_unsigned_int tag;
     prc_content_body base;
     double curve_tolerance;
-    prc_ptr_topology *connex;
+    prc_ref_or_compressed_curve ref_or_compressed_curve;
     prc_compressed_curve compressed_curve;
 };
 
@@ -3885,6 +3886,7 @@ struct prc_nano_brep_compressed_data_s
     uint8_t all_loops_are_vertex_loops;
     uint8_t surface_type_is_prc_hcg_ana_torus;
     uint8_t is_a_compressed_face;
+    uint8_t is_a_SingleWireBodyCompress;
 };
 
 prc_data* prc_open_contents(prc_context *ctx, const char *infile);

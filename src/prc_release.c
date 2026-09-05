@@ -2629,11 +2629,6 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
     case PRC_TYPE_TOPO_SingleWireBodyCompress:
         if (body->topo_single_wire_compress != NULL)
         {
-            if (body->topo_single_wire_compress->connex != NULL)
-            {
-                prc_free(ctx, body->topo_single_wire_compress->connex);
-                body->topo_single_wire_compress->connex = NULL;
-            }
             prc_free(ctx, body->topo_single_wire_compress);
             body->topo_single_wire_compress = NULL;
         }
