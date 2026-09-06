@@ -88,6 +88,31 @@ discoverable/settable surface in a normal build. Enable them at configure time i
 cmake -S . -B build -DPRC_ENABLE_DIAG_ENV=ON
 ```
 
+#### Dumping Huffman code tables
+
+One of these hooks is documented here rather than only in-source, because it answers a question about
+the format itself rather than about a particular bug. Setting `PRC_DIAG_HUFF_DUMP` to a path makes the
+decoder append, for every Huffman-coded array it reads, the producer's own stored code table together
+with the symbol frequencies implied by the decoded array:
+
+```
+A <tag> <seq> <num_bits> <elem_size> <num_leaves> <max_code_length> <num_values>
+L <leaf_value> <code_length> <code_value> <frequency>
+```
+
+`PRC_DIAG_HUFF_TAG` sets the label in the `A` record; the dump is appended, so a corpus can be swept
+into one file by running per input with a per-input tag.
+
+The stored table is otherwise unobservable — it is read, used to build the decoding tree, and freed —
+and pairing it with the frequencies makes every array in a real file a labelled test case: *these
+frequencies produced this table*. ISO 14739 §10.2 declares `HuffmanTreeCalculation` and never defines
+it, so the tree an encoder is expected to build is not specified, and real files are the only evidence
+available.
+
+`tests/internal/dump_huffman_tables` drives this and reports a census of the results, including the
+Kraft sum of the stored code lengths — the property that distinguishes a textbook-optimal tree (sum 1)
+from the phantom-wrapped shape real PRC producers emit (sum exactly 1/2, one wasted leading bit).
+
 ### Deterministic Unzipped-Section Fuzzing
 
 For robustness testing of parser error paths, you can fuzz only the unzipped PRC section buffers
