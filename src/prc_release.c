@@ -1757,6 +1757,27 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
         }
         prc_free(ctx, data->base_topology);
     }
+
+    if (data->ref_data != NULL)
+    {
+        prc_nano_brep_compressed_data *compressed_data = data->ref_data;
+        if (compressed_data != NULL)
+        {
+            if (compressed_data->vertices != NULL)
+            {
+                prc_free(ctx, compressed_data->vertices);
+            }
+            if (compressed_data->curves != NULL)
+            {
+                for (uint32_t k = 0; k < compressed_data->current_curve_index; k++)
+                {
+                    prc_release_compressed_curve(ctx, &compressed_data->curves[k]);
+                }
+                prc_free(ctx, compressed_data->curves);
+            }
+            prc_free(ctx, compressed_data);
+        }
+    }
 }
 
 static void
@@ -2625,6 +2646,11 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
     case PRC_TYPE_TOPO_SingleWireBodyCompress:
         if (body->topo_single_wire_compress != NULL)
         {
+            if (body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve != NULL)
+            {
+                prc_release_compressed_curve(ctx, body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve);
+                body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve = NULL;
+            }
             prc_free(ctx, body->topo_single_wire_compress);
             body->topo_single_wire_compress = NULL;
         }

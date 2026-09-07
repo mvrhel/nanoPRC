@@ -106,7 +106,7 @@ static int prc_get_surface_eval_func(prc_context *ctx, prc_type_surf *surface,
 
 /* Forward declaration */
 static int prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle,
-    prc_hcg_circle_information *info);
+    prc_hcg_circle_information *info, prc_nano_brep_compressed_data *compressed_data);
 
 /* A version of the 3D transform that we use for exact geometry. This one is limited
    to Identity, Translate, Rotate and Scale */
@@ -558,6 +558,7 @@ prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
     segment_length = prc_vec_length(segment_delta);
     if (segment_length <= CURVE_PRECISION)
     {
+        prc_free(ctx, key_tangents);
         prc_free(ctx, key_points);
         return p0;
     }
@@ -1083,7 +1084,7 @@ prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compr
             if (!curve->hcg_circle.information_valid)
             {
                 code = prc_get_hcg_circle_data(ctx, &curve->hcg_circle,
-                    &curve->hcg_circle.circle_data);
+                    &curve->hcg_circle.circle_data, NULL);
                 if (code < 0)
                 {
                     prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_get_hcg_circle_data\n");
@@ -1427,6 +1428,7 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
     if (wire_data->points == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data points in prc_sample_curve\n");
+        prc_free(ctx, wire_data);
         return PRC_ERROR_MEMORY;
     }
 
@@ -3496,9 +3498,10 @@ static int
 prc_get_vertex_by_id(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data,
     uint32_t index_compressed_vertex, prc_compressed_vertex **vertex)
 {
-    if (index_compressed_vertex >= compressed_data->current_vertex_index)
+    if (compressed_data == NULL ||
+        index_compressed_vertex >= compressed_data->current_vertex_index)
     {
-        prc_error(ctx, PRC_ERROR_PARSE, "Invalid compressed vertex index: %u\n", index_compressed_vertex);
+        prc_error(ctx, PRC_ERROR_PARSE, "Vertex ref struct NULL or invalid compressed vertex index: %u\n", index_compressed_vertex);
         return PRC_ERROR_PARSE;
     }
     *vertex = &compressed_data->vertices[index_compressed_vertex];
@@ -3507,7 +3510,7 @@ prc_get_vertex_by_id(prc_context *ctx, prc_nano_brep_compressed_data *compressed
 
 static int
 prc_get_compressed_curve(prc_context *ctx, prc_ref_or_compressed_curve *ref_or_comp_curve,
-    prc_compressed_curve **comp_curve)
+    prc_compressed_curve **comp_curve, prc_nano_brep_compressed_data *compressed_data)
 {
     int code = 0;
 
@@ -3518,7 +3521,6 @@ prc_get_compressed_curve(prc_context *ctx, prc_ref_or_compressed_curve *ref_or_c
     }
     else
     {
-        prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
         code = prc_get_curve_by_id(ctx, compressed_data,
             ref_or_comp_curve->index_compressed_curve, comp_curve);
         if (code < 0)
@@ -3532,7 +3534,7 @@ prc_get_compressed_curve(prc_context *ctx, prc_ref_or_compressed_curve *ref_or_c
 
 static int
 prc_get_compressed_vertex(prc_context *ctx, prc_compressed_vertex *comp_vertex,
-                         prc_vec3 *vertex)
+                         prc_vec3 *vertex, prc_nano_brep_compressed_data *compressed_data)
 {
     int code = 0;
 
@@ -3543,7 +3545,6 @@ prc_get_compressed_vertex(prc_context *ctx, prc_compressed_vertex *comp_vertex,
     }
     else
     {
-        prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
         prc_compressed_vertex *vertex_store = NULL;
         code = prc_get_vertex_by_id(ctx, compressed_data, comp_vertex->point_index,
                                     &vertex_store);
@@ -3566,19 +3567,19 @@ prc_get_compressed_point(prc_context *ctx, prc_compressed_point *comp_point,
 
 static int
 prc_get_start_end_data(prc_context *ctx, prc_start_end_data *data,
-    prc_vec3 *start, prc_vec3 *end)
+    prc_vec3 *start, prc_vec3 *end, prc_nano_brep_compressed_data *compressed_data)
 {
     int code = 0;
 
     if (data->is_vertex)
     {
-        code = prc_get_compressed_vertex(ctx, &data->start_vertex, start);
+        code = prc_get_compressed_vertex(ctx, &data->start_vertex, start, compressed_data);
         if (code < 0)
         {
             prc_error(ctx, code, "Failed to get start vertex by id in prc_get_start_end_data\n");
             return code;
         }
-        code = prc_get_compressed_vertex(ctx, &data->end_vertex, end);
+        code = prc_get_compressed_vertex(ctx, &data->end_vertex, end, compressed_data);
         if (code < 0)
         {
             prc_error(ctx, code, "Failed to get end vertex by id in prc_get_start_end_data\n");
@@ -3595,11 +3596,11 @@ prc_get_start_end_data(prc_context *ctx, prc_start_end_data *data,
 
 static int
 prc_get_hcg_line_data(prc_context *ctx, prc_hcg_line *data,
-    prc_vec3 *start, prc_vec3 *end)
+    prc_vec3 *start, prc_vec3 *end, prc_nano_brep_compressed_data *compressed_data)
 {
     int code;
 
-    code = prc_get_start_end_data(ctx, &data->start_end_data, start, end);
+    code = prc_get_start_end_data(ctx, &data->start_end_data, start, end, compressed_data);
 
     return code;
 }
@@ -3677,7 +3678,8 @@ prc_compute_hcg_circle_theta(prc_hcg_circle_information *info)
 }
 
 static int
-prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle, prc_hcg_circle_information *info)
+prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle,
+    prc_hcg_circle_information *info, prc_nano_brep_compressed_data *compressed_data)
 {
     int code;
 
@@ -3691,7 +3693,7 @@ prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle, prc_hcg_ci
         {
             info->has_start_end_points = 1;
             code = prc_get_start_end_data(ctx, &hcg_circle->particular_circle.start_end_data,
-                &info->start_point, &info->end_point);
+                &info->start_point, &info->end_point, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get start end in prc_get_hcg_circle_data\n");
@@ -4263,7 +4265,7 @@ prc_build_iso_torus_from_circle_data(prc_context *ctx,
 
 static int
 prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_index, uint32_t face_index,
-    prc_compressed_face *topo_face)
+    prc_compressed_face *topo_face, prc_nano_brep_compressed_data *compressed_data)
 {
     int code;
 
@@ -4297,7 +4299,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             prc_type_surf synthetic_surface = { 0 };
 
             code = prc_get_compressed_curve(ctx, &face->iso_face.first_trim_curve,
-                &first_trim_curve);
+                &first_trim_curve, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get first trim curve by id in prc_tessellate_compressed_face\n");
@@ -4305,7 +4307,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             }
 
             code = prc_get_compressed_curve(ctx, &face->iso_face.second_trim_curve,
-                &second_trim_curve);
+                &second_trim_curve, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
@@ -4328,13 +4330,13 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 return PRC_ERROR_PARSE;
             }
 
-            code = prc_get_hcg_circle_data(ctx, &circle_curve->hcg_circle, &circle_info);
+            code = prc_get_hcg_circle_data(ctx, &circle_curve->hcg_circle, &circle_info, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get circle data in prc_tessellate_compressed_face\n");
                 return code;
             }
-            code = prc_get_hcg_line_data(ctx, &line_curve->hcg_line, &line_start, &line_end);
+            code = prc_get_hcg_line_data(ctx, &line_curve->hcg_line, &line_start, &line_end, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get line data in prc_tessellate_compressed_face\n");
@@ -4342,7 +4344,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             }
 
             code = prc_get_compressed_vertex(ctx, &face->iso_face.common_third_fourth_vertex,
-                &common_vertex);
+                &common_vertex, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get common vertex in prc_tessellate_compressed_face\n");
@@ -4388,7 +4390,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 if (face->iso_face.third_trim_curve_is_not_yet_saved)
                 {
                     code = prc_get_compressed_curve(ctx, &face->iso_face.third_trim_curve,
-                        &third_trim_curve);
+                        &third_trim_curve, compressed_data);
                     if (code < 0)
                     {
                         prc_error(ctx, code, "Failed to get third trim curve by id in prc_tessellate_compressed_face\n");
@@ -4407,7 +4409,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 if (face->iso_face.fourth_trim_curve_is_not_yet_saved)
                 {
                     code = prc_get_compressed_curve(ctx, &face->iso_face.fourth_trim_curve,
-                        &fourth_trim_curve);
+                        &fourth_trim_curve, compressed_data);
                     if (code < 0)
                     {
                         prc_error(ctx, code, "Failed to get fourth trim curve by id in prc_tessellate_compressed_face\n");
@@ -4488,7 +4490,6 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             prc_compressed_curve *major_radius_curve = first_trim_curve;
             prc_compressed_curve *minor_radius_curve = second_trim_curve;
             prc_vec3 common_vertex;
-            prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
             prc_hcg_circle_information minor_radius_circle_info;
             prc_hcg_circle_information major_radius_circle_info;
             prc_surf_torus torus = {0};
@@ -4496,7 +4497,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             prc_type_surf synthetic_surface = {0};
 
             code = prc_get_compressed_curve(ctx, &face->iso_face.first_trim_curve,
-                                            &first_trim_curve);
+                                            &first_trim_curve, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
@@ -4504,7 +4505,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             }
 
             code = prc_get_compressed_curve(ctx, &face->iso_face.second_trim_curve,
-                                            &second_trim_curve);
+                                            &second_trim_curve, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to get second trim curve by id in prc_tessellate_compressed_face\n");
@@ -4523,7 +4524,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             }
 
             code = prc_get_compressed_vertex(ctx, &face->iso_face.common_third_fourth_vertex,
-                &common_vertex);
+                &common_vertex, compressed_data);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed to reconstruct torus from compressed circle data\n");
@@ -4536,8 +4537,8 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 return PRC_ERROR_PARSE;
             }
 
-            prc_get_hcg_circle_data(ctx, &minor_radius_curve->hcg_circle, &minor_radius_circle_info);
-            prc_get_hcg_circle_data(ctx, &major_radius_curve->hcg_circle, &major_radius_circle_info);
+            prc_get_hcg_circle_data(ctx, &minor_radius_curve->hcg_circle, &minor_radius_circle_info, compressed_data);
+            prc_get_hcg_circle_data(ctx, &major_radius_curve->hcg_circle, &major_radius_circle_info, compressed_data);
 
             code = prc_build_iso_torus_from_circle_data(ctx,
                 &major_radius_circle_info, &minor_radius_circle_info,
@@ -4575,7 +4576,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 {
                     /* Curve 3: fixed u = u_max, sweep v = v_min..v_max. */
                     code = prc_get_compressed_curve(ctx, &face->iso_face.third_trim_curve,
-                        &third_trim_curve);
+                        &third_trim_curve, compressed_data);
                     if (code < 0)
                     {
                         prc_error(ctx, code, "Failed to get third trim curve by id in prc_tessellate_compressed_face\n");
@@ -4616,7 +4617,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
                 {
                     /* Curve 4: fixed v = v_max, sweep u = u_min..u_max. */
                     code = prc_get_compressed_curve(ctx, &face->iso_face.fourth_trim_curve,
-                        &fourth_trim_curve);
+                        &fourth_trim_curve, compressed_data);
                     if (code < 0)
                     {
                         prc_error(ctx, code, "Failed to get fourth trim curve by id in prc_tessellate_compressed_face\n");
@@ -5435,7 +5436,8 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
 
                 data->exact_geom_tess[geom_count].shells[i].faces[j].orientation = orientation;
                 compressed_face = &brep_data_comp->single_connex.faces[j];
-                code = prc_tessellate_compressed_face(ctx, data, i, j, compressed_face);
+                code = prc_tessellate_compressed_face(ctx, data, i, j,
+                                    compressed_face, brep_data_comp->ref_data);
                 if (code < 0)
                 {
                     prc_error(ctx, code, "Failed in prc_sample_curve\n");
