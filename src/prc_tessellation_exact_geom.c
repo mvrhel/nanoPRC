@@ -49,6 +49,10 @@
 /* Largest B-spline degree the fixed-size basis function buffers below can hold */
 #define PRC_BSPLINE_MAX_DEGREE 15
 
+static int prc_tessellate_surface(prc_context *ctx, prc_data *data,
+    uint32_t shell_index, uint32_t face_index, prc_topo_face *topo_face,
+    uint8_t orientation);
+
 /* A standard type for curve sampling */
 typedef prc_vec3 (*curve_func)(prc_context *ctx, void *params, double input);
 

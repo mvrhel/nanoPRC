@@ -48,6 +48,8 @@ static int prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state,
 static int prc_parse_surf(prc_context *ctx, prc_bit_state *bit_state,
     prc_type_surf *data);
 void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
+static int prc_parse_ref_or_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
+    prc_nano_brep_compressed_data *compressed_data, prc_ref_or_compressed_curve *data);
 
 /* Table 24 � UVParameterization */
 static void
@@ -460,7 +462,8 @@ prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
         }
         for (k = 0; k < data->number_of_curves; k++)
         {
-            code = prc_parse_ref_or_compressed_curve(ctx, bit_state, &data->curves[k]);
+            code = prc_parse_ref_or_compressed_curve(ctx, bit_state, compressed_data,
+                &data->curves[k]);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_ref_or_compressed_curve\n");
@@ -5880,7 +5883,7 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
         code = prc_parse_brep_data_compress(ctx, bit_state, data->topo_brep_data_compress, DONT_READ_TAG);
 
         /* For now, done with this data. Release it */
-#if 0
+#if !ENABLE_EXACT_GEOM_TESS
         prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
         if (compressed_data != NULL)
         {
