@@ -550,6 +550,28 @@ prc_parse_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
                 return code;
             }
             break;
+
+        case PRC_HCG_Ellipse:
+            /* Distinguished from a genuinely unknown code because this one is
+               not our gap. §9.17 "WriteCompressedEntityType" contains a live
+               case emitting this type, so a writer following the normative
+               example is entitled to produce it -- but no structure is defined
+               for it anywhere: §7.9.21.9.1 "General" calls it "reserved for
+               future use", and Tables 234-239 give layouts only for Line,
+               Circle, BsplineHermiteCurve and CompositeCurve.
+
+               The entity therefore has a type code but no fields and no
+               length. It cannot be decoded, and it cannot be skipped either,
+               because nothing states how far to skip -- the bitstream is
+               unrecoverable from here. Saying so plainly means a report from
+               the field is evidence about the specification rather than a bug
+               filed against this parser. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "PRC_HCG_Ellipse (compressed curve type 12) cannot be decoded: ISO 14739 "
+                "defines its type code but no structure, so the bitstream cannot be "
+                "resynchronized from this point\n");
+            return PRC_ERROR_PARSE;
+
         default:
             prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
             return PRC_ERROR_PARSE;
@@ -764,6 +786,19 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
                             return code;
                         }
                         break;
+
+                    case PRC_HCG_Ellipse:
+                        /* See the identical case in prc_parse_compressed_curve
+                           above for why this is reported separately from an
+                           unknown code: the type has a normative encoding in
+                           §9.17 but no structure anywhere, so it can be
+                           neither decoded nor skipped. */
+                        prc_error(ctx, PRC_ERROR_PARSE,
+                            "PRC_HCG_Ellipse (compressed curve type 12) cannot be decoded: ISO 14739 "
+                            "defines its type code but no structure, so the bitstream cannot be "
+                            "resynchronized from this point\n");
+                        return PRC_ERROR_PARSE;
+
                     default:
                         prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
                         return PRC_ERROR_PARSE;
