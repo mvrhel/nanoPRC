@@ -724,7 +724,8 @@ pdf_parse_view_prc(prc_context *ctx, prc_pdf_decrypt_params *decrypt_params,
     else
     {
         prc_error(ctx, PRC_ERROR_PARSE, "Did not find C2W in PDF file\n");
-        return code;
+        /* Eat this error -- as it does occur but should not end everything */
+        return 0;
     }
     ptr_temp = ptr_in;
     code = pdf_search_for_tag(ctx, ptr_temp, boundary, (uint8_t *) PDF_CO_NAME, PDF_CO_NAME_LEN,
@@ -1125,6 +1126,8 @@ pdf_get_view_array_prc(prc_context *ctx, prc_pdf_decrypt_params *decrypt_params,
         }
         if (*num_views > 0)
         {
+            uint32_t valid_count = 0;
+
             cam_views = (prc_pdf_view_array *)prc_calloc(ctx, *num_views,
                                                     sizeof(prc_pdf_view_array));
             if (cam_views == NULL)
@@ -1136,6 +1139,8 @@ pdf_get_view_array_prc(prc_context *ctx, prc_pdf_decrypt_params *decrypt_params,
             }
             for (k = 0; k < *num_views; k++)
             {
+                memset(&cam_views[k], 0, sizeof(cam_views[k]));
+
                 /* Search for that object using the xref table */
                 ptr_temp = prc_pdf_get_ptr_to_obj(ctx, pdf_buff_in, size_in,
                     head_xref, stream_list, dict_obj_num[k], &size_out,
@@ -1148,7 +1153,7 @@ pdf_get_view_array_prc(prc_context *ctx, prc_pdf_decrypt_params *decrypt_params,
                     if (code < 0 || ptr_temp == NULL)
                     {
                         prc_error(ctx, PRC_ERROR_PARSE, "Did not find object in PDF file\n");
-                        pdf_free_view_array_partial(ctx, cam_views, k);
+                        pdf_free_view_array_partial(ctx, cam_views, valid_count);
                         prc_free(ctx, dict_obj_num);
                         prc_free(ctx, dict_gen_num);
                         return PRC_ERROR_PARSE;
@@ -1161,14 +1166,24 @@ pdf_get_view_array_prc(prc_context *ctx, prc_pdf_decrypt_params *decrypt_params,
                 code = pdf_parse_view_prc(ctx, decrypt_params, dict_obj_num[k],
                                           dict_gen_num[k], ptr_temp,
                                           ptr_temp + size_out, &cam_views[k]);
-                if (code < 0)
+                if (code < 0 || code == 0)
                 {
-                    prc_error(ctx, PRC_ERROR_PARSE, "Did not parse view in PDF file\n");
-                    pdf_free_view_array_partial(ctx, cam_views, k + 1);
-                    prc_free(ctx, dict_obj_num);
-                    prc_free(ctx, dict_gen_num);
-                    return code;
+                    /* This view object is invalid, missing a usable C2W matrix, or
+                       otherwise malformed. Ignore it and continue parsing the
+                       remaining entries instead of failing the whole document. */
+                    prc_free(ctx, cam_views[k].external_name);
+                    prc_free(ctx, cam_views[k].internal_name);
+                    continue;
                 }
+
+                valid_count++;
+            }
+            *num_views = valid_count;
+            if (valid_count == 0)
+            {
+                prc_free(ctx, cam_views);
+                cam_views = NULL;
+                *num_views = 0;
             }
             prc_free(ctx, dict_obj_num);
             prc_free(ctx, dict_gen_num);

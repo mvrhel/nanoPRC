@@ -1469,10 +1469,6 @@ prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data)
                 prc_free(ctx, curr->hcg_bspline_hermite_curve.points);
             if (curr->hcg_bspline_hermite_curve.tangents != NULL)
                 prc_free(ctx, curr->hcg_bspline_hermite_curve.tangents);
-            if (curr->hcg_bspline_hermite_curve.compressed_points != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.compressed_points);
-            if (curr->hcg_bspline_hermite_curve.compressed_tangents != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.compressed_tangents);
             break;
 
         case PRC_HCG_CompositeCurve:
@@ -2629,11 +2625,6 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
     case PRC_TYPE_TOPO_SingleWireBodyCompress:
         if (body->topo_single_wire_compress != NULL)
         {
-            if (body->topo_single_wire_compress->connex != NULL)
-            {
-                prc_free(ctx, body->topo_single_wire_compress->connex);
-                body->topo_single_wire_compress->connex = NULL;
-            }
             prc_free(ctx, body->topo_single_wire_compress);
             body->topo_single_wire_compress = NULL;
         }

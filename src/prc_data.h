@@ -597,7 +597,8 @@ typedef enum {
     PRC_HCG_Circle = 1,
     PRC_HCG_BsplineHermiteCurve = 2,
     PRC_HCG_Ellipse = 12,
-    PRC_HCG_CompositeCurve = 13
+    PRC_HCG_CompositeCurve = 13,
+    PRC_HCG_Deduced = 100  /* A special case where we "add" a curve that we later have to deduce from the other curves */
 } PRC_Compressed_curve_t;
 
 /* Used for working with exact geometry transforms. Put in here as we want
@@ -3338,6 +3339,7 @@ struct prc_hcg_line_s
 struct prc_particular_circle_s
 {
     uint8_t full_circle;
+    uint8_t compressed_iso_spline; /* Needed to know if start_end_data is valid */
     prc_start_end_data start_end_data;
     prc_compressed_point center;
     prc_compressed_point normal_plane;
@@ -3347,10 +3349,31 @@ struct prc_particular_circle_s
 /* Table 236 GeneralCircle */
 struct prc_general_circle_s
 {
+    uint8_t compressed_iso_spline;  /* Needed to know if start_end_data is valid */
     prc_start_end_data start_end_data;
     prc_compressed_point center;
     uint8_t circle_angle; /* Is this really a bool? */
 };
+
+
+/* Used for dealing with the general/particular circle parameters */
+typedef struct prc_hcg_circle_information_s
+{
+    uint8_t has_center;
+    uint8_t has_normal;
+    uint8_t has_start_end_points;
+    uint8_t is_full_circle;
+    uint8_t is_arc_of_zero_pi_or_twopi;
+    uint8_t has_middle_of_arc_point;
+    uint8_t has_circle_angle_bit;
+    prc_vec3 center;
+    prc_vec3 normal;
+    prc_vec3 start_point;
+    prc_vec3 end_point;
+    prc_vec3 middle_of_arc_point;
+    uint8_t circle_angle_bit; /* If has_circle_angle_bit is true, then this is set to true means circle_angle > pi */
+    double theta; /* Computed angle of the arc */
+} prc_hcg_circle_information;
 
 /* Table 234 PRC_HCG_Circle */
 struct prc_hcg_circle_s
@@ -3359,6 +3382,8 @@ struct prc_hcg_circle_s
     uint8_t is_particular_circle;
     prc_particular_circle particular_circle;
     prc_general_circle general_circle;
+    uint8_t information_valid; /* Used for rendering circle lines */
+    prc_hcg_circle_information circle_data;
 };
 
 /* Table 237 PRC_HCG_BsplineHermiteCurve */
@@ -3370,10 +3395,8 @@ struct prc_hcg_bspline_hermite_curve_s
     uint32_t number_points;
     uint32_t point_number_bits;
     prc_vec3 *points;
-    prc_vec3 *compressed_points;
     uint32_t tangent_number_bits;
     prc_vec3 *tangents;
-    prc_vec3 *compressed_tangents;
 };
 
 /* Table 238 PRC_HCG_CompositeCurve */
@@ -3390,6 +3413,7 @@ struct prc_hcg_composite_curve_s
 /* Table 232 */
 struct prc_ref_or_compressed_curve_s
 {
+    uint8_t is_deduced_curve;
     uint8_t curve_is_not_already_stored;
     uint32_t index_compressed_curve;
     prc_compressed_curve *compressed_curve;
@@ -3401,14 +3425,13 @@ struct prc_content_compressed_iso_face_s
     uint8_t orientation_loop_with_surface;
     prc_ref_or_compressed_curve first_trim_curve;
     prc_ref_or_compressed_curve second_trim_curve;
-    prc_ref_or_compressed_curve third_trim_curve_test;
-    prc_ref_or_compressed_curve fourth_trim_curve_test;
     uint8_t third_trim_curve_is_not_yet_saved;
-    uint32_t third_trim_curve;
+    prc_ref_or_compressed_curve third_trim_curve;
     uint8_t fourth_trim_curve_is_not_yet_saved;
-    uint32_t fourth_trim_curve;
+    prc_ref_or_compressed_curve fourth_trim_curve;
     prc_compressed_vertex common_third_fourth_vertex;
     prc_compressed_point common_third_fourth_point;
+    uint8_t is_a_SingleWireBodyCompress; /* Ugly but then again the spec is ugly on this */
 };
 
 /* Table 231 */
@@ -3697,7 +3720,7 @@ struct prc_topo_single_wire_compress_s
     prc_unsigned_int tag;
     prc_content_body base;
     double curve_tolerance;
-    prc_ptr_topology *connex;
+    prc_ref_or_compressed_curve ref_or_compressed_curve;
     prc_compressed_curve compressed_curve;
 };
 
@@ -3883,6 +3906,7 @@ struct prc_nano_brep_compressed_data_s
     uint8_t all_loops_are_vertex_loops;
     uint8_t surface_type_is_prc_hcg_ana_torus;
     uint8_t is_a_compressed_face;
+    uint8_t is_a_SingleWireBodyCompress;
 };
 
 prc_data* prc_open_contents(prc_context *ctx, const char *infile);

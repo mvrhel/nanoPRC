@@ -24,6 +24,9 @@
 /* Reasonable guard to avoid unbounded allocations. Tune as needed. */
 #define PRC_STYLE_POOL_MAX_CAPACITY (1000000u)
 
+/* To avoid breaking things while I am working on this. This will
+   allow me to keep my branch frequently merged though */
+#define ENABLE_EXACT_GEOM_TESS 0
 
 #define PARTS_DETAIL_INIT_SIZE 100
 
@@ -4113,6 +4116,8 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                 }
             }
         }
+
+#if ENABLE_EXACT_GEOM_TESS
         /* Lets also go through the exact geometry data in the file and check
            if we have any of that data for unassigned RIs. If we have that
            and not the tessellation data we will need to create tessellation
@@ -4229,6 +4234,7 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                 }
             }
         }
+#endif
     }
 
     data->unique_part_count = num_part_tessellations;
