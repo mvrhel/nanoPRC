@@ -333,7 +333,19 @@ prc_bspline_basis_funs(uint32_t span, double u, uint32_t degree, const double *k
     }
 }
 
-/* Evaluate parabola at a single point using the modified spec formula (spec has an error) */
+/* Evaluate parabola at a single point.
+
+   The published type-0 formula is wrong; this uses the corrected one. We
+   derived a correction independently, and it turned out to be algebraically
+   identical to the one proposed in pdf-issues #782 -- two implementations
+   arriving at the same evaluation from different starting points.
+
+   The arrangement below is #782's rather than ours: y = 2*sqrt(x*f) instead of
+   the equivalent y = 2*f*sqrt(x/f). Identical for any f > 0, but it avoids
+   dividing by the focal length and taking the square root of a quotient, so it
+   stays well behaved as f becomes small and needs no separate guard against a
+   zero focal length -- where the old form evaluated 0/0, this one gives 0. We
+   said on that issue that we would adopt it. */
 static prc_vec3
 prc_evaluate_parabola(prc_context *ctx, void *params, double input)
 {
@@ -347,7 +359,7 @@ prc_evaluate_parabola(prc_context *ctx, void *params, double input)
         double param2 = input * input;
         double p2 = param2 / sqrt(16.0 * focal_length * focal_length + param2);
         output.x = p2;
-        output.y = 2.0 * focal_length * sqrt(p2 / focal_length);
+        output.y = 2.0 * sqrt(output.x * focal_length);
         if (input < 0.0)
         {
             output.y = -output.y;
