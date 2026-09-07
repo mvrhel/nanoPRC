@@ -4091,6 +4091,16 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
 
         if (planar_here)
         {
+            /* Trace-only bookkeeping: the branch taken for a planar face is
+               not otherwise visible, and it is the whole question in
+               pdf-issues #727. Captured before the emit because the emit
+               mutates the point's state. */
+            uint8_t was_first = (uint8_t)!face_done[face];
+            uint8_t state_before = pn[idx[0]].state;
+            uint32_t stored_before = pn[idx[0]].num_stored;
+            uint32_t bin_before = bin_count;
+            uint32_t ang_before = angle_count;
+
             /* One normal for the entire face, encoded at corner 0 of the
                face's FIRST triangle; every other corner and triangle of the
                face emits nothing. This mirrors the decoder's face_is_planar
@@ -4121,9 +4131,29 @@ prc_encode_normals_c2(prc_context *ctx, const prc_encode_mesh *mesh,
                 face_assigned[face] = corner0_decoded;
             }
             if (ctx->trace_normals)
-                fprintf(stderr, "ENCNORM k=%u PLANAR face=%d first=%u assigned=(%.6f,%.6f,%.6f)%c",
-                    k, face, (unsigned)!face_done[face], corner0_decoded.x,
-                    corner0_decoded.y, corner0_decoded.z, 10);
+            {
+                uint32_t dbits = bin_count - bin_before;
+                uint32_t dang = angle_count - ang_before;
+                const char *sname =
+                    (state_before == PRC_VERTEX_NORM_NOT_ENCOUNTERED) ? "NOT_ENCOUNTERED" :
+                    (state_before == PRC_VERTEX_NORM_IS_NOT_MULTIPLE) ? "IS_NOT_MULTIPLE" :
+                                                                        "IS_MULTIPLE";
+                /* The cost names the branch unambiguously: a fresh record is
+                   4 bits + 2 angles, a reference is 1 + index bits and NO
+                   angles, and the zero-bit repeat is 0 + 0. */
+                const char *branch =
+                    (!was_first)            ? "face-already-done" :
+                    (dbits == 0)            ? "REPEAT_NOT_MULTIPLE(0 bits)" :
+                    (dang == 0)             ? "IS_A_REFERENCE" :
+                                              "fresh-record";
+
+                fprintf(stderr, "ENCNORM k=%u PLANAR face=%d first=%u v0=%d "
+                    "state=%s stored=%u bits=%u angles=%u branch=%s "
+                    "assigned=(%.6f,%.6f,%.6f)%c",
+                    k, face, (unsigned)was_first, (int)idx[0],
+                    sname, stored_before, dbits, dang, branch,
+                    corner0_decoded.x, corner0_decoded.y, corner0_decoded.z, 10);
+            }
         }
         else
         {
