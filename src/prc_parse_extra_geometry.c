@@ -3819,6 +3819,8 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
 
     code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
                                       curve->compressed_curve);
+    prc_free(ctx, compressed_data);
+    ctx->internal.nano_brep_data = NULL;
     if (code < 0)
     {
         prc_error(ctx, code, "Failed in prc_parse_compressed_curve\n");
@@ -3975,9 +3977,12 @@ prc_parse_brep_data_compress(prc_context *ctx, prc_bit_state *bit_state,
     data->number_of_vertex_refs = prc_bitread_uint_variable_bit(ctx, bit_state, data->number_of_bits_to_store_ref);
     data->number_of_edge_refs = prc_bitread_uint_variable_bit(ctx, bit_state, data->number_of_bits_to_store_ref);
     data->single_connex_test = prc_bitread_bit(ctx, bit_state);
+    data->ref_data = NULL;
 
     /* Initialize the compressed_data that has the curves and vertices so that
-       we can find them from their stored indices */
+       we can find them from their stored indices. This is initially created
+       and stored in the context so that it is accessible in many methods. Later
+       it is moved to ref_data member variable of prc_topo_brep_data_compress (data) */
     compressed_data->number_bits_for_encoding = data->number_of_bits_to_store_ref;
     compressed_data->number_of_vertex_refs = data->number_of_vertex_refs;
     compressed_data->number_of_edge_refs = data->number_of_edge_refs;
@@ -5882,27 +5887,20 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
         }
         code = prc_parse_brep_data_compress(ctx, bit_state, data->topo_brep_data_compress, DONT_READ_TAG);
 
-        /* For now, done with this data. Release it */
-#if !ENABLE_EXACT_GEOM_TESS
-        prc_nano_brep_compressed_data *compressed_data = ctx->internal.nano_brep_data;
-        if (compressed_data != NULL)
+        /* Move ownership of the curve and vertex referencing structure we have
+           built, from being in the context to being in the topo_brep_data_compress
+           object. Then it will be freed when that object is released later. This
+           allows us to render the compressed brep data and deal with multiple
+           topo items. From my understanding there is no cross referencing between
+           topo items, just internally */
+        if (data->topo_brep_data_compress->ref_data != NULL)
         {
-            if (compressed_data->vertices != NULL)
-            {
-                prc_free(ctx, compressed_data->vertices);
-            }
-            if (compressed_data->curves != NULL)
-            {
-                for (uint32_t k = 0; k < compressed_data->current_curve_index; k++)
-                {
-                    prc_release_compressed_curve(ctx, &compressed_data->curves[k]);
-                }
-                prc_free(ctx, compressed_data->curves);
-            }
-            prc_free(ctx, compressed_data);
-            ctx->internal.nano_brep_data = NULL;
+            /* An error as this should be NULL */
+            prc_error(ctx, PRC_ERROR_MEMORY, "ref_data in topo_brep_data_compress should be NULL\n");
+            return PRC_ERROR_MEMORY;
         }
-#endif
+        data->topo_brep_data_compress->ref_data = ctx->internal.nano_brep_data;
+        ctx->internal.nano_brep_data = NULL;
         break;
 
     default:

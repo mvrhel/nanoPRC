@@ -3738,6 +3738,7 @@ struct prc_topo_brep_data_compress_s
     prc_multi_compressed_connex multi_connex;
     prc_base_topology *base_topology;
     uint32_t number_of_faces;
+    prc_nano_brep_compressed_data *ref_data;
 };
 
 /* A way to organize across files, tessellations, parts */
