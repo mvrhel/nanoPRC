@@ -195,8 +195,17 @@ int main(int argc, char **argv)
         for (i = 0; i < parsed->face_number; i++) fprintf(out, " %u", parsed->is_face_planar[i]);
     fprintf(out, "\n");
 
+    /* Sized by edge_status_array_size, NOT by the triangle count. Real files
+       carry this array in two forms -- one element per triangle, and one of
+       three times that length -- so iterating to triangle_face_array_size
+       truncated every long-form array to its first third and hid the content
+       of the remainder completely. The size is emitted alongside because the
+       ratio between the two is the whole question when reading one. */
+    fprintf(out, "edge_status_array_size %u\n", parsed->edge_status_array_size);
     fprintf(out, "edge_status_array");
-    for (i = 0; i < parsed->triangle_face_array_size; i++) fprintf(out, " %u", parsed->edge_status_array[i]);
+    if (parsed->edge_status_array != NULL)
+        for (i = 0; i < parsed->edge_status_array_size; i++)
+            fprintf(out, " %u", parsed->edge_status_array[i]);
     fprintf(out, "\n");
 
     /* triangle -> face id, one entry per triangle. This is the only place the

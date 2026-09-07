@@ -4454,17 +4454,25 @@ prc_write_compress_tess_to_stream(prc_context *ctx, prc_bit_write_state *state,
             trav->point_array_size) != 0)
         goto werr;
     PRC_DIAG_TESS_FIELD_SIZES_MARK("point_array");
-    /* edge_status_array is documented (ISO/CD 14739-1 §7.8.9, Table 175/
-       CR-14) to hold 3*T entries, not T -- one 2-bit field per triangle is
-       the only one a decoder actually consumes (indexed edge_status[t],
-       not edge_status[3t]), but entries [T .. 3T-1] must still be present
-       on disk as zero padding. Writing only T entries (this write
-       facility's own prior behavior) round-trips fine through a reader
-       that just trusts the stored count, but is not what the format
-       specifies.
+    /* edge_status_array occurs in real files in TWO sizes, and both are
+       conforming: T entries, one 2-bit field per triangle, and 3*T entries,
+       in which only the first T carry information and entries [T .. 3T-1]
+       are zero. Either way a decoder consumes exactly one field per triangle,
+       indexed edge_status[t] and never edge_status[3t].
 
-       Despite the wording of an earlier version of this comment, this is
-       NOT a confirmed-causal Acrobat fix -- a later investigation
+       An earlier version of this comment said the 3*T form was required and
+       that writing only T entries "is not what the format specifies". That
+       was wrong, and the evidence against it is already in the paragraphs
+       below: Acrobat accepts the unpadded form, and a corpus census finds
+       both in the wild -- 90 files entirely T, 58 entirely 3*T, none mixing
+       the two. Which size a file uses is a property of its writer.
+
+       That the trailing 2*T entries are zero rather than per-edge data was
+       measured over the public corpus (2026-09-06): every 3*T entity sampled
+       had an entirely zero tail, with no counter-example.
+
+       Nor is the padding a confirmed-causal Acrobat fix, despite an earlier
+       version of this comment implying it -- a later investigation
        (PRC_DIAG_NO_EDGE_STATUS_PADDING, added to test this exact question
        against real Acrobat blank-tree repros) found disabling the padding
        "tested and not causal" for those bugs, and a direct same-geometry
