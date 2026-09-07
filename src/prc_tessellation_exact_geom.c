@@ -25,7 +25,7 @@
 
 #define CURVE_SAMPLES 256
 #define SURFACE_SAMPLES 32
-#define CURVE_PRECISION 1e-6
+#define CURVE_PRECISION 1e-1
 #define SURFACE_PRECISION 1e-4
 #define SURFACE_MAX_SAMPLES 1024
 #define CYLINDER_SURFACE_PRECISION 1e-2
@@ -87,23 +87,6 @@ typedef struct prc_curve_sampling_info_s
     curve_func curve_eval_func;
 } prc_curve_sampling_info;
 
-typedef struct prc_hcg_circle_information_s
-{
-    uint8_t has_center;
-    uint8_t has_normal;
-    uint8_t has_start_end_points;
-    uint8_t is_full_circle;
-    uint8_t is_arc_of_zero_pi_or_twopi;
-    uint8_t has_middle_of_arc_point;
-    uint8_t has_circle_angle_bit;
-    prc_vec3 center;
-    prc_vec3 normal;
-    prc_vec3 start_point;
-    prc_vec3 end_point;
-    prc_vec3 middle_of_arc_point;
-    uint8_t circle_angle_bit; /* If has_circle_angle_bit is true, then this is set to true means circle_angle > pi */
-} prc_hcg_circle_information;
-
 /* Forward declaration - populates sampling_info (including the valid parametric domain)
    for any prc_type_surf; needed early by the Blend02 bound-projection helpers */
 static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
@@ -116,6 +99,10 @@ static int prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_c
 /* Forward declaration - used in curves before surfaces occur */
 static int prc_get_surface_eval_func(prc_context *ctx, prc_type_surf *surface,
     surface_func *eval_func, void **params);
+
+/* Forward declaration */
+static int prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle,
+    prc_hcg_circle_information *info);
 
 /* A version of the 3D transform that we use for exact geometry. This one is limited
    to Identity, Translate, Rotate and Scale */
@@ -396,15 +383,195 @@ prc_evaluate_line(prc_context *ctx, void *params, double input)
 }
 
 /* For the compressed cirlce, we will always be running from zero to one
-   and falling along the circle arc. */
+   and falling along the circle arc.  We should always have center and
+   the start and end point and the normal vector */
 static prc_vec3
 prc_evaluate_circle_compressed(prc_context *ctx, void *params, double input)
 {
     prc_vec3 output = { 0 };
     prc_hcg_circle *circle = (prc_hcg_circle *)params;
-    prc_vec3 point1;
-    prc_vec3 point2;
+    prc_hcg_circle_information *info = &circle->circle_data;
+    prc_vec3 basis_vector1;
+    prc_vec3 basis_vector2;
+    prc_vec3 normal;
+    prc_vec3 sum;
+    double scale1, scale2;
+    int code;
 
+    if (info->theta)
+    {
+        return output;
+    }
+
+    /* Get the basis vectors for our parameterization */
+    prc_vec_sub(info->start_point, info->center, &basis_vector1);
+    
+    /* Make sure the normal vector is normalized */
+    prc_vec_copy(info->normal, &normal, 0);
+    code = prc_vec_normalize(&normal);
+    if (code < 0)
+    {
+        return output;
+    }
+    prc_vec_cross(info->normal, basis_vector1, &basis_vector2);
+
+    scale1 = cos(input * info->theta);
+    scale2 = sin(input * info->theta);
+
+    prc_vec_scale(scale1, &basis_vector1);
+    prc_vec_scale(scale2, &basis_vector2);
+    prc_vec_add(basis_vector1, basis_vector2, &sum);
+    prc_vec_add(info->center, sum, &output);
+
+    return output;
+}
+
+static prc_vec3
+prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
+{
+    prc_vec3 output = { 0 };
+    prc_hcg_bspline_hermite_curve *curve = (prc_hcg_bspline_hermite_curve *)params;
+    prc_vec3 start_point;
+    prc_vec3 end_point;
+    prc_vec3 *key_points = NULL;
+    prc_vec3 *key_tangents = NULL;
+    prc_vec3 segment_delta;
+    prc_vec3 p0, p3, p1, p2;
+    prc_vec3 t0, t1;
+    double segment_length;
+    double segment_u;
+    uint32_t segment_index;
+    uint32_t segment_count;
+    uint32_t i;
+    double b0, b1, b2, b3;
+
+    if (curve == NULL)
+    {
+        return output;
+    }
+
+    start_point = curve->start_end_data.start_point.point;
+    end_point = curve->start_end_data.end_point.point;
+
+    if (input <= 0.0)
+    {
+        return start_point;
+    }
+    if (input >= 1.0)
+    {
+        return end_point;
+    }
+
+    if (curve->number_points < 2)
+    {
+        return start_point;
+    }
+
+    key_points = (prc_vec3 *)prc_calloc(ctx, curve->number_points, sizeof(prc_vec3));
+    if (key_points == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate key_points in prc_evaluate_hermite_compressed\n");
+        return start_point;
+    }
+
+    key_points[0] = start_point;
+    for (i = 0; i < curve->number_points - 2; i++)
+    {
+        if (curve->points != NULL)
+        {
+            prc_vec_add(key_points[i], curve->points[i], &key_points[i + 1]);
+        }
+        else
+        {
+            key_points[i + 1] = key_points[i];
+        }
+    }
+    key_points[curve->number_points - 1] = end_point;
+
+    if (curve->tangents != NULL)
+    {
+        /* The compressed Hermite curve stores both the point and tangent data as deltas.
+           The first tangent is relative to the start point, and each subsequent tangent is
+           relative to the previous cumulative value. Reconstructing the accumulated tangent
+           sequence is required; treating the stored values as direct world-space derivatives
+           yields an over-bent cubic that does not match the Adobe rendering. */
+        key_tangents = (prc_vec3 *)prc_calloc(ctx, curve->number_points, sizeof(prc_vec3));
+        if (key_tangents == NULL)
+        {
+            prc_free(ctx, key_points);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate key_tangents in prc_evaluate_hermite_compressed\n");
+            return start_point;
+        }
+
+        if (curve->number_points > 0)
+        {
+            key_tangents[0] = curve->tangents[0];
+            for (i = 1; i < curve->number_points; i++)
+            {
+                prc_vec_add(key_tangents[i - 1], curve->tangents[i], &key_tangents[i]);
+            }
+        }
+    }
+
+    segment_count = curve->number_points - 1;
+    segment_u = input * (double)segment_count;
+    segment_index = (uint32_t)segment_u;
+    if (segment_index >= segment_count)
+    {
+        segment_index = segment_count - 1;
+    }
+    segment_u = segment_u - (double)segment_index;
+
+    p0 = key_points[segment_index];
+    p3 = key_points[segment_index + 1];
+
+    if (curve->tangents == NULL)
+    {
+        prc_free(ctx, key_points);
+        if (key_tangents != NULL)
+        {
+            prc_free(ctx, key_tangents);
+        }
+        return p0;
+    }
+
+    t0 = key_tangents[segment_index];
+    t1 = key_tangents[segment_index + 1];
+
+    prc_vec_sub(p3, p0, &segment_delta);
+    segment_length = prc_vec_length(segment_delta);
+    if (segment_length <= CURVE_PRECISION)
+    {
+        prc_free(ctx, key_points);
+        return p0;
+    }
+
+    if (prc_vec_length(t0) > CURVE_PRECISION)
+    {
+        prc_vec_scale(segment_length / 3.0 / prc_vec_length(t0), &t0);
+    }
+    if (prc_vec_length(t1) > CURVE_PRECISION)
+    {
+        prc_vec_scale(segment_length / 3.0 / prc_vec_length(t1), &t1);
+    }
+
+    prc_vec_add(p0, t0, &p1);
+    prc_vec_sub(p3, t1, &p2);
+
+    b0 = (1.0 - segment_u) * (1.0 - segment_u) * (1.0 - segment_u);
+    b1 = 3.0 * (1.0 - segment_u) * (1.0 - segment_u) * segment_u;
+    b2 = 3.0 * (1.0 - segment_u) * segment_u * segment_u;
+    b3 = segment_u * segment_u * segment_u;
+
+    output.x = b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x;
+    output.y = b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y;
+    output.z = b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z;
+
+    prc_free(ctx, key_points);
+    if (key_tangents != NULL)
+    {
+        prc_free(ctx, key_tangents);
+    }
     return output;
 }
 
@@ -414,7 +581,7 @@ prc_evaluate_circle_compressed(prc_context *ctx, void *params, double input)
 static prc_vec3
 prc_evaluate_line_compressed(prc_context *ctx, void *params, double input)
 {
-    prc_vec3 output;
+    prc_vec3 output = { 0 };
     prc_start_end_data *line = (prc_start_end_data *)params;
     prc_vec3 point1;
     prc_vec3 point2;
@@ -753,6 +920,24 @@ prc_evaluate_crv_nurbs(prc_context *ctx, void *params, double u)
         output.z = z / weight_sum;
     }
 
+    if (output.x > 400.0 || output.y > 400.0 || output.x < -400.0 || output.y < -400.0)
+    {
+        fprintf(stderr,
+            "[NURBS eval debug] u=%g span=%u weight_sum=%g\n"
+            "  output=(%g,%g,%g)\n",
+            u, span, weight_sum,
+            output.x, output.y, output.z);
+        for (i = 0; i <= nurbs->d; i++)
+        {
+            uint32_t ctrl = span - nurbs->d + i;
+            prc_control_points_nurbs_crv *cp = &nurbs->p[ctrl];
+            fprintf(stderr,
+                "  ctrl[%u]=(x=%g,y=%g,z=%g,w=%g) N=%g weighted=%g\n",
+                ctrl, cp->x, cp->y, cp->z, cp->w,
+                N[i], N[i] * (nurbs->is_rational ? cp->w : 1.0));
+        }
+    }
+
     return output;
 }
 
@@ -877,7 +1062,19 @@ prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compr
         case PRC_HCG_Circle:
         {
             /* We will sample from 0 to 1 and run along the circle arc length
-               specified */
+               specified.  First though distill the circle information from
+               the particular/general circle forms that we have */
+            if (!curve->hcg_circle.information_valid)
+            {
+                code = prc_get_hcg_circle_data(ctx, &curve->hcg_circle,
+                    &curve->hcg_circle.circle_data);
+                if (code < 0)
+                {
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_get_hcg_circle_data\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+                curve->hcg_circle.information_valid = 1;
+            }
             sample_info->curve_params = &curve->hcg_circle;
             sample_info->curve_eval_func = prc_evaluate_circle_compressed;
             sample_info->start = 0;
@@ -888,11 +1085,20 @@ prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compr
 
         case PRC_HCG_BsplineHermiteCurve:
         {
+            /* We will sample from 0 to 1 and run along the start and end data */
+            sample_info->curve_params = &curve->hcg_bspline_hermite_curve;
+            sample_info->curve_eval_func = prc_evaluate_hermite_compressed;
+            sample_info->start = 0;
+            sample_info->end = 1;
+            sample_info->num_samples = CURVE_SAMPLES;
             break;
         }
 
         case PRC_HCG_CompositeCurve:
         {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "TODO implement this\n");
+            return PRC_ERROR_INTERNAL;
+
             break;
         }
 
@@ -1100,10 +1306,11 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
     }
     return 0;
 }
-
+/* Sample curve but dealing with the compressed curve case. It would be
+   nice to reduce replicated code with the non-compressed case */
 static int
 prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
-    uint32_t face_index, prc_compressed_curve *curve)
+    uint32_t face_index, prc_compressed_curve *curve, double curve_tolerance)
 {
     uint32_t geom_count = data->exact_geom_tess_count;
     uint32_t file_index = data->exact_geom_tess[geom_count].file_index;
@@ -1118,10 +1325,11 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
     double t, t0, t1, dist;
     prc_vec3 p0, p1, mid, seg_mid;
     uint32_t num_samples;
-    prc_exact_geom_transform *exact_geom_trans = NULL;
-    prc_trans_3d *transform = NULL;
     prc_curve_sampling_info sample_info;
+    prc_exact_geom_transform exact_geom_trans;
+    prc_trans_3d transform;
     int code;
+    double tolerance = fmax(CURVE_PRECISION, curve_tolerance);
 
     code = prc_get_compressed_curve_sample_info(ctx, data, curve, &sample_info);
     if (code < 0)
@@ -1134,6 +1342,83 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
     curve_params = sample_info.curve_params;
     curve_eval_func = sample_info.curve_eval_func;
 
+    exact_geom_trans.is_identity = 1;
+    transform.behavior = 0;
+
+    if (curve_eval_func == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid curve evaluation function in prc_sample_curve\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    while (!curve_approx_good)
+    {
+        curve_approx_good = 1;
+
+        for (i = 0; i < num_samples - 1; i++)
+        {
+            t0 = start + (end - start) * ((double)i / (double)(num_samples - 1));
+            t1 = start + (end - start) * ((double)(i + 1) / (double)(num_samples - 1));
+            p0 = curve_eval_func(ctx, curve_params, t0);
+            p1 = curve_eval_func(ctx, curve_params, t1);
+            mid = curve_eval_func(ctx, curve_params, (t0 + t1) / 2.0);
+
+            /* Evaluate the midpoint of the segment */
+            seg_mid;
+            seg_mid.x = (p0.x + p1.x) / 2.0;
+            seg_mid.y = (p0.y + p1.y) / 2.0;
+            seg_mid.z = (p0.z + p1.z) / 2.0;
+
+            /* Calculate the distance from the midpoint to the curve. Use the encoded
+               curve tolerance as the actual acceptance threshold, with a small flooring
+               value to avoid zero-tolerance degenerate cases. */
+            dist = sqrt((mid.x - seg_mid.x) * (mid.x - seg_mid.x) +
+                (mid.y - seg_mid.y) * (mid.y - seg_mid.y) +
+                (mid.z - seg_mid.z) * (mid.z - seg_mid.z));
+            {
+                if (dist > tolerance)
+                {
+                    curve_approx_good = 0;
+                    break;
+                }
+            }
+        }
+        if (!curve_approx_good)
+        {
+            if (num_samples >= (1u << 20))
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "Compressed curve approximation failed to converge in prc_sample_compressed_curve\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            num_samples *= 2;
+        }
+    }
+
+    /* We now have a sufficient precision on the curve. Lets generate the
+       XYZ sample points and store them */
+    data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data =
+        (prc_exact_geom_wire_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_wire_data));
+    if (data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data in prc_sample_curve\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data;
+    wire_data->number_of_points = num_samples;
+    wire_data->points = (prc_vec3 *)prc_calloc(ctx, num_samples, sizeof(prc_vec3));
+    if (wire_data->points == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data points in prc_sample_curve\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    for (i = 0; i < num_samples; i++)
+    {
+        t = start + (end - start) * ((double)i / (double)(num_samples - 1));
+        wire_data->points[i] = curve_eval_func(ctx, curve_params, t);
+    }
     return 0;
 }
 
@@ -3303,6 +3588,78 @@ prc_get_hcg_line_data(prc_context *ctx, prc_hcg_line *data,
     return code;
 }
 
+static void
+prc_compute_hcg_circle_theta(prc_hcg_circle_information *info)
+{
+    prc_vec3 start_rel;
+    prc_vec3 end_rel;
+    prc_vec3 normal;
+    prc_vec3 cross_vec;
+    double dot_se;
+    double signed_angle;
+
+    info->theta = 0.0;
+
+    if (!info->has_center || !info->has_normal || !info->has_start_end_points)
+    {
+        return;
+    }
+
+    if (info->is_full_circle)
+    {
+        info->theta = 2.0 * PRC_PI;
+        return;
+    }
+
+    if (info->is_arc_of_zero_pi_or_twopi)
+    {
+        return;
+    }
+
+    prc_vec_sub(info->start_point, info->center, &start_rel);
+    prc_vec_sub(info->end_point, info->center, &end_rel);
+
+    if (prc_vec_length(start_rel) <= CURVE_PRECISION ||
+        prc_vec_length(end_rel) <= CURVE_PRECISION)
+    {
+        return;
+    }
+
+    normal = info->normal;
+    prc_vec_normalize(&normal);
+    prc_vec_normalize(&start_rel);
+    prc_vec_normalize(&end_rel);
+
+    dot_se = prc_vec_dot_product(start_rel, end_rel);
+    prc_vec_cross(start_rel, end_rel, &cross_vec);
+    signed_angle = atan2(prc_vec_dot_product(normal, cross_vec), dot_se);
+    if (signed_angle < 0.0)
+    {
+        signed_angle += 2.0 * PRC_PI;
+    }
+
+    if (info->has_middle_of_arc_point)
+    {
+        prc_vec3 mid_rel;
+        prc_vec3 mid_cross;
+        double mid_dot;
+
+        prc_vec_sub(info->middle_of_arc_point, info->center, &mid_rel);
+        if (prc_vec_length(mid_rel) > CURVE_PRECISION)
+        {
+            prc_vec_normalize(&mid_rel);
+            prc_vec_cross(start_rel, mid_rel, &mid_cross);
+            mid_dot = prc_vec_dot_product(normal, mid_cross);
+            if (mid_dot < 0.0)
+            {
+                signed_angle = 2.0 * PRC_PI - signed_angle;
+            }
+        }
+    }
+
+    info->theta = signed_angle;
+}
+
 static int
 prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle, prc_hcg_circle_information *info)
 {
@@ -3383,6 +3740,35 @@ prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle, prc_hcg_ci
             info->is_arc_of_zero_pi_or_twopi = 1;
         }
     }
+
+    /* If we have a valid, non-degenerate circle but no explicit endpoints, use the
+       arc midpoint and center to synthesize a diameter pair. This keeps the caller
+       supplied with start/end geometry for drawing and trimming while ignoring the
+       truly degenerate zero-angle case. */
+    if (!info->has_start_end_points && info->has_center && !info->is_full_circle &&
+        !info->is_arc_of_zero_pi_or_twopi && info->has_middle_of_arc_point)
+    {
+        prc_vec3 radius_vec;
+
+        prc_vec_sub(info->middle_of_arc_point, info->center, &radius_vec);
+        if (prc_vec_length(radius_vec) > CURVE_PRECISION)
+        {
+            prc_vec3 start = info->center;
+            prc_vec3 end = info->center;
+
+            prc_vec_sub(info->center, radius_vec, &start);
+            prc_vec_add(info->center, radius_vec, &end);
+            info->start_point = start;
+            info->end_point = end;
+            info->has_start_end_points = 1;
+        }
+    }
+
+    if (info->has_center && info->has_start_end_points)
+    {
+        prc_compute_hcg_circle_theta(info);
+    }
+
     return 0;
 }
 
@@ -4899,6 +5285,10 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             /* Note we only handle the single connex case for now.. */
             num_faces_in_shell = topo->topo_brep_data_compress->single_connex.number_of_faces;
         }
+        else if (topo->tag == PRC_TYPE_TOPO_SingleWireBodyCompress || topo->tag == PRC_TYPE_TOPO_SingleWireBody)
+        {
+            num_faces_in_shell = 1;
+        }
         data->exact_geom_tess[geom_count].shells[i].faces = (prc_exact_geom_face *)prc_calloc(ctx, num_faces, sizeof(prc_exact_geom_face));
         if (data->exact_geom_tess[geom_count].shells[i].faces == NULL)
         {
@@ -4920,7 +5310,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
                  
                 prc_topo_single_wire_compress *body = topo->topo_single_wire_compress;
-                code = prc_sample_compressed_curve(ctx, data, i, j, &body->compressed_curve);
+                code = prc_sample_compressed_curve(ctx, data, i, j, &body->compressed_curve, body->curve_tolerance);
                 if (code < 0)
                 {
                     prc_error(ctx, code, "Failed in prc_sample_compressed_curve\n");

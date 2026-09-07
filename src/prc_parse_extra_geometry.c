@@ -468,7 +468,6 @@ prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
             }
         }
     }
-
     return 0;
 }
 
@@ -516,6 +515,8 @@ prc_parse_hcg_circle(prc_context *ctx, prc_bit_state *bit_state,
             return code;
         }
     }
+
+    data->information_valid = 0;
     return 0;
 }
 
@@ -2412,6 +2413,17 @@ prc_parse_control_points_nurbs_crv(prc_context *ctx, prc_bit_state *bit_state,
     if (is_rational)
     {
         data->w = prc_bitread_double(ctx, bit_state);
+        /* Divide out the weight */
+        if (data->w != 0)
+        {
+            data->x = data->x / data->w;
+            data->y = data->y / data->w;
+
+            if (is_3d)
+            {
+                data->z = data->z / data->w;
+            }
+        }
     }
 
     return 0;

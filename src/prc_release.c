@@ -1469,10 +1469,6 @@ prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data)
                 prc_free(ctx, curr->hcg_bspline_hermite_curve.points);
             if (curr->hcg_bspline_hermite_curve.tangents != NULL)
                 prc_free(ctx, curr->hcg_bspline_hermite_curve.tangents);
-            if (curr->hcg_bspline_hermite_curve.compressed_points != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.compressed_points);
-            if (curr->hcg_bspline_hermite_curve.compressed_tangents != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.compressed_tangents);
             break;
 
         case PRC_HCG_CompositeCurve:

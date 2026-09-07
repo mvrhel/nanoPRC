@@ -3355,6 +3355,26 @@ struct prc_general_circle_s
     uint8_t circle_angle; /* Is this really a bool? */
 };
 
+
+/* Used for dealing with the general/particular circle parameters */
+typedef struct prc_hcg_circle_information_s
+{
+    uint8_t has_center;
+    uint8_t has_normal;
+    uint8_t has_start_end_points;
+    uint8_t is_full_circle;
+    uint8_t is_arc_of_zero_pi_or_twopi;
+    uint8_t has_middle_of_arc_point;
+    uint8_t has_circle_angle_bit;
+    prc_vec3 center;
+    prc_vec3 normal;
+    prc_vec3 start_point;
+    prc_vec3 end_point;
+    prc_vec3 middle_of_arc_point;
+    uint8_t circle_angle_bit; /* If has_circle_angle_bit is true, then this is set to true means circle_angle > pi */
+    double theta; /* Computed angle of the arc */
+} prc_hcg_circle_information;
+
 /* Table 234 PRC_HCG_Circle */
 struct prc_hcg_circle_s
 {
@@ -3362,6 +3382,8 @@ struct prc_hcg_circle_s
     uint8_t is_particular_circle;
     prc_particular_circle particular_circle;
     prc_general_circle general_circle;
+    uint8_t information_valid; /* Used for rendering circle lines */
+    prc_hcg_circle_information circle_data;
 };
 
 /* Table 237 PRC_HCG_BsplineHermiteCurve */
@@ -3373,10 +3395,8 @@ struct prc_hcg_bspline_hermite_curve_s
     uint32_t number_points;
     uint32_t point_number_bits;
     prc_vec3 *points;
-    prc_vec3 *compressed_points;
     uint32_t tangent_number_bits;
     prc_vec3 *tangents;
-    prc_vec3 *compressed_tangents;
 };
 
 /* Table 238 PRC_HCG_CompositeCurve */
