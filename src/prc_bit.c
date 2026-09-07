@@ -408,6 +408,115 @@ prc_bitread_huff_data(prc_context *ctx, prc_bit_state *state, uint32_t num_bits)
 * so a future fix (like the num_leaves==0/max_code_length-error-code cleanup
 * folded in below) only needs to happen once.
 */
+
+/* PRC_DIAG_HUFF_DUMP: append one Huffman code table, with the symbol
+   frequencies that produced it, to the file named by the variable.
+
+   The producer's own stored table -- per leaf, its value, code length and code
+   value -- is live only inside prc_huffman_decode_core: it is read from the
+   bitstream, used to build the tree, and freed. Nothing else in the library
+   exposes it. Pairing it with the frequencies implied by the decoded array
+   makes every Huffman-coded array in a real file a labelled test case ("these
+   frequencies produced this table"), which is what settles questions about the
+   required tree shape and the equal-frequency tie-break in the absence of a
+   defined HuffmanTreeCalculation (see pdf-issues #770).
+
+   Format, tab-separated, one array per A record followed by num_leaves L records:
+
+     A <tag> <seq> <num_bits> <elem_size> <num_leaves> <max_code_length> <num_values>
+     L <leaf_value> <code_length> <code_value> <frequency>
+
+   Frequencies are counted through a small open-addressed table keyed on the
+   leaf value, so the working set is bounded by num_leaves. A direct-indexed
+   histogram over the value range is simpler but allocates with the value
+   RANGE rather than the leaf count, which on arrays carrying sparse high
+   values reaches tens of megabytes per call and can run a corpus sweep out of
+   memory. */
+static void
+prc_huff_dump_table(prc_context *ctx, const char *path, uint8_t num_bits,
+    size_t elem_size, uint32_t num_leaves, uint32_t max_code_length,
+    uint32_t num_values, const uint32_t *leaf_values,
+    const uint32_t *code_length, const uint32_t *code_values,
+    const void *data)
+{
+    static unsigned long huff_dump_seq = 0;
+    const char *tag;
+    FILE *fp;
+    uint32_t *slot_value = NULL;
+    uint32_t *slot_leaf = NULL;
+    uint32_t *freq = NULL;
+    uint32_t mask, cap = 8;
+    uint32_t i;
+
+    if (path == NULL || path[0] == '\0' || num_leaves == 0)
+        return;
+
+    while (cap < num_leaves * 2u && cap < (1u << 30))
+        cap <<= 1;
+    mask = cap - 1u;
+
+    slot_value = (uint32_t *)prc_calloc(ctx, cap, sizeof(uint32_t));
+    slot_leaf = (uint32_t *)prc_calloc(ctx, cap, sizeof(uint32_t));
+    freq = (uint32_t *)prc_calloc(ctx, num_leaves, sizeof(uint32_t));
+    if (slot_value == NULL || slot_leaf == NULL || freq == NULL)
+        goto cleanup;
+
+    /* slot_leaf holds leaf index + 1, so zero means empty. */
+    for (i = 0; i < num_leaves; i++)
+    {
+        uint32_t h = (leaf_values[i] * 2654435761u) & mask;
+
+        while (slot_leaf[h] != 0)
+        {
+            if (slot_value[h] == leaf_values[i])
+                break;
+            h = (h + 1u) & mask;
+        }
+        if (slot_leaf[h] == 0)
+        {
+            slot_value[h] = leaf_values[i];
+            slot_leaf[h] = i + 1u;
+        }
+    }
+
+    for (i = 0; i < num_values; i++)
+    {
+        uint32_t v = (elem_size == sizeof(uint8_t))
+            ? (uint32_t)((const uint8_t *)data)[i]
+            : ((const uint32_t *)data)[i];
+        uint32_t h = (v * 2654435761u) & mask;
+
+        while (slot_leaf[h] != 0)
+        {
+            if (slot_value[h] == v)
+            {
+                freq[slot_leaf[h] - 1u]++;
+                break;
+            }
+            h = (h + 1u) & mask;
+        }
+    }
+
+    fp = fopen(path, "ab");
+    if (fp != NULL)
+    {
+        tag = prc_diag_getenv("PRC_DIAG_HUFF_TAG");
+        fprintf(fp, "A\t%s\t%lu\t%u\t%u\t%u\t%u\t%u\n",
+            (tag != NULL) ? tag : "?", huff_dump_seq++,
+            (unsigned)num_bits, (unsigned)elem_size,
+            num_leaves, max_code_length, num_values);
+        for (i = 0; i < num_leaves; i++)
+            fprintf(fp, "L\t%u\t%u\t%u\t%u\n",
+                leaf_values[i], code_length[i], code_values[i], freq[i]);
+        fclose(fp);
+    }
+
+cleanup:
+    prc_free(ctx, slot_value);
+    prc_free(ctx, slot_leaf);
+    prc_free(ctx, freq);
+}
+
 static void *
 prc_huffman_decode_core(prc_context *ctx, prc_bit_state *state, uint8_t num_bits,
     uint32_t huffman_array_size, size_t elem_size, uint32_t *data_decode_size)
@@ -709,6 +818,11 @@ prc_huffman_decode_core(prc_context *ctx, prc_bit_state *state, uint8_t num_bits
         }
     }
     *data_decode_size = num_values;
+
+    /* Last point at which the producer's stored code table is still live. */
+    prc_huff_dump_table(ctx, prc_diag_getenv("PRC_DIAG_HUFF_DUMP"), num_bits,
+        elem_size, num_leaves, max_code_length, num_values,
+        leaf_values, code_length, code_values, data);
 
     prc_free(ctx, huffman_array);
     prc_free(ctx, leaf_values);
