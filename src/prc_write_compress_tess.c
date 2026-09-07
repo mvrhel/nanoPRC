@@ -4719,14 +4719,45 @@ prc_api_mesh_weld_and_split_free(prc_context *ctx, double *positions, uint32_t *
    Direction agreement is therefore tested with a signed dot product, not
    fabs(): antiparallel normals are deliberately rejected.
 
-   The tolerances are deliberately strict. A false negative merely forgoes an
-   optimisation -- the face is encoded per-vertex, exactly as today. A false
-   positive writes a flag contradicted by the geometry, which at least one
-   real reader is reported to validate and reject. Asymmetric cost, so err
-   toward reporting non-planar.
+   ON THE TOLERANCES, AND WHY THEY ARE NO LONGER AS STRICT AS THEY WERE
+   --------------------------------------------------------------------
+   These were originally set to the tightest values that could distinguish
+   anything, on the belief that a false positive writes a flag contradicted by
+   the geometry which a real reader validates and rejects. **That belief was
+   wrong and has been withdrawn.** It came from a correspondent's report that
+   was later retracted as confounded: the runs that appeared to show rejection
+   had no accepting control, so they showed nothing.
 
-   WHY THIS IS NOT YET WIRED INTO THE WRITER
-   -----------------------------------------
+   What replaced it is a direct measurement. A sphere with is_face_planar
+   forced TRUE on a single 1008-triangle face -- true normal spread 89.87
+   degrees, i.e. as far from planar as a face can be -- was accepted and
+   rendered by Adobe Acrobat. Two real published files carry the same
+   construct and display correctly. There is no acceptance-level geometric
+   gate to protect against.
+
+   The asymmetry therefore runs the other way from what this comment used to
+   claim. A false positive is bounded: the face's vertices all receive one
+   normal, so the cost is shading accuracy on a face whose geometry is nearly
+   flat anyway. A false negative costs the optimisation outright on every face
+   it touches. Erring hard toward non-planar was forgoing the optimisation to
+   buy protection that does not exist.
+
+   The direction test now admits a degree of deviation rather than demanding
+   bit-exact agreement, matching the threshold the corpus surveys use for
+   "geometrically planar". The distance test is unchanged and remains scaled
+   by the mesh tolerance.
+
+   Note what is NOT relaxed: the separate normals-agreement narrowing applied
+   in prc_encode_normals_c2 stays exact. That filter protects the decoded
+   appearance -- one stored normal really does replace every supplied normal
+   on the face -- and no reader-behaviour finding bears on it.
+
+   WHY THE FLAG CANNOT BE SET INDEPENDENTLY OF THE NORMAL ENCODING
+   ---------------------------------------------------------------
+   (This constraint shaped the encoder; it is recorded because the shape is
+   not obvious from the code. The per-face encoder described at the end of it
+   now exists, and the writer emits the array this detector feeds.)
+
    is_face_planar cannot be enabled independently of the normal encoding. Two
    facts combine to make that so:
 
@@ -4750,17 +4781,25 @@ prc_api_mesh_weld_and_split_free(prc_context *ctx, double *positions, uint32_t *
    the decoder reading per-vertex data under per-face rules, desynchronising
    normal reconstruction from that point on.
 
-   Enabling the flag therefore requires prc_encode_normals_c2 to mirror the
+   Enabling the flag therefore required prc_encode_normals_c2 to mirror the
    decoder's per-face state machine, including the interaction where a vertex
    shared between a planar and a non-planar face must be registered in the
-   multiple-normals table by whichever face reaches it first. That work is not
-   done. Until it is, the writer passes NULL and every face is encoded
-   per-vertex, which is correct if unoptimised.
+   multiple-normals table by whichever face reaches it first. That work is
+   done: the encoder tracks per-face state, and it narrows this detector's
+   geometric candidate set to faces whose supplied normals also agree, then
+   returns the array it actually encoded. The writer emits that array, never
+   the candidate, so the flag and the normal stream are consistent by
+   construction rather than by convention.
 
-   This function is exposed so the planarity census tool can report how much
-   the optimisation would be worth before that work is undertaken. */
+   This function is also exposed so the planarity census tool can report how
+   much the optimisation is worth on a given corpus. */
 
-#define PRC_PLANAR_NORMAL_TOL       (1.0 - 1.0e-9)
+/* cos(1 degree). One degree is the threshold both corpus surveys of this
+   feature use for "geometrically planar", so a face this detector accepts is
+   one those surveys would also count. The previous value, 1.0 - 1.0e-9,
+   admitted about 0.0026 degrees -- effectively demanding bit-exact agreement,
+   which rejected faces that are flat to any practical measure. */
+#define PRC_PLANAR_NORMAL_TOL       (0.99984769515639127)
 #define PRC_PLANAR_DIST_TOL_SCALE   (1.0)
 
 static void
