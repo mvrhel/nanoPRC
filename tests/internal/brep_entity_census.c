@@ -60,10 +60,16 @@
    reference -- these are counts of distinct entities, not of incidences.
 
    Compressed bodies (BrepDataCompress and SingleWireBodyCompress, Tables
-   197/198) are counted but NOT descended into, because nanoPRC does not
-   decode them; a file built entirely from compressed bodies therefore
-   reports its body count and then zero for everything below it. That is the
-   correct reading of the output, not a parse failure.
+   197/198) are counted but NOT descended into. That is a limitation of THIS
+   TOOL, not of the library: nanoPRC parses them fully --
+   prc_parse_brep_data_compress populates prc_topo_brep_data_compress with a
+   single_connex or multi_connex of prc_compressed_shell ->
+   prc_compressed_face, and sets number_of_faces from whichever branch ran --
+   but that is a different representation from the PRC_TYPE_TOPO_* pointer
+   graph this walk follows, so reaching it needs a second walker rather than
+   another case in the existing one. Until that exists, a file built entirely
+   from compressed bodies reports its body count and then zero for everything
+   below it. That is the correct reading of the output, not a parse failure.
 
    Anything the parser skipped is invisible here by construction: this
    reports what nanoPRC understood, not what the bytes contain. */
@@ -224,8 +230,9 @@ walk_topo(census *c, prc_topo *topo)
         break;
     }
 
-    /* Compressed bodies are counted only -- nanoPRC does not decode them, so
-       there is no topology below this point to walk. See the header. */
+    /* Counted only. The library does parse these -- see the header -- but
+       into prc_compressed_shell/prc_compressed_face, which this
+       uncompressed-topology walk cannot reach. */
     case PRC_TYPE_TOPO_BrepDataCompress:
         c->body_brep_compressed++;
         break;
