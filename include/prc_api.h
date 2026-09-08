@@ -39,6 +39,10 @@
 #define PRC_API_ERROR_PARSER -3
 #define PRC_API_ERROR_UNSUPPORTED -4
 
+ /* To avoid breaking things while I am working on this. This will
+    allow me to keep my branch frequently merged though */
+#define ENABLE_EXACT_GEOM_TESS 0
+
 /* Returned by prc_api_release_context when PRC_DEBUG_MEMORY is enabled
     and at least one allocation remains unfreed. */
 #define PRC_API_MEMORY_LEAK_DETECTED 100

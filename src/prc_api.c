@@ -24,10 +24,6 @@
 /* Reasonable guard to avoid unbounded allocations. Tune as needed. */
 #define PRC_STYLE_POOL_MAX_CAPACITY (1000000u)
 
-/* To avoid breaking things while I am working on this. This will
-   allow me to keep my branch frequently merged though */
-#define ENABLE_EXACT_GEOM_TESS 0
-
 #define PARTS_DETAIL_INIT_SIZE 100
 
 /* Iterative (not recursive): the style tree's depth follows the assembly/RI

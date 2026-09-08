@@ -25,7 +25,7 @@
 
 #define CURVE_SAMPLES 256
 #define SURFACE_SAMPLES 32
-#define CURVE_PRECISION 1e-1
+#define CURVE_PRECISION 1e-3
 #define SURFACE_PRECISION 1e-4
 #define SURFACE_MAX_SAMPLES 1024
 #define CYLINDER_SURFACE_PRECISION 1e-2
@@ -506,27 +506,12 @@ prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
 
     if (curve->tangents != NULL)
     {
-        /* The compressed Hermite curve stores both the point and tangent data as deltas.
-           The first tangent is relative to the start point, and each subsequent tangent is
-           relative to the previous cumulative value. Reconstructing the accumulated tangent
-           sequence is required; treating the stored values as direct world-space derivatives
-           yields an over-bent cubic that does not match the Adobe rendering. */
-        key_tangents = (prc_vec3 *)prc_calloc(ctx, curve->number_points, sizeof(prc_vec3));
-        if (key_tangents == NULL)
-        {
-            prc_free(ctx, key_points);
-            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate key_tangents in prc_evaluate_hermite_compressed\n");
-            return start_point;
-        }
-
-        if (curve->number_points > 0)
-        {
-            key_tangents[0] = curve->tangents[0];
-            for (i = 1; i < curve->number_points; i++)
-            {
-                prc_vec_add(key_tangents[i - 1], curve->tangents[i], &key_tangents[i]);
-            }
-        }
+        /* Per spec Table 238, only the points (Ptc) are stored as a running delta;
+           Tgtc[i] is used directly as the tangent at key point i (P1/P2/P4 formulas
+           reference Tgtc[0..2] and Tgtc[3..5] with no cumulative sum). Accumulating
+           the tangents compounds quantization noise across the curve, producing
+           high-frequency wiggles. */
+        key_tangents = curve->tangents;
     }
 
     segment_count = curve->number_points - 1;
@@ -544,10 +529,6 @@ prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
     if (curve->tangents == NULL)
     {
         prc_free(ctx, key_points);
-        if (key_tangents != NULL)
-        {
-            prc_free(ctx, key_tangents);
-        }
         return p0;
     }
 
@@ -558,7 +539,6 @@ prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
     segment_length = prc_vec_length(segment_delta);
     if (segment_length <= CURVE_PRECISION)
     {
-        prc_free(ctx, key_tangents);
         prc_free(ctx, key_points);
         return p0;
     }
@@ -585,10 +565,6 @@ prc_evaluate_hermite_compressed(prc_context *ctx, void *params, double input)
     output.z = b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z;
 
     prc_free(ctx, key_points);
-    if (key_tangents != NULL)
-    {
-        prc_free(ctx, key_tangents);
-    }
     return output;
 }
 
