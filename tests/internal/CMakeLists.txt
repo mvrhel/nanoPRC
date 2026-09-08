@@ -183,3 +183,7 @@ target_include_directories(face_planarity_census PRIVATE tests)
 add_executable(planar_roundtrip tests/internal/planar_roundtrip.c)
 target_link_libraries(planar_roundtrip prc_static)
 target_include_directories(planar_roundtrip PRIVATE tests)
+
+add_executable(brep_entity_census tests/internal/brep_entity_census.c)
+target_link_libraries(brep_entity_census prc_static)
+target_include_directories(brep_entity_census PRIVATE tests)
