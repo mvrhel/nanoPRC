@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+
 #include "prc_parse_extra_geometry.h"
 #include "prc_parse_common.h"
 #include "debug.h"
@@ -330,6 +331,14 @@ prc_parse_hcg_bspline_hermite_curve(prc_context *ctx, prc_bit_state *bit_state,
         data->type = PRC_HCG_BsplineHermiteCurve; /* Preread for abstract switch */
     }
 
+    /* The start end data will make use of compressed_data->tolerance as is.
+       For some reason, data->points and data->tangents scale this up by 50,
+       which is the same as doing a division by 2 on the original tolerance
+       (which was subsequently divided by 100 - as specfied in 7.9.21.11  CompressedPoint)
+       I would have expected to have to multiply by 100 not 50. This 
+       was tested with the file prc_convert_nurbs_2_hermite.pdf which
+       has uncompressed nurbs curves and compressed hermite curves
+       that should overlap.  TODO Have someone explain what is going on here */
     code = prc_parse_start_end_data(ctx, bit_state, compressed_data,
         &data->start_end_data);
     if (code < 0)
@@ -367,13 +376,13 @@ prc_parse_hcg_bspline_hermite_curve(prc_context *ctx, prc_bit_state *bit_state,
             {
                 data->points[k].x = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->point_number_bits,
-                                            compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
                 data->points[k].y = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->point_number_bits,
-                                            compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
                 data->points[k].z = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->point_number_bits,
-                    compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
             }
         }
     }
@@ -402,13 +411,13 @@ prc_parse_hcg_bspline_hermite_curve(prc_context *ctx, prc_bit_state *bit_state,
             {
                 data->tangents[k].x = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->tangent_number_bits,
-                                            compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
                 data->tangents[k].y = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->tangent_number_bits,
-                                            compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
                 data->tangents[k].z = prc_bitread_double_with_variable_bit_number(ctx,
                                             bit_state, data->tangent_number_bits,
-                    compressed_data->tolerance);
+                                            compressed_data->tolerance * 50);
             }
         }
     }
@@ -3802,7 +3811,7 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
 
     compressed_data->curve_trimming_face = 0;
     compressed_data->is_a_SingleWireBodyCompress = 1;
-    compressed_data->tolerance = data->curve_tolerance;
+    compressed_data->tolerance = data->curve_tolerance / 100.0;
 
     /* Deal with this ref_or_compressed_curve as a special case as it does NOT
        get added to any referencing */
