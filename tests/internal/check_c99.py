@@ -55,7 +55,20 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 # demos/viewer is C++14 (SDL3 + Dear ImGui) and the Python binding is C++17;
 # thirdparty/ and the bundled stb_image headers are not held to C99 either.
-SOURCE_GLOBS = ['src/*.c', 'tests/internal/*.c', 'demos/*/src/*.c']
+#
+# tests/unit is here because CI compiles it like any other first-party C: it
+# is built by the default NANOPRC_BUILD_TESTS=ON configuration, so a C99
+# violation in a unit test breaks the Linux and macOS builds exactly as one in
+# src/ would. It was omitted from this list originally.
+#
+# tests/functional is deliberately NOT here. Its sources are compiled against
+# definitions CMake supplies from $<TARGET_FILE:...> generator expressions
+# (STL_EXPORT_EXE, STL_IMPORT_EXE, EXAMPLE_CUBE_PDF, ROUNDTRIP_TMP_DIR), which
+# have no meaning outside a configured build, so parsing them standalone fails
+# on undeclared identifiers rather than on anything to do with C99. Covering
+# them would mean teaching this script one test's private -D flags.
+SOURCE_GLOBS = ['src/*.c', 'tests/unit/*.c', 'tests/internal/*.c',
+                'demos/*/src/*.c']
 EXCLUDE_DIRS = ['demos/viewer', 'thirdparty', 'python']
 
 # Mirrors the root CMakeLists' add_definitions(). prc_double.h #errors out
@@ -115,7 +128,11 @@ def find_tool():
 
 
 def include_dirs(build_dir):
-    dirs = [os.path.join(REPO, d) for d in ('include', 'src', 'thirdparty/zlib')]
+    # 'tests' is on the list because every test target adds it via
+    # target_include_directories(... PRIVATE tests) for prc_test.h; without it
+    # the whole of tests/ fails to parse on a missing include rather than on
+    # anything to do with C99.
+    dirs = [os.path.join(REPO, d) for d in ('include', 'src', 'tests', 'thirdparty/zlib')]
     gen = os.path.join(REPO, build_dir, 'generated')
     if os.path.isdir(gen):
         dirs.append(gen)
