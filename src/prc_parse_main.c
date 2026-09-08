@@ -703,6 +703,7 @@ prc_open_contents(prc_context *ctx, const char* infile)
     fid = fopen(infile, "rb");
     if (fid == NULL)
     {
+        prc_free(ctx, output);
         prc_error(ctx, PRC_ERROR_IO, "Failed to open file\n");
         return NULL;
     }
