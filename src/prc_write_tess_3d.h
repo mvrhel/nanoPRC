@@ -50,6 +50,34 @@
    crease_angle_degrees: only meaningful when must_calculate_normals is set;
      the dihedral angle, in degrees, above which the reader treats an edge as
      a hard crease instead of smoothing across it. Ignored otherwise.
+   tex_coords/num_tex_coords/tex_indices: optional texture coordinates. NULL/0
+     writes none (number_of_texture_coordinates=0 and every face's
+     number_of_textured_coordinate_indexes=0), which is the pre-existing
+     behaviour. When supplied, tex_coords holds num_tex_coords (u,v) PAIRS --
+     2 doubles each, so 2*num_tex_coords doubles are written -- and
+     tex_indices supplies 3 texture indices per triangle, parallel to
+     tri_indices. Every face is then written with one texture index per
+     vertex (number_of_textured_coordinate_indexes=1).
+
+     Two conventions here are worth stating because the specification does
+     not (filed as pdf-association/pdf-issues#810, CR-29/CR-30, and measured
+     against real files before implementing):
+       - number_of_texture_coordinates counts DOUBLES, not coordinates, the
+         same way number_of_coordinates counts doubles for positions.
+       - texture indices are stored pre-multiplied by 2 (positions and
+         normals are pre-multiplied by 3). The specification's claim that
+         indices in triangulated_index_array are "always a multiple of 3"
+         does not hold for them.
+
+     Only the multi-normal textured forms are emitted:
+     PRC_FACETESSDATA_TriangleTextured, whose per-vertex layout is
+     (normal, texture, point) with normals supplied, or (texture, point)
+     under must_calculate_normals. Supplying tex_indices together with the
+     computed-one-normal-per-face path (norm_indices == NULL and
+     must_calculate_normals == 0) would require
+     PRC_FACETESSDATA_TriangleOneNormalTextured, which this project's own
+     reader rejects with PRC_ERROR_NOT_IMPLEMENTED, so it is refused here
+     rather than written and left unreadable.
 
    Face-embedded wire indices are out of scope (not written). */
 int prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
@@ -58,6 +86,8 @@ int prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
     const uint32_t *tri_indices, const uint32_t *norm_indices,
     uint32_t num_triangles,
     const uint32_t *face_tri_counts, uint32_t num_faces,
+    const double *tex_coords, uint32_t num_tex_coords,
+    const uint32_t *tex_indices,
     int must_calculate_normals, double crease_angle_degrees);
 
 #endif

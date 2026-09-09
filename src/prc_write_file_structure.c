@@ -204,6 +204,7 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
             if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
             code = prc_write_tess_3d(ctx, s, e->positions, e->num_positions, e->normals, e->num_normals,
                 e->tri_indices, e->norm_indices, e->num_triangles, face_counts, face_count,
+                NULL, 0, NULL,   /* texture coordinates: not yet exposed on the public write API */
                 must_calc, crease);
             if (code != 0) goto fail;
         }
