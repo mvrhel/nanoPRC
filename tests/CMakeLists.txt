@@ -48,3 +48,8 @@ add_executable(test_file_structure tests/unit/test_file_structure.c)
 target_link_libraries(test_file_structure prc_static)
 target_include_directories(test_file_structure PRIVATE tests)
 add_test(NAME test_file_structure COMMAND test_file_structure)
+
+add_executable(test_write_tree tests/unit/test_write_tree.c)
+target_link_libraries(test_write_tree prc_static)
+target_include_directories(test_write_tree PRIVATE tests)
+add_test(NAME test_write_tree COMMAND test_write_tree)
