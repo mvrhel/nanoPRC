@@ -3853,9 +3853,11 @@ struct prc_data_s
     tess_style_file_part *part_details;
     uint32_t unique_markup_count;
     tess_style_file_markup *markup_details;
-    uint32_t exact_geom_capacity;
-    uint32_t exact_geom_tess_count;
-    prc_exact_geom_tess *exact_geom_tess;
+    /* Exact tessellation content */
+    uint32_t exact_geom_total_tess_count; /* Across all shells and faces */
+    uint32_t exact_geom_tess_part_count;  /* The actual parts that consist of shells and faces and tessellations */
+    uint32_t exact_geom_tess_part_capacity; /* Capacity of the part */
+    prc_exact_geom_tess *exact_geom_tess_part; /* The start of our structure that holds all these in a tree of sorts */
 };
 
 struct prc_triangle_s

@@ -3010,30 +3010,30 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
     prc_api_face *face_out;
     prc_internal_api_face *face_out_reserved = NULL;
 
-    if (exact_object_index >= data->exact_geom_tess_count)
+    if (exact_object_index >= data->exact_geom_tess_part_count)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER,
             "Exact geometry tessellation index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
-    if (shell_index >= data->exact_geom_tess[exact_object_index].number_of_shells)
+    if (shell_index >= data->exact_geom_tess_part[exact_object_index].number_of_shells)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER,
             "Exact geometry shell index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
-    if (face_index >= data->exact_geom_tess[exact_object_index].shells[shell_index].number_of_faces)
+    if (face_index >= data->exact_geom_tess_part[exact_object_index].shells[shell_index].number_of_faces)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER,
             "Exact geometry face index out of range in prc_api_get_exact_geometry_tessellation_vertices\n");
         return PRC_API_ERROR_PARAMETER;
     }
 
-    tess_type = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].type;
-    biased_style_index = data->exact_geom_tess[exact_object_index].biased_style_index;
-    file_index = data->exact_geom_tess[exact_object_index].file_index;
+    tess_type = data->exact_geom_tess_part[exact_object_index].shells[shell_index].faces[face_index].type;
+    biased_style_index = data->exact_geom_tess_part[exact_object_index].biased_style_index;
+    file_index = data->exact_geom_tess_part[exact_object_index].file_index;
 
     if (biased_style_index > 0)
     {
@@ -3065,7 +3065,7 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
 
     if (tess_type == PRC_EXACT_GEOM_3D)
     {
-        prc_exact_geom_tess_data *tess_data = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].tess_data;
+        prc_exact_geom_tess_data *tess_data = data->exact_geom_tess_part[exact_object_index].shells[shell_index].faces[face_index].tess_data;
         uint32_t num_vertices;
         uint32_t num_triangles;
         
@@ -3264,7 +3264,7 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
         /* Wire case. We simply have a set of vertices that we need to connect
            with a line.  Create the primitives for this.  We will stick this
            in the shell/face though */
-        prc_exact_geom_wire_data *wire_data = data->exact_geom_tess[exact_object_index].shells[shell_index].faces[face_index].wire_data;
+        prc_exact_geom_wire_data *wire_data = data->exact_geom_tess_part[exact_object_index].shells[shell_index].faces[face_index].wire_data;
         uint32_t num_points = wire_data->number_of_points;
 
         face_out->is_exact_geom_wire = 1;
@@ -3378,14 +3378,14 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
     }
 
     reserve = (prc_api_child_reserve *)api_tree->reserved;
-    reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].tess = curr_tess;
+    reserve->parts[data->exact_geom_tess_part[exact_object_index].part_reserve_index].tess = curr_tess;
     printf("prc_api_get_exact_geometry_tessellation_vertices: associate tess_index=%u reserve_part_index=%u part_name=%s tess_ptr=%p num_rep_items=%zu\n",
         tess_index,
-        data->exact_geom_tess[exact_object_index].part_reserve_index,
-        reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].name != NULL ?
-            reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].name : "<null>",
-        (void *)reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].tess,
-        reserve->parts[data->exact_geom_tess[exact_object_index].part_reserve_index].num_rep_items);
+        data->exact_geom_tess_part[exact_object_index].part_reserve_index,
+        reserve->parts[data->exact_geom_tess_part[exact_object_index].part_reserve_index].name != NULL ?
+            reserve->parts[data->exact_geom_tess_part[exact_object_index].part_reserve_index].name : "<null>",
+        (void *)reserve->parts[data->exact_geom_tess_part[exact_object_index].part_reserve_index].tess,
+        reserve->parts[data->exact_geom_tess_part[exact_object_index].part_reserve_index].num_rep_items);
 
     return 0;
 

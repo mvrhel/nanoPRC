@@ -1305,10 +1305,10 @@ static int
 prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t face_index, prc_compressed_curve *curve, double curve_tolerance)
 {
-    uint32_t geom_count = data->exact_geom_tess_count;
-    uint32_t file_index = data->exact_geom_tess[geom_count].file_index;
-    uint32_t topo_index = data->exact_geom_tess[geom_count].topo_context_index;
-    uint32_t body_index = data->exact_geom_tess[geom_count].body_index;
+    uint32_t geom_count = data->exact_geom_tess_part_count;
+    uint32_t file_index = data->exact_geom_tess_part[geom_count].file_index;
+    uint32_t topo_index = data->exact_geom_tess_part[geom_count].topo_context_index;
+    uint32_t body_index = data->exact_geom_tess_part[geom_count].body_index;
     uint8_t curve_approx_good = 0;
     void *curve_params = NULL;
     curve_func curve_eval_func = NULL;
@@ -1390,15 +1390,15 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
 
     /* We now have a sufficient precision on the curve. Lets generate the
        XYZ sample points and store them */
-    data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data =
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data =
         (prc_exact_geom_wire_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_wire_data));
-    if (data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
+    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data in prc_sample_curve\n");
         return PRC_ERROR_MEMORY;
     }
 
-    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data;
+    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data;
     wire_data->number_of_points = num_samples;
     wire_data->points = (prc_vec3 *)prc_calloc(ctx, num_samples, sizeof(prc_vec3));
     if (wire_data->points == NULL)
@@ -1420,10 +1420,10 @@ static int
 prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t face_index, prc_content_wire_edge *curve)
 {
-    uint32_t geom_count = data->exact_geom_tess_count;
-    uint32_t file_index = data->exact_geom_tess[geom_count].file_index;
-    uint32_t topo_index = data->exact_geom_tess[geom_count].topo_context_index;
-    uint32_t body_index = data->exact_geom_tess[geom_count].body_index;
+    uint32_t geom_count = data->exact_geom_tess_part_count;
+    uint32_t file_index = data->exact_geom_tess_part[geom_count].file_index;
+    uint32_t topo_index = data->exact_geom_tess_part[geom_count].topo_context_index;
+    uint32_t body_index = data->exact_geom_tess_part[geom_count].body_index;
     uint8_t curve_approx_good = 0;
     void *curve_params = NULL;
     curve_func curve_eval_func = NULL;
@@ -1651,7 +1651,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         }
 
         default:
-            data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
+            data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
             return 0;
     }
 
@@ -1721,15 +1721,15 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
 
     /* We now have a sufficient precision on the curve. Lets generate the
        XYZ sample points and store them */
-    data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data =
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data =
         (prc_exact_geom_wire_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_wire_data));
-    if (data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
+    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data in prc_sample_curve\n");
         return PRC_ERROR_MEMORY;
     }
 
-    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].wire_data;
+    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data;
     wire_data->number_of_points = num_samples;
     wire_data->points = (prc_vec3 *)prc_calloc(ctx, num_samples, sizeof(prc_vec3));
     if (wire_data->points == NULL)
@@ -4715,7 +4715,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
     surface_func surface_eval_func = NULL;
     uint32_t num_samples_u = 0;
     uint32_t num_samples_v = 0;
-    uint32_t geom_count = data->exact_geom_tess_count;
+    uint32_t geom_count = data->exact_geom_tess_part_count;
     uint8_t surface_approx_good = 0;
     prc_surface_sampling_info sampling_info = {0};
     double start_u = 0.0;
@@ -4885,7 +4885,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         }
 
         default:
-            data->exact_geom_tess[data->exact_geom_tess_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
+            data->exact_geom_tess_part[data->exact_geom_tess_part_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
             return 0;
     }
 
@@ -5044,15 +5044,15 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
     }
 
     /* At this point we have the tessellation data */
-    data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].tess_data =
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
         (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
-    if (data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
+    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_surface\n");
         return PRC_ERROR_MEMORY;
     }
 
-    prc_exact_geom_tess_data *tess_data = data->exact_geom_tess[geom_count].shells[shell_index].faces[face_index].tess_data;
+    prc_exact_geom_tess_data *tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
     tess_data->number_of_vertices = vertex_samples_u * vertex_samples_v;
     tess_data->vertices =
         (prc_exact_geom_vertex *)prc_calloc(ctx,
@@ -5227,10 +5227,10 @@ int
 prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint32_t *num_tessellations)
 {
     prc_data *data = (prc_data *)data_in;
-    uint32_t geom_count = data->exact_geom_tess_count;
-    uint32_t file_index = data->exact_geom_tess[geom_count].file_index;
-    uint32_t topo_index = data->exact_geom_tess[geom_count].topo_context_index;
-    uint32_t body_index = data->exact_geom_tess[geom_count].body_index;
+    uint32_t geom_count = data->exact_geom_tess_part_count;
+    uint32_t file_index = data->exact_geom_tess_part[geom_count].file_index;
+    uint32_t topo_index = data->exact_geom_tess_part[geom_count].topo_context_index;
+    uint32_t body_index = data->exact_geom_tess_part[geom_count].body_index;
     int code;
     uint32_t num_shells, num_faces, num_wires;
     uint32_t i, j;
@@ -5258,13 +5258,13 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
     }
 
     /* Allocate shells and faces */
-    data->exact_geom_tess[geom_count].shells = (prc_exact_geom_shell *)prc_calloc(ctx, num_shells, sizeof(prc_exact_geom_shell));
-    if (data->exact_geom_tess[geom_count].shells == NULL)
+    data->exact_geom_tess_part[geom_count].shells = (prc_exact_geom_shell *)prc_calloc(ctx, num_shells, sizeof(prc_exact_geom_shell));
+    if (data->exact_geom_tess_part[geom_count].shells == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of shells in prc_approximate_objects_exact_geom\n");
         return PRC_ERROR_MEMORY;
     }
-    data->exact_geom_tess[geom_count].number_of_shells = num_shells;
+    data->exact_geom_tess_part[geom_count].number_of_shells = num_shells;
     for (i = 0; i < num_shells; i++)
     {
         uint32_t num_faces_in_shell = 0;
@@ -5282,25 +5282,25 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
         {
             num_faces_in_shell = 1;
         }
-        data->exact_geom_tess[geom_count].shells[i].faces = (prc_exact_geom_face *)prc_calloc(ctx, num_faces, sizeof(prc_exact_geom_face));
-        if (data->exact_geom_tess[geom_count].shells[i].faces == NULL)
+        data->exact_geom_tess_part[geom_count].shells[i].faces = (prc_exact_geom_face *)prc_calloc(ctx, num_faces, sizeof(prc_exact_geom_face));
+        if (data->exact_geom_tess_part[geom_count].shells[i].faces == NULL)
         {
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of faces in prc_approximate_objects_exact_geom\n");
             return PRC_ERROR_MEMORY;
         }
-        data->exact_geom_tess[geom_count].shells[i].number_of_faces = num_faces_in_shell;
+        data->exact_geom_tess_part[geom_count].shells[i].number_of_faces = num_faces_in_shell;
     }
 
     /* Now loop on the shells and the faces */
     for (i = 0; i < num_shells; i++)
     {
-        for (j = 0; j < data->exact_geom_tess[geom_count].shells[i].number_of_faces; j++)
+        for (j = 0; j < data->exact_geom_tess_part[geom_count].shells[i].number_of_faces; j++)
         {
             switch (topo->tag)
             {
             case PRC_TYPE_TOPO_SingleWireBodyCompress:
             {
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
                  
                 prc_topo_single_wire_compress *body = topo->topo_single_wire_compress;
                 code = prc_sample_compressed_curve(ctx, data, i, j, &body->compressed_curve, body->curve_tolerance);
@@ -5314,13 +5314,13 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             }
             case PRC_TYPE_TOPO_SingleWireBody:
             {
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_WIRE;
 
                 prc_topo_single_wire_body *body = topo->topo_single_wire_body;
                 if (body->wire_body.is_stored == 1)
                 {
                     /* We have to find this one. For now we skip this case */
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
 
@@ -5340,7 +5340,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                     break;
                 }
                 default:
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
                 break;
@@ -5349,7 +5349,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             {
                 /* Lets get all the way to the surface geometry that we need to tessellate */
                 /* But we need to handle multiple faces */
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_3D;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_3D;
                 prc_topo_brep_data *brep_data = topo->topo_brep_data;
                 uint8_t orientation;
 
@@ -5357,26 +5357,26 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 if (brep_data->number_of_connex > 1 ||
                     brep_data->number_of_connex == 0)
                 {
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
                 if (brep_data->connex[0].is_stored == 1)
                 {
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
                 if (brep_data->connex[0].topo->topo_connex->shells[i].is_stored == 1)
                 {
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
                 if (brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].face.is_stored == 1)
                 {
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
                 orientation = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].orientation;
-                data->exact_geom_tess[geom_count].shells[i].faces[j].orientation = orientation;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].orientation = orientation;
                 prc_topo_face *topo_face = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].face.topo->topo_face;
                 code = prc_tessellate_surface(ctx, data, i, j, topo_face, orientation);
                 if (code < 0)
@@ -5392,12 +5392,12 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             case PRC_TYPE_TOPO_CoEdge:
             case PRC_TYPE_TOPO_Loop:
             case PRC_TYPE_TOPO_WireBody:
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                 break;
 
             case PRC_TYPE_TOPO_BrepDataCompress:
             {
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_3D;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_3D;
                 prc_topo_brep_data_compress *brep_data_comp = topo->topo_brep_data_compress;
                 uint8_t orientation = 0;
                 prc_compressed_face *compressed_face;
@@ -5406,11 +5406,11 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 if (!brep_data_comp->single_connex_test)
                 {
                     /* We don't handle multi-connex here yet */
-                    data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                     return 0;
                 }
 
-                data->exact_geom_tess[geom_count].shells[i].faces[j].orientation = orientation;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].orientation = orientation;
                 compressed_face = &brep_data_comp->single_connex.faces[j];
                 code = prc_tessellate_compressed_face(ctx, data, i, j,
                                     compressed_face, brep_data_comp->ref_data);
@@ -5424,11 +5424,11 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             }
             case PRC_TYPE_TOPO_Body:
             case PRC_TYPE_TOPO_Face:
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
                 break;
 
             default:
-                data->exact_geom_tess[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
+                data->exact_geom_tess_part[geom_count].shells[i].faces[j].type = PRC_EXACT_GEOM_UNKNOWN;
             }
         }
     }

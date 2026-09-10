@@ -700,6 +700,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
     int code;
     uint32_t i, j, k;
     int context_release_code;
+    uint32_t exact_geom_object_count = 0;
 
     prc_context *ctx = prc_api_new_context(NULL);
     if (ctx == NULL)
@@ -881,21 +882,17 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
        broken into shells and faces */
     if (totalExactGeomTess > 0)
     {
-        tesses_exact = new prc_api_tess[totalExactGeomTess];
+        exact_geom_object_count = prc_api_get_number_exact_geom_objects(ctx, data);
+        uint32_t tess_count = 0;
+        uint32_t shell_count, face_count;
+
+        tesses_exact = new prc_api_tess[exact_geom_object_count];
         if (tesses_exact == NULL)
         {
             printf("Scene::load: failed to allocate exact tessellation array\n");
             exit(1);
         }
-        uint32_t tess_count = 0;
-        uint32_t exact_geom_object_count = prc_api_get_number_exact_geom_objects(ctx, data);
-        uint32_t shell_count, face_count;
 
-        if (tesses_exact == NULL)
-        {
-            printf("Scene::load: failed to allocate exact geometry tessellation array\n");
-            exit(1);
-        }
         for (k = 0; k < exact_geom_object_count; k++)
         {
             /* Lets do some initialization of the api_tess */
@@ -927,19 +924,10 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
                 for (i = 0; i < face_count; i++)
                 {
                     code = prc_api_get_exact_geometry_tessellation_vertices(ctx,
-                                data, model_tree, k, j, i, tess_count,
-                                tesses_exact);
+                                data, model_tree, k, j, i, tess_count, tesses_exact);
                     if (code < 0)
                     {
                         printf("Scene::load: prc_api_get_exact_geometry_tessallation_vertices failed\n");
-                        exit(1);
-                    }
-                    tess_count++;
-                    if (tess_count > totalExactGeomTess)
-                    {
-                        /* This is an error we should not be in this situation */
-                        printf("Scene::load: totalExactGeomTess=%u but tess_count=%u\n",
-                            totalExactGeomTess, tess_count);
                         exit(1);
                     }
                 }
@@ -1071,7 +1059,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
 
     /* Clean up */
     prc_api_release_data(ctx, data, tesses, totalTesselations, tesses_line,
-        totalLineTesselations, tesses_exact, totalExactGeomTess, model_tree);
+        totalLineTesselations, tesses_exact, exact_geom_object_count, model_tree);
 
     for (uint32_t i = 0; i < totalTesselations; i++)
         delete[] tesses[i].tess_faces;
