@@ -187,3 +187,7 @@ target_include_directories(planar_roundtrip PRIVATE tests)
 add_executable(brep_entity_census tests/internal/brep_entity_census.c)
 target_link_libraries(brep_entity_census prc_static)
 target_include_directories(brep_entity_census PRIVATE tests)
+
+add_executable(compressed_tess_census tests/internal/compressed_tess_census.c)
+target_link_libraries(compressed_tess_census prc_static)
+target_include_directories(compressed_tess_census PRIVATE tests)
