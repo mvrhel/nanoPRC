@@ -646,6 +646,33 @@ prc_parse_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
                 "resynchronized from this point\n");
             return PRC_ERROR_PARSE;
 
+        case 14:
+        case 15:
+            /* The curve-type field is a prefix code: two bits, escaping to
+               four more when those read 11, which yields codes 12-15. Of
+               those, 12 is PRC_HCG_Ellipse (declared "reserved for future
+               use" in 7.9.21.9.1 "General", handled above) and 13 is
+               PRC_HCG_CompositeCurve, which is a real type with a real
+               structure (7.9.21.9.5, Table 239) and is decoded above.
+               14 and 15 are assigned no meaning anywhere in ISO 14739.
+
+               So reaching this arm means the four bits we just consumed were
+               not a curve type at all, and the most probable cause by a wide
+               margin is that the bit cursor is no longer on an entity
+               boundary. Saying that, rather than "unknown type", is the
+               difference between a reader that can resynchronize and one
+               that carries on emitting garbage: an unimplemented-feature
+               report invites the caller to skip and continue, and there is
+               nothing here to skip. Suggested by @datalogics-pgallot on
+               pdf-issues #806, where it costs nothing and is the only
+               zero-cost validity check the escape range affords. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Compressed curve type %d is unassigned in ISO 14739 (the escape range "
+                "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                entity_type);
+            return PRC_ERROR_PARSE;
+
         default:
             prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
             return PRC_ERROR_PARSE;
@@ -912,8 +939,24 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
                             "resynchronized from this point\n");
                         return PRC_ERROR_PARSE;
 
+                    case 14:
+                    case 15:
+                        /* Same reasoning as the identical case in
+                           prc_parse_compressed_curve above: the escape range
+                           12-15 assigns meaning only to 12 and 13, so 14 and
+                           15 are positive evidence that the bit cursor has
+                           left an entity boundary rather than evidence of an
+                           unimplemented feature. This dispatch is a second
+                           copy of the one above and needs the same arm. */
+                        prc_error(ctx, PRC_ERROR_PARSE,
+                            "Compressed curve type %d is unassigned in ISO 14739 (the escape range "
+                            "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                            "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                            entity_type);
+                        return PRC_ERROR_PARSE;
+
                     default:
-                        prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
+                        prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_ana_face_trim_loop\n", entity_type);
                         return PRC_ERROR_PARSE;
                     }
                 }
