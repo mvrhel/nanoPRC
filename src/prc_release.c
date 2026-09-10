@@ -2931,13 +2931,13 @@ prc_release_data(prc_context *ctx, prc_data *data)
         prc_free(ctx, data->views);
     }
 
-    if (data->exact_geom_capacity > 0 && data->exact_geom_tess != NULL)
+    if (data->exact_geom_tess_part_count > 0 && data->exact_geom_tess_part != NULL)
     {
-        for (k = 0; k < data->exact_geom_tess_count; k++)
+        for (k = 0; k < data->exact_geom_tess_part_count; k++)
         {
-            prc_release_exact_geometry_tess(ctx, &data->exact_geom_tess[k]);
+            prc_release_exact_geometry_tess(ctx, &data->exact_geom_tess_part[k]);
         }
-        prc_free(ctx, data->exact_geom_tess);
+        prc_free(ctx, data->exact_geom_tess_part);
     }
 
     prc_release_file_struct_schema(ctx);

@@ -4136,56 +4136,27 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                 {
                     /* This is a RI that has no tessellation but has exact geometry.
                        We will need to create tessellation data for this RI */
-                    if (data->exact_geom_capacity <= data->exact_geom_tess_count)
+                    if (data->exact_geom_tess_part_capacity <= data->exact_geom_tess_part_count)
                     {
-                        uint32_t old_capacity = data->exact_geom_capacity;
+                        uint32_t old_capacity = data->exact_geom_tess_part_count;
                         uint32_t new_capacity;
                         size_t old_bytes;
                         size_t new_bytes;
 
-                        if (data->exact_geom_capacity == 0)
+                        if (data->exact_geom_tess_part_capacity == 0)
                         {
-                            data->exact_geom_capacity = 1;
+                            data->exact_geom_tess_part_capacity = 1;
                         }
-
-                        /* Grow until the capacity actually covers the write below,
-                           not just once. A single doubling is not enough because
-                           exact_geom_tess_count does not advance by one per entry
-                           written here: prc_approximate_objects_exact_geom (called
-                           further down) fills exactly ONE array slot --
-                           exact_geom_tess[exact_geom_tess_count] -- but reports back
-                           the number of renderable TESSELLATIONS it produced, which
-                           is incremented once per face, and the caller adds that to
-                           exact_geom_tess_count. So the count can jump by an
-                           arbitrary amount in a single step.
-
-                           Measured on a real corpus file (5-14230-00.prc): the first
-                           part reports num_new = 7, taking the count 0 -> 7 while
-                           capacity was 2. On the next part the old single `*= 2` took
-                           capacity to 4, still below 7, and the writes immediately
-                           below then ran off the end of a 4-element array --
-                           a heap-buffer-overflow WRITE confirmed by AddressSanitizer
-                           at this function, and a hard segfault in release builds.
-
-                           NOTE for follow-up: growing to fit makes the write safe and
-                           is strictly a memory-safety fix, but the underlying count
-                           mismatch above is a separate question -- it leaves the
-                           slots between one written entry and the next zero-filled
-                           (shells == NULL, number_of_shells == 0), i.e. empty
-                           tessellations. Whether the array should instead carry one
-                           entry per produced tessellation is a design decision for
-                           the exact-geometry work and is deliberately NOT changed
-                           here. */
-                        while (data->exact_geom_capacity <= data->exact_geom_tess_count)
+                        if (data->exact_geom_tess_part_capacity <= data->exact_geom_tess_part_count)
                         {
-                            if (data->exact_geom_capacity > (UINT32_MAX / 2u))
+                            if (data->exact_geom_tess_part_capacity > (UINT32_MAX / 2u))
                             {
                                 prc_error(ctx, PRC_ERROR_MEMORY, "exact_geom_capacity overflow in prc_api_get_number_tessellations\n");
                                 return PRC_ERROR_MEMORY;
                             }
-                            data->exact_geom_capacity *= 2;
+                            data->exact_geom_tess_part_capacity *= 2;
                         }
-                        new_capacity = data->exact_geom_capacity;
+                        new_capacity = data->exact_geom_tess_part_capacity;
 
                         if ((size_t)new_capacity > (SIZE_MAX / sizeof(prc_exact_geom_tess)))
                         {
@@ -4196,27 +4167,27 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                         old_bytes = (size_t)old_capacity * sizeof(prc_exact_geom_tess);
                         new_bytes = (size_t)new_capacity * sizeof(prc_exact_geom_tess);
                         prc_exact_geom_tess *new_exact_geom_tess = (prc_exact_geom_tess *)prc_realloc(ctx,
-                            data->exact_geom_tess, new_bytes);
+                            data->exact_geom_tess_part, new_bytes);
                         if (new_exact_geom_tess == NULL)
                         {
                             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_api_get_number_tessellations\n");
                             return PRC_ERROR_MEMORY;
                         }
-                        data->exact_geom_tess = new_exact_geom_tess;
+                        data->exact_geom_tess_part = new_exact_geom_tess;
 
                         /* Initialize only the newly added tail to zero. */
-                        memset(((unsigned char *)data->exact_geom_tess) + old_bytes,
+                        memset(((unsigned char *)data->exact_geom_tess_part) + old_bytes,
                             0, new_bytes - old_bytes);
                     }
 
-                    data->exact_geom_tess[data->exact_geom_tess_count].biased_style_index = part->biased_style_index;
-                    data->exact_geom_tess[data->exact_geom_tess_count].file_index = i;
-                    data->exact_geom_tess[data->exact_geom_tess_count].topo_context_index = j;
-                    data->exact_geom_tess[data->exact_geom_tess_count].body_index = part->biased_body_index - 1;
-                    data->exact_geom_tess[data->exact_geom_tess_count].part_reserve_index = k;
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].biased_style_index = part->biased_style_index;
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].file_index = i;
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].topo_context_index = j;
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].body_index = part->biased_body_index - 1;
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].part_reserve_index = k;
 
                     /* Now approximate the exact geometry. Hand back the number
-                       of tessellations this . */
+                       of tessellations this object uses. */
                     uint32_t num_new_exact_geom_tess = 0;
                     code = prc_approximate_objects_exact_geom(ctx, data, &num_new_exact_geom_tess);
                     if (code < 0)
@@ -4225,8 +4196,11 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                         return code;
                     }
 
-                    data->exact_geom_tess_count += num_new_exact_geom_tess;
-                    *num_exact_geom_tess = data->exact_geom_tess_count;
+                    /* Across shells and faces, this may be many tessellations
+                       just for this one part */
+                    data->exact_geom_total_tess_count += num_new_exact_geom_tess;
+                    *num_exact_geom_tess = data->exact_geom_total_tess_count;
+                    data->exact_geom_tess_part_count++;
                 }
             }
         }
@@ -4538,7 +4512,7 @@ PRC_EXPORT uint32_t
 prc_api_get_number_exact_geom_objects(prc_context *ctx, prc_api_data data)
 {
     prc_data *data_in = (prc_data *)data;
-    return data_in->exact_geom_tess_count;
+    return data_in->exact_geom_tess_part_count;
 }
 
 PRC_EXPORT uint32_t
@@ -4546,12 +4520,12 @@ prc_api_get_number_exact_geom_shells(prc_context *ctx, prc_api_data data,
                                      uint32_t exact_geom_index)
 {
     prc_data *data_in = (prc_data *)data;
-    if (exact_geom_index >= data_in->exact_geom_tess_count)
+    if (exact_geom_index >= data_in->exact_geom_tess_part_count)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER, "Exact geometry index out of range in prc_api_get_number_exact_geom_shells\n");
         return 0;
     }
-    return data_in->exact_geom_tess[exact_geom_index].number_of_shells;
+    return data_in->exact_geom_tess_part[exact_geom_index].number_of_shells;
 }
 
 PRC_EXPORT uint32_t
@@ -4559,17 +4533,17 @@ prc_api_get_number_exact_geom_faces(prc_context *ctx, prc_api_data data,
     uint32_t exact_geom_index, uint32_t shell_index)
 {
     prc_data *data_in = (prc_data *)data;
-    if (exact_geom_index >= data_in->exact_geom_tess_count)
+    if (exact_geom_index >= data_in->exact_geom_tess_part_count)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER, "Exact geometry index out of range in prc_api_get_number_exact_geom_faces\n");
         return 0;
     }
-    if (shell_index >= data_in->exact_geom_tess[exact_geom_index].number_of_shells)
+    if (shell_index >= data_in->exact_geom_tess_part[exact_geom_index].number_of_shells)
     {
         prc_error(ctx, PRC_API_ERROR_PARAMETER, "Shell index out of range in prc_api_get_number_exact_geom_faces\n");
         return 0;
     }
-    return data_in->exact_geom_tess[exact_geom_index].shells[shell_index].number_of_faces;
+    return data_in->exact_geom_tess_part[exact_geom_index].shells[shell_index].number_of_faces;
 }
 
 /* The tess index in this case is an index into either part_details
