@@ -1427,83 +1427,60 @@ prc_release_tess(prc_context *ctx, prc_tess *data)
 
 void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
 
-/* Iterative (not recursive): composite curves nesting sub-curves follows the
-   file's structure, which is attacker-controlled and could otherwise drive
-   unbounded C-stack recursion. Uses an explicit heap-allocated work list
-   instead. Unlike prc_release_representation_item/prc_release_annotation_entities,
-   no cleanup-marker ordering is needed here: each curves[k].compressed_curve
-   is its own independent allocation (not an element of a shared array that
-   pointers are taken into), so freeing hcg_composite_curve.curves right after
-   queuing its elements is safe. */
+/* Releases what ONE curve owns, and nothing that merely points elsewhere.
+
+   A composite curve holds an array of prc_ref_or_compressed_curve records. It
+   owns that array. It does NOT own the prc_compressed_curve each record points
+   at: those are elements of the shared per-body curve table,
+   prc_nano_brep_compressed_data.curves, handed out by
+   prc_parse_ref_or_compressed_curve as &curves[current_curve_index++], and
+   released in one pass over that table by prc_release_nano_brep_data. Freeing
+   a sub-curve's contents from here as well would free them twice.
+
+   This function used to descend into them, through an explicit heap work list
+   so that file-controlled nesting depth could not drive unbounded C-stack
+   recursion. The work list is gone with the descent: there is no recursion to
+   guard against once each owner frees only its own allocation. The comment it
+   carried -- that each curves[k].compressed_curve "is its own independent
+   allocation (not an element of a shared array that pointers are taken into)"
+   -- was the mistake, and it is the opposite of the truth. It went unnoticed
+   because no file in any corpus we have contains a composite curve, so the
+   descent never ran.
+
+   The other ownership model does exist, which is what made the error easy to
+   make: prc_parse_ana_face_trim_loop allocates each trim curve independently,
+   and prc_release_trim_loop_curves frees the struct itself after calling this
+   on it. That is the caller's business, not this function's -- here, the rule
+   is simply that the struct is never freed, only its contents. */
 void
 prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data)
 {
-    prc_compressed_curve **worklist;
-    uint32_t worklist_size = 0;
-    uint32_t worklist_capacity = 64;
-
     if (data == NULL)
         return;
 
-    worklist = (prc_compressed_curve **)prc_malloc(ctx, worklist_capacity * sizeof(prc_compressed_curve *));
-    if (worklist == NULL)
-        return;
-    worklist[worklist_size++] = data;
-
-    while (worklist_size > 0)
+    switch (data->curve_type)
     {
-        prc_compressed_curve *curr = worklist[--worklist_size];
-        uint32_t k;
+    case PRC_HCG_Line:
+    case PRC_HCG_Circle:
+        break;
 
-        if (curr == NULL)
-            continue;
+    case PRC_HCG_BsplineHermiteCurve:
+        if (data->hcg_bspline_hermite_curve.points != NULL)
+            prc_free(ctx, data->hcg_bspline_hermite_curve.points);
+        if (data->hcg_bspline_hermite_curve.tangents != NULL)
+            prc_free(ctx, data->hcg_bspline_hermite_curve.tangents);
+        break;
 
-        switch (curr->curve_type)
-        {
-        case PRC_HCG_Line:
-        case PRC_HCG_Circle:
-            break;
+    case PRC_HCG_CompositeCurve:
+        /* The record array only. Each record's compressed_curve belongs to the
+           shared table -- see the header comment. */
+        if (data->hcg_composite_curve.curves != NULL)
+            prc_free(ctx, data->hcg_composite_curve.curves);
+        break;
 
-        case  PRC_HCG_BsplineHermiteCurve:
-            if (curr->hcg_bspline_hermite_curve.points != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.points);
-            if (curr->hcg_bspline_hermite_curve.tangents != NULL)
-                prc_free(ctx, curr->hcg_bspline_hermite_curve.tangents);
-            break;
-
-        case PRC_HCG_CompositeCurve:
-            if (curr->hcg_composite_curve.curves != NULL)
-            {
-                for (k = 0; k < curr->hcg_composite_curve.number_of_curves; k++)
-                {
-                    if (curr->hcg_composite_curve.curves[k].compressed_curve != NULL)
-                    {
-                        if (worklist_size >= worklist_capacity)
-                        {
-                            prc_compressed_curve **new_worklist;
-                            worklist_capacity *= 2;
-                            new_worklist = (prc_compressed_curve **)prc_realloc(ctx, worklist,
-                                worklist_capacity * sizeof(prc_compressed_curve *));
-                            if (new_worklist == NULL)
-                            {
-                                prc_free(ctx, worklist);
-                                return;
-                            }
-                            worklist = new_worklist;
-                        }
-                        worklist[worklist_size++] = curr->hcg_composite_curve.curves[k].compressed_curve;
-                    }
-                }
-                prc_free(ctx, curr->hcg_composite_curve.curves);
-            }
-            break;
-
-        default:
-            break;
-        }
+    default:
+        break;
     }
-
-    prc_free(ctx, worklist);
 }
 
 static void
@@ -1548,19 +1525,12 @@ prc_release_content_body(prc_context *ctx, prc_content_body *data)
     prc_release_base_topology(ctx, &data->base_topology);
 }
 
-static void
-prc_release_hcg_bspline_hermite_curve(prc_context *ctx, prc_hcg_bspline_hermite_curve *data)
-{
-    if (data->points != NULL)
-    {
-        prc_free(ctx, data->points);
-    }
-
-    if (data->tangents != NULL)
-    {
-        prc_free(ctx, data->tangents);
-    }
-}
+/* prc_release_hcg_bspline_hermite_curve used to live here, freeing a Hermite
+   curve's points and tangents for prc_release_trim_loop_curves alone. It is
+   gone because it was the second place that knew how to free a curve, and the
+   first -- prc_release_compressed_curve -- knows how to free all four types.
+   Keeping both is what let a trim loop's curves be released by type-specific
+   code that had never heard of composite curves. There is now one such place. */
 
 static void
 prc_release_trim_loop_curves(prc_context *ctx, prc_ana_face_trim_loop *data)
@@ -1573,10 +1543,19 @@ prc_release_trim_loop_curves(prc_context *ctx, prc_ana_face_trim_loop *data)
         {
             if (data->trim_curves[k].compressed_curve != NULL)
             {
-                if (data->trim_curves[k].compressed_curve->curve_type == PRC_HCG_BsplineHermiteCurve)
-                {
-                    prc_release_hcg_bspline_hermite_curve(ctx, &data->trim_curves[k].compressed_curve->hcg_bspline_hermite_curve);
-                }
+                /* Delegates rather than special-casing one curve type. This
+                   used to release only PRC_HCG_BsplineHermiteCurve, which was
+                   sufficient while a composite curve in a trim loop was never
+                   parsed: the only other type carrying an allocation is
+                   PRC_HCG_CompositeCurve, whose sub-curve array was therefore
+                   always empty here. Now that it is parsed, dropping its
+                   curves array and every curve nested inside it would leak,
+                   and the nesting is file-controlled so the depth is not
+                   bounded by anything we choose. prc_release_compressed_curve
+                   already walks that structure iteratively for exactly this
+                   reason; the Line and Circle cases it covers own no memory,
+                   so routing them through it costs nothing. */
+                prc_release_compressed_curve(ctx, data->trim_curves[k].compressed_curve);
                 prc_free(ctx, data->trim_curves[k].compressed_curve);
             }
         }
@@ -1769,9 +1748,19 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
             }
             if (compressed_data->curves != NULL)
             {
-                for (uint32_t k = 0; k < compressed_data->current_curve_index; k++)
+                /* The table owns both the slots and their contents. Sweeping
+                   the whole capacity rather than up to current_curve_index:
+                   slots are allocated on demand and the index is advanced
+                   before the curve is parsed, so a parse that failed part way
+                   can leave an allocated slot at or past the index. Unused
+                   slots are null and cost nothing to skip. */
+                for (uint32_t k = 0; k < compressed_data->curves_capacity; k++)
                 {
-                    prc_release_compressed_curve(ctx, &compressed_data->curves[k]);
+                    if (compressed_data->curves[k] != NULL)
+                    {
+                        prc_release_compressed_curve(ctx, compressed_data->curves[k]);
+                        prc_free(ctx, compressed_data->curves[k]);
+                    }
                 }
                 prc_free(ctx, compressed_data->curves);
             }

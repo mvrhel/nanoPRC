@@ -53,3 +53,8 @@ add_executable(test_write_tree tests/unit/test_write_tree.c)
 target_link_libraries(test_write_tree prc_static)
 target_include_directories(test_write_tree PRIVATE tests)
 add_test(NAME test_write_tree COMMAND test_write_tree)
+
+add_executable(test_compressed_curve_release tests/unit/test_compressed_curve_release.c)
+target_link_libraries(test_compressed_curve_release prc_static)
+target_include_directories(test_compressed_curve_release PRIVATE tests)
+add_test(NAME test_compressed_curve_release COMMAND test_compressed_curve_release)

@@ -3898,10 +3898,21 @@ struct prc_nano_brep_compressed_data_s
     prc_compressed_vertex *vertices;
     prc_unsigned_int number_of_edge_refs;
     uint32_t curves_capacity;
-    prc_compressed_curve *curves;
+    /* Table of pointers, not a contiguous array of curves. Growing the table
+       must not move the curves themselves: records built by
+       prc_parse_ref_or_compressed_curve hold a pointer to their curve for the
+       whole parse, and a composite curve is still being written through its
+       pointer while its own sub-curves are being appended here. A contiguous
+       array reallocating under those writes is a use-after-free; an array of
+       pointers cannot, because only the array moves. */
+    prc_compressed_curve **curves;
     uint32_t number_bits_for_encoding;
     uint32_t current_vertex_index; /* Index of next vertex to be added */
     uint32_t current_curve_index; /* Index of next curve to be added */
+    /* Nesting depth of composite curves currently being parsed. A composite
+       curve may contain composite curves, to a depth the file chooses, so the
+       parser's own C-stack recursion is file-controlled and must be capped. */
+    uint32_t curve_nesting_depth;
     uint8_t compressed_iso_spline; /* Ugly about this one. True if curve is being used as trim boundry for PRC_HCG_IsoNURBS */
     uint8_t is_iso_type; /* True if the face being decoded is an iso type */
     uint8_t curve_trimming_face; /* Another ugly one */
