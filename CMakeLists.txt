@@ -109,6 +109,23 @@ add_library(nano_prc SHARED ${PRC_CORE_SOURCES})
 # Specify C99 Standard
 set_property(TARGET nano_prc PROPERTY C_STANDARD 99)
 
+# Make PRC_EXPORT the single gate on the exported surface, on every platform.
+#
+# On Windows it already is: PRC_EXPORT expands to __declspec(dllexport) and
+# nothing else in the build exports anything, so a non-static function is
+# simply not in the DLL. On Linux and macOS, PRC_EXPORT expands to
+# visibility("default") against translation units that are default-visible
+# anyway, so every non-static function in the library lands in
+# libnano_prc.so's dynamic symbol table -- exported, interposable, and
+# implicitly part of the ABI. The same source therefore exports very
+# different sets depending on platform, and `static` rather than PRC_EXPORT
+# is what actually holds the POSIX list down.
+#
+# Deliberately NOT set on prc_static below: tools in tests/internal link it
+# and call internal functions directly by declaring them locally, which is
+# the whole reason that target exists.
+set_property(TARGET nano_prc PROPERTY C_VISIBILITY_PRESET hidden)
+
 # Include directories
 target_include_directories(nano_prc PUBLIC "include")
 
