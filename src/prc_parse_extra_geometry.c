@@ -25,6 +25,11 @@
 #define CURVES_PERLOOP_INITIAL_SIZE 10
 #define BREP_VERTEX_INITIAL_SIZE 1000
 #define BREP_EDGE_INITIAL_SIZE 1000
+/* Deepest chain of composite curves containing composite curves the parser
+   will follow. The nesting is file-controlled and each level costs a C stack
+   frame, so it needs a bound; 32 is far above anything a real assembly uses,
+   where composite curves nest once if at all. */
+#define PRC_MAX_CURVE_NESTING 32
 /* Generous upper bound on a NURBS surface's control-point grid (u*v). No
    legitimate CAD model approaches this; it exists to reject file-supplied
    counts before their product is used for allocation sizing/loop bounds. */
@@ -462,6 +467,20 @@ prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
 
     if (data->number_of_curves > 0)
     {
+        /* number_of_curves comes straight from the file. Each sub-curve costs
+           at least one bit (RefOrCompressedCurve's leading flag), so a count
+           that cannot be backed by the remaining input is malformed -- catch
+           it here rather than by attempting the allocation, which for a
+           plausible-looking count could succeed and then fail deep in the
+           loop. Same guard as prc_bitread_string uses on string size. */
+        if ((int64_t)data->number_of_curves > bit_state->bit_count)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Composite curve declares %u sub-curves, more than the remaining "
+                "input could encode\n", data->number_of_curves);
+            return PRC_ERROR_PARSE;
+        }
+
         data->curves = (prc_ref_or_compressed_curve *)prc_calloc(ctx, data->number_of_curves,
             sizeof(prc_ref_or_compressed_curve));
         if (data->curves == NULL)
@@ -469,6 +488,21 @@ prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
             prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate data->curves\n");
             return PRC_ERROR_MEMORY;
         }
+
+        /* A sub-curve may itself be a composite, so this recurses to a depth
+           the file chooses. Cap it: the C stack is the thing being protected,
+           and the release path went to the same trouble for the same reason.
+           PRC_MAX_CURVE_NESTING is far above anything a real assembly needs --
+           composite curves in practice nest once, if at all. */
+        if (compressed_data->curve_nesting_depth >= PRC_MAX_CURVE_NESTING)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Composite curves nested more than %d deep; refusing to recurse further\n",
+                PRC_MAX_CURVE_NESTING);
+            return PRC_ERROR_PARSE;
+        }
+        compressed_data->curve_nesting_depth++;
+
         for (k = 0; k < data->number_of_curves; k++)
         {
             code = prc_parse_ref_or_compressed_curve(ctx, bit_state, compressed_data,
@@ -476,9 +510,11 @@ prc_parse_hcg_composite_curve(prc_context *ctx, prc_bit_state *bit_state,
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_ref_or_compressed_curve\n");
+                compressed_data->curve_nesting_depth--;
                 return code;
             }
         }
+        compressed_data->curve_nesting_depth--;
     }
     return 0;
 }
@@ -716,6 +752,63 @@ prc_parse_unique_vertex(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
+/* Returns a stable pointer to curve slot `index` of the shared table, growing
+   the table and allocating the slot if needed.
+
+   "Stable" is the whole point: the returned pointer stays valid for the life
+   of the table, because growth reallocates only the array of pointers and
+   never the curves. Callers hold these across arbitrary further parsing --
+   prc_parse_ref_or_compressed_curve stores one in its record and then parses a
+   curve *through* it, and if that curve is a composite, parsing it appends its
+   sub-curves to this same table. With a contiguous array those appends could
+   reallocate out from under the write in progress. */
+static prc_compressed_curve *
+prc_curve_table_slot(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data,
+    uint32_t index)
+{
+    if (index >= compressed_data->curves_capacity)
+    {
+        prc_compressed_curve **new_curves;
+        uint32_t new_capacity = compressed_data->curves_capacity;
+
+        /* Doubling until it covers index, rather than once, so the table stays
+           correct if a caller ever skips ahead. */
+        while (new_capacity <= index)
+        {
+            if (new_capacity > UINT32_MAX / 2)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Curve table index %u is implausible\n", index);
+                return NULL;
+            }
+            new_capacity *= 2;
+        }
+
+        new_curves = (prc_compressed_curve **)prc_realloc(ctx, compressed_data->curves,
+            new_capacity * sizeof(prc_compressed_curve *));
+        if (new_curves == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to reallocate compressed_data->curves\n");
+            return NULL;
+        }
+        memset(new_curves + compressed_data->curves_capacity, 0,
+            (new_capacity - compressed_data->curves_capacity) * sizeof(prc_compressed_curve *));
+        compressed_data->curves = new_curves;
+        compressed_data->curves_capacity = new_capacity;
+    }
+
+    if (compressed_data->curves[index] == NULL)
+    {
+        compressed_data->curves[index] = (prc_compressed_curve *)prc_calloc(ctx, 1,
+            sizeof(prc_compressed_curve));
+        if (compressed_data->curves[index] == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate a curve table slot\n");
+            return NULL;
+        }
+    }
+    return compressed_data->curves[index];
+}
+
 /* Add an empty place holder for a curve that must be deduced from the other
    curves. In this case, these deduced curves may need to be referenced by
    later objects. We wont compute what the curve is, until we process the
@@ -725,8 +818,11 @@ static int
 prc_parse_add_deduced_curve(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data,
     prc_ref_or_compressed_curve *data)
 {
-    uint32_t curve_index = compressed_data->current_curve_index;
-    prc_compressed_curve *nano_data = &compressed_data->curves[curve_index];
+    prc_compressed_curve *nano_data = prc_curve_table_slot(ctx, compressed_data,
+        compressed_data->current_curve_index);
+
+    if (nano_data == NULL)
+        return PRC_ERROR_MEMORY;
 
     memset(nano_data, 0, sizeof(*nano_data));
     nano_data->curve_type = PRC_HCG_Deduced;
@@ -735,22 +831,6 @@ prc_parse_add_deduced_curve(prc_context *ctx, prc_nano_brep_compressed_data *com
     data->curve_is_not_already_stored = 1;
 
     compressed_data->current_curve_index++;
-    if (compressed_data->current_curve_index >= compressed_data->curves_capacity)
-    {
-        prc_compressed_curve *new_curves;
-        /* Need to reallocate */
-        compressed_data->curves_capacity *= 2;
-        new_curves = (prc_compressed_curve *)prc_realloc(ctx,
-            compressed_data->curves,
-            compressed_data->curves_capacity * sizeof(prc_compressed_curve));
-        if (new_curves == NULL)
-        {
-            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to reallocate compressed_data->curves\n");
-            return PRC_ERROR_MEMORY;
-        }
-        compressed_data->curves = new_curves;
-        data->compressed_curve = &compressed_data->curves[curve_index];
-    }
     return 0;
 }
 
@@ -760,39 +840,33 @@ prc_parse_ref_or_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
     prc_nano_brep_compressed_data *compressed_data, prc_ref_or_compressed_curve *data)
 {
     int code;
-    prc_compressed_curve *nano_data = &compressed_data->curves[compressed_data->current_curve_index];
+    prc_compressed_curve *nano_data;
 
     data->curve_is_not_already_stored = prc_bitread_bit(ctx, bit_state);
     data->is_deduced_curve = 0;
     if (data->curve_is_not_already_stored)
     {
         /* Then we need to parse the compressed curve. Also set the reference
-           number to what we are using */
+           number to what we are using.
+
+           The slot is claimed and the index advanced BEFORE parsing into it.
+           A composite curve appends its own sub-curves to this same table
+           while it is being parsed, so leaving the index unadvanced would hand
+           the first sub-curve the slot this curve is already writing to. */
         data->index_compressed_curve = compressed_data->current_curve_index;
+        nano_data = prc_curve_table_slot(ctx, compressed_data,
+            compressed_data->current_curve_index);
+        if (nano_data == NULL)
+            return PRC_ERROR_MEMORY;
+        compressed_data->current_curve_index++;
+        data->compressed_curve = nano_data;
+
         code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
             nano_data);
         if (code < 0)
         {
             prc_error(ctx, code, "Failed in prc_parse_compressed_curve\n");
             return code;
-        }
-        data->compressed_curve = nano_data;
-        compressed_data->current_curve_index++;
-
-        if (compressed_data->current_curve_index >= compressed_data->curves_capacity)
-        {
-            prc_compressed_curve *new_curves;
-            /* Need to reallocate */
-            compressed_data->curves_capacity *= 2;
-            new_curves = (prc_compressed_curve *)prc_realloc(ctx,
-                compressed_data->curves,
-                compressed_data->curves_capacity * sizeof(prc_compressed_curve));
-            if (new_curves == NULL)
-            {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to reallocate compressed_data->curves\n");
-                return PRC_ERROR_MEMORY;
-            }
-            compressed_data->curves = new_curves;
         }
     }
     else
@@ -888,6 +962,11 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
                     case PRC_HCG_Line:
                         code = prc_parse_hcg_line(ctx, bit_state, compressed_data,
                             &current_curve->compressed_curve->hcg_line, 0);
+                        if (code < 0)
+                        {
+                            prc_error(ctx, code, "Failed in prc_parse_hcg_line\n");
+                            return code;
+                        }
                         break;
 
                     case PRC_HCG_Circle:
@@ -911,8 +990,12 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
                         break;
 
                     case PRC_HCG_CompositeCurve:
-                        //  code = prc_parse_hcg_composite_curve(ctx, bit_state, compressed_data,
-                        //      &current_curve->compressed_curve->hcg_composite_curve);
+                        /* read_tag = 0: the type has already been consumed by
+                           prc_bitread_compressed_entity_type above, same as
+                           every other arm here and the matching call in
+                           prc_parse_compressed_curve. */
+                        code = prc_parse_hcg_composite_curve(ctx, bit_state, compressed_data,
+                            &current_curve->compressed_curve->hcg_composite_curve, 0);
                         if (code < 0)
                         {
                             prc_error(ctx, code, "Failed in prc_parse_hcg_composite_curve\n");
@@ -4044,8 +4127,10 @@ prc_parse_brep_data_compress(prc_context *ctx, prc_bit_state *bit_state,
     }
     compressed_data->vertices_capacity = BREP_VERTEX_INITIAL_SIZE;
 
-    compressed_data->curves = (prc_compressed_curve *)prc_calloc(ctx,
-        BREP_EDGE_INITIAL_SIZE, sizeof(prc_compressed_curve));
+    /* Slots are allocated on demand by prc_curve_table_slot, so this is a
+       table of null pointers rather than of curves. */
+    compressed_data->curves = (prc_compressed_curve **)prc_calloc(ctx,
+        BREP_EDGE_INITIAL_SIZE, sizeof(prc_compressed_curve *));
     if (compressed_data->curves == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_brep_data_compress\n");
@@ -4057,6 +4142,7 @@ prc_parse_brep_data_compress(prc_context *ctx, prc_bit_state *bit_state,
 
     compressed_data->current_curve_index = 0;
     compressed_data->current_vertex_index = 0;
+    compressed_data->curve_nesting_depth = 0;
 
     /* Section 7.9.21.11 */
     compressed_data->tolerance = data->brep_data_compressed_tolerance / 100.0;

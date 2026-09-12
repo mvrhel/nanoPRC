@@ -3466,7 +3466,16 @@ prc_get_curve_by_id(prc_context *ctx, prc_nano_brep_compressed_data *compressed_
         prc_error(ctx, PRC_ERROR_PARSE, "Invalid compressed curve index: %u\n", index_compressed_curve);
         return PRC_ERROR_PARSE;
     }
-    *curve = &compressed_data->curves[index_compressed_curve];
+    /* Slots are allocated on demand, so an in-range index can still be null if
+       the curve it names was never reached -- a truncated or malformed file.
+       Returning null here would push the check onto every caller. */
+    if (compressed_data->curves[index_compressed_curve] == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE, "Compressed curve %u was never parsed\n",
+            index_compressed_curve);
+        return PRC_ERROR_PARSE;
+    }
+    *curve = compressed_data->curves[index_compressed_curve];
     return 0;
 }
 
