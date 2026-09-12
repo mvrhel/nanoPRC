@@ -14,8 +14,10 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "prc_diag_env.h"
 #include "prc_parse_file_structure.h"
 #include "prc_parse_common.h"
 #include "prc_parse_extra_geometry.h"
@@ -784,6 +786,16 @@ prc_parse_file_geometry(prc_context *ctx, prc_filestructure *file_struct)
     prc_asm_file_structure_geometry *data;
 
     prc_init_bit_state(ctx, &bit_state, file_struct->geometry_unzipped, file_struct->geometry_size);
+
+    /* Names the origin that PRC_DIAG_CET_OFFSETS reports against, so a trace
+       can be compared with another implementation without having to guess
+       where a run of offsets is measured from. Bit positions in the [cet]
+       lines that follow are counted from this point. The file structure index
+       is printed by the caller in prc_parse_main.c, which is the only place
+       that holds it. */
+    if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+        fprintf(stderr, "[cet] --- geometry section begins, %u bytes ---\n",
+            (unsigned)file_struct->geometry_size);
 
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_FileStructureGeometry, &type);
     if (code < 0)

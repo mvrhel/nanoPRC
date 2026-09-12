@@ -185,6 +185,16 @@ int main(int argc, char **argv)
     fprintf(out, "is_point_color %u\n", parsed->is_point_color);
     fprintf(out, "is_multiple_line_attribute %u\n", parsed->is_multiple_line_attribute);
     fprintf(out, "no_texture %u\n", parsed->no_texture);
+    /* Texture parameter block (Table 176 CompressedTextureParameter), reached
+       only when no_texture is FALSE. texture_parameters holds UV pairs, two
+       floats per vertex, which is why its size is compared against
+       point_array_size / 3 here rather than reported bare -- the ratio is the
+       measurement, not the count. */
+    fprintf(out, "texture_reference_array_size %u\n",
+        (parsed->texture_data != NULL) ? parsed->texture_data->reference_array_size : 0u);
+    fprintf(out, "texture_parameters_size %u\n",
+        (parsed->texture_data != NULL) ? parsed->texture_data->texture_parameters_size : 0u);
+    fprintf(out, "vertices %u\n", parsed->point_array_size / 3u);
     fprintf(out, "has_behaviors %u\n", parsed->has_behaviors);
     fprintf(out, "line_attribute_array_size %u\n", parsed->line_attribute_array_size);
     fprintf(out, "line_attribute_array");

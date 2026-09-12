@@ -646,6 +646,26 @@ prc_parse_compressed_curve(prc_context *ctx, prc_bit_state *bit_state,
                 "resynchronized from this point\n");
             return PRC_ERROR_PARSE;
 
+        case 14:
+        case 15:
+            /* Not reachable as the reader currently stands, and kept
+               deliberately. prc_bitread_compressed_entity_type resolves the
+               whole escape prefix itself and rejects 14 and 15 there, with
+               this same diagnosis, so a caller only ever sees one of the four
+               assigned types or an error -- see the bit2 != 0 arm in
+               prc_bit.c for the reasoning. This arm exists so that the type
+               dispatch stays exhaustive over the prefix code rather than
+               relying on a check one layer down: if the reader is ever changed
+               to pass the raw code up, an unassigned type must not fall into
+               the "unknown entity type" default, which invites a caller to
+               skip and continue when there is nothing here to skip. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Compressed curve type %d is unassigned in ISO 14739 (the escape range "
+                "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                entity_type);
+            return PRC_ERROR_PARSE;
+
         default:
             prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
             return PRC_ERROR_PARSE;
@@ -912,8 +932,26 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
                             "resynchronized from this point\n");
                         return PRC_ERROR_PARSE;
 
+                    case 14:
+                    case 15:
+                        /* Unreachable for the same reason as the identical
+                           case in prc_parse_compressed_curve above: this
+                           dispatch is fed by
+                           prc_bitread_compressed_entity_type_analoop, which
+                           resolves the escape prefix itself and rejects 14 and
+                           15 there. Kept so that this dispatch, a second copy
+                           of the one above, stays exhaustive over the prefix
+                           code and does not depend on that check remaining
+                           where it is. */
+                        prc_error(ctx, PRC_ERROR_PARSE,
+                            "Compressed curve type %d is unassigned in ISO 14739 (the escape range "
+                            "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                            "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                            entity_type);
+                        return PRC_ERROR_PARSE;
+
                     default:
-                        prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_compressed_curve\n", entity_type);
+                        prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_parse_ana_face_trim_loop\n", entity_type);
                         return PRC_ERROR_PARSE;
                     }
                 }

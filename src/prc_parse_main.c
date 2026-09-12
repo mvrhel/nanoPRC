@@ -1091,6 +1091,8 @@ prc_open_contents(prc_context *ctx, const char* infile)
                 }
 #endif
                 /* This is the exact geometry data */
+                if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+                    fprintf(stderr, "[cet] === file structure %u ===\n", k);
                 code = prc_parse_file_geometry(ctx, &file_struct[k]);
                 if (code < 0)
                 {

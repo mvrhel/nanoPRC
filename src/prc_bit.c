@@ -952,6 +952,31 @@ prc_bitread_int_variable_bit(prc_context *ctx, prc_bit_state *state, uint32_t bi
         return value;
 }
 
+/* Report where a CompressedEntityType was read and what it resolved to, for
+   comparison against another implementation reading the same file.
+
+   The offset is in bits from the start of the section the bit state was
+   initialized over -- for exact geometry, the file structure's decompressed
+   geometry section -- and names the first bit of the type field, before any of
+   it is consumed. Two readers that agree on the offset and disagree on the
+   code have a decode difference; two that disagree on the offset have a
+   desync, and the earlier one is the one to trust. That distinction is not
+   otherwise observable from outside a reader, which is why this exists.
+
+   Gated on PRC_DIAG_CET_OFFSETS, and written to stderr rather than the error
+   stack because the error stack only survives as far as the next successful
+   parse, and most of these reads succeed. */
+static void
+prc_diag_report_entity_type(prc_context *ctx, int64_t cet_start, int is_curve,
+    int resolved_code)
+{
+    if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") == NULL)
+        return;
+    (void)ctx;
+    fprintf(stderr, "[cet] bit=%lld is_curve=%d code=%d\n",
+        (long long)cet_start, is_curve, resolved_code);
+}
+
 /* A special version for dealin with the ana curves */
 int
 prc_bitread_compressed_entity_type_analoop(prc_context *ctx, prc_bit_state *state,
@@ -959,7 +984,10 @@ prc_bitread_compressed_entity_type_analoop(prc_context *ctx, prc_bit_state *stat
 {
     uint8_t bit0, bit1, bit2, bit3;
     uint32_t value;
-
+    /* Start of the CompressedEntityType, captured before any of its bits are
+       consumed. Only the reporting is gated, not the capture, because by the
+       time the gate could be tested the position has already moved. */
+    int64_t cet_start = state->bit_position;
 
     /* Read the first two bits */
     bit0 = prc_bitread_bit(ctx, state);
@@ -973,19 +1001,25 @@ prc_bitread_compressed_entity_type_analoop(prc_context *ctx, prc_bit_state *stat
 
         if (bit2 != 0)
         {
-            prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_bit_read_compressed_entity_type\n", value);
+            prc_diag_report_entity_type(ctx, cet_start, 1,
+                (int)(12u + ((uint32_t)bit2 << 1) + (uint32_t)bit3));
+            /* Codes 14 and 15. See the matching case in
+               prc_bitread_compressed_entity_type below for why these are
+               reported as a loss of bit alignment rather than as an
+               unimplemented type. Reported here rather than being passed up
+               to the dispatch in prc_parse_extra_geometry.c, because the two
+               escape codes that do have meanings are resolved here too and
+               nothing above this point ever sees a 14 or a 15. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Compressed curve type %u is unassigned in ISO 14739 (the escape range "
+                "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                12u + ((uint32_t)bit2 << 1) + (uint32_t)bit3);
             return PRC_ERROR_PARSE;
         }
-        if (bit3 == 0)
-        {
-            *entity_type = PRC_HCG_Ellipse;
-            return 0;
-        }
-        else
-        {
-            *entity_type = PRC_HCG_CompositeCurve;
-            return 0;
-        }
+        *entity_type = (bit3 == 0) ? PRC_HCG_Ellipse : PRC_HCG_CompositeCurve;
+        prc_diag_report_entity_type(ctx, cet_start, 1, (int)*entity_type);
+        return 0;
     }
     else
     {
@@ -994,23 +1028,26 @@ prc_bitread_compressed_entity_type_analoop(prc_context *ctx, prc_bit_state *stat
         {
         case 0:
             *entity_type = PRC_HCG_Line;
-            return 0;
+            break;
 
         case 1:
             *entity_type = PRC_HCG_Circle;
-            return 0;
+            break;
 
         case 2:
             *entity_type = PRC_HCG_BsplineHermiteCurve;
-            return 0;
+            break;
 
         default:
+            /* Unreachable: value is (bit0 << 1) | bit1 with the 11 case
+               already taken by the escape branch, so it is 0, 1 or 2. Kept so
+               the switch stays total over a two-bit field. */
             prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_bit_read_compressed_entity_type\n", value);
             return PRC_ERROR_PARSE;
-
         }
+        prc_diag_report_entity_type(ctx, cet_start, 1, (int)*entity_type);
+        return 0;
     }
-
 }
 
 /* This may need to be checked for bit order in the is_curve case */
@@ -1020,6 +1057,12 @@ prc_bitread_compressed_entity_type(prc_context *ctx, prc_bit_state *state,
 {
     uint8_t bit0, bit1, bit2, bit3;
     uint32_t value;
+    /* Position of the start of the CompressedEntityType, before any of its
+       bits are consumed, measured from the start of the section this bit
+       state was initialized over. Captured unconditionally because it must be
+       read before the first prc_bitread_bit call; only the reporting is
+       gated. See prc_diag_report_entity_type below. */
+    int64_t cet_start = state->bit_position;
 
     *is_curve = prc_bitread_bit(ctx, state);
 
@@ -1037,19 +1080,41 @@ prc_bitread_compressed_entity_type(prc_context *ctx, prc_bit_state *state,
 
             if (bit2 != 0)
             {
-                prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_bit_read_compressed_entity_type\n", value);
+                /* The curve-type field is a prefix code: two bits, escaping to
+                   four more when those read 11, which yields codes 12-15. Of
+                   those, 12 is PRC_HCG_Ellipse -- declared "reserved for future
+                   use" in 7.9.21.9.1 "General", with a type code but no defined
+                   structure -- and 13 is PRC_HCG_CompositeCurve, a real type
+                   with a real layout (7.9.21.9.5, Table 239). 14 and 15 are
+                   assigned no meaning anywhere in ISO 14739.
+
+                   So reaching here means the four bits just consumed were not a
+                   curve type at all, and the most probable cause by a wide
+                   margin is that the bit cursor is no longer on an entity
+                   boundary. Saying that, rather than "unknown type", is the
+                   difference between a reader that can resynchronize and one
+                   that carries on emitting garbage: an unimplemented-feature
+                   report invites the caller to skip and continue, and there is
+                   nothing here to skip. Suggested by @datalogics-pgallot on
+                   pdf-issues #806, where it costs nothing and is the only
+                   zero-cost validity check the escape range affords.
+
+                   Note this test is what makes codes 14 and 15 unreachable
+                   from the type dispatch in prc_parse_extra_geometry.c: the
+                   escape is fully resolved here, so a caller only ever sees
+                   one of the four assigned curve types or an error. */
+                prc_error(ctx, PRC_ERROR_PARSE,
+                    "Compressed curve type %u is unassigned in ISO 14739 (the escape range "
+                    "12-15 defines only 12 and 13); reading one indicates the bitstream is "
+                    "no longer aligned to an entity boundary, not an unimplemented feature\n",
+                    12u + ((uint32_t)bit2 << 1) + (uint32_t)bit3);
+                prc_diag_report_entity_type(ctx, cet_start, 1,
+                    (int)(12u + ((uint32_t)bit2 << 1) + (uint32_t)bit3));
                 return PRC_ERROR_PARSE;
             }
-            if (bit3 == 0)
-            {
-                *entity_type = PRC_HCG_Ellipse;
-                return 0;
-            }
-            else
-            {
-                *entity_type = PRC_HCG_CompositeCurve;
-                return 0;
-            }
+            *entity_type = (bit3 == 0) ? PRC_HCG_Ellipse : PRC_HCG_CompositeCurve;
+            prc_diag_report_entity_type(ctx, cet_start, 1, (int)*entity_type);
+            return 0;
         }
         else
         {
@@ -1058,27 +1123,34 @@ prc_bitread_compressed_entity_type(prc_context *ctx, prc_bit_state *state,
             {
                 case 0:
                     *entity_type = PRC_HCG_Line;
-                    return 0;
+                    break;
 
                 case 1:
                     *entity_type = PRC_HCG_Circle;
-                    return 0;
+                    break;
 
                 case 2:
                     *entity_type = PRC_HCG_BsplineHermiteCurve;
-                    return 0;
+                    break;
 
                 default:
+                    /* Unreachable: value is (bit0 << 1) | bit1 with the 11
+                       case already taken by the escape branch, so it is 0, 1
+                       or 2. Kept so the switch stays total over a two-bit
+                       field. */
                     prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type %d in prc_bit_read_compressed_entity_type\n", value);
                     return PRC_ERROR_PARSE;
 
             }
+            prc_diag_report_entity_type(ctx, cet_start, 1, (int)*entity_type);
+            return 0;
         }
     }
     else
     {
         *entity_type = prc_bitread_uint_variable_bit(ctx, state, 4);
     }
+    prc_diag_report_entity_type(ctx, cet_start, 0, (int)*entity_type);
     return 0;
 }
 
