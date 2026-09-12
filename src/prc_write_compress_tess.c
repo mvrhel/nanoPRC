@@ -1629,6 +1629,41 @@ typedef struct
        comparing consecutive grow-triangles' z_basis directions -- included
        in the PRC_DIAG_DUMP_ALLTRI dump. */
     prc_vec3 *tri_zbasis;
+    /* PRC_DIAG_SEED_EDGE reporting only.
+
+       A triangle carries exactly two edge-status bits: bit 0 for the right
+       edge (mv1,mv2) and bit 1 for the left edge (mv0,mv2), combined at the
+       end of prc_encode_edge_status. The third edge, (mv0,mv1), has no bit
+       and is never declared growable.
+
+       For a GROWN triangle that costs nothing: (mv0,mv1) is the edge it
+       arrived along, already treated by its parent. For a CHAIN START there
+       is no arrival edge, so (mv0,mv1) is an ordinary mesh edge that the
+       traversal structurally cannot follow -- whatever lies across it has to
+       be picked up later by the outer unvisited-triangle scan, as a separate
+       chain.
+
+       That asymmetry is the empirical half of the pdf-issues #727 question
+       "does the seed triangle have three traversable edges or two". The
+       encoding answers it on its own -- a third traversable edge would need a
+       third status bit, and the field is two bits wide with range [0,3] --
+       but an encoding argument is worth more if the behaviour it predicts is
+       also visible in real output. So this counts how often a chain start
+       really does strand a neighbour across its base edge.
+
+       The negative result matters as much as the positive one. If the base
+       neighbour always turns out to be reachable some other way, then the
+       two-edge and three-edge readings produce identical files on this corpus
+       and the measurement settles nothing -- which is worth reporting plainly
+       rather than dressing up.
+
+       chain_of is per mesh triangle, written as each triangle is emitted.
+       seed_base_nb is -2 for a triangle that was never a chain start, -1 for
+       a chain start whose base edge has no neighbour at all (a genuine mesh
+       boundary), and otherwise the neighbouring triangle's index. */
+    uint32_t *chain_of;
+    int32_t *seed_base_nb;
+    uint8_t seed_measure;
 } prc_encode_state;
 
 /* Chain bookkeeping only this phase: reconstructed_position stays zeroed
@@ -2076,6 +2111,17 @@ prc_encode_chain_start(prc_encode_state *st, uint32_t tri,
     }
     if (st->tri_is_ref != NULL)
         st->tri_is_ref[tri] = (uint8_t)num_refs;
+
+    /* The base edge (mv0,mv1) -- the one prc_encode_edge_status has no bit
+       for. Recorded here rather than there because only a chain start has a
+       base edge that is not simply the edge it arrived along. See
+       seed_base_nb's comment on prc_encode_state. */
+    if (st->seed_measure)
+    {
+        int32_t slot = prc_encode_local_edge_slot(st->mesh, tri, mv[0], mv[1]);
+        st->seed_base_nb[tri] = slot >= 0 ?
+            st->neighbor[(size_t)tri * 3 + (uint32_t)slot] : -1;
+    }
     if (st->ctx->trace_reversed)
     {
         fprintf(stderr, "ENC_CHAINSTART tri=%u mv=(%u,%u,%u) r=(%u,%u,%u) num_refs=%u "
@@ -2746,6 +2792,29 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
     if (st.tri_is_ref != NULL)
         memset(st.tri_is_ref, 0xFF, (size_t)num_tris * sizeof(uint8_t));
     st.tri_zbasis = (prc_vec3 *)prc_calloc(ctx, num_tris, sizeof(prc_vec3));
+    /* Allocation failure here is not fatal: the measurement is optional and a
+       traversal that cannot report it is still a correct traversal. seed_measure
+       stays 0 and every use below is gated on it. */
+    st.seed_measure = (uint8_t)(prc_diag_getenv("PRC_DIAG_SEED_EDGE") != NULL);
+    if (st.seed_measure)
+    {
+        st.chain_of = (uint32_t *)prc_malloc(ctx, (size_t)num_tris * sizeof(uint32_t));
+        st.seed_base_nb = (int32_t *)prc_malloc(ctx, (size_t)num_tris * sizeof(int32_t));
+        if (st.chain_of == NULL || st.seed_base_nb == NULL)
+        {
+            prc_free(ctx, st.chain_of);
+            prc_free(ctx, st.seed_base_nb);
+            st.chain_of = NULL;
+            st.seed_base_nb = NULL;
+            st.seed_measure = 0;
+        }
+        else
+        {
+            memset(st.chain_of, 0xFF, (size_t)num_tris * sizeof(uint32_t));
+            for (i = 0; i < num_tris; i++)
+                st.seed_base_nb[i] = -2;
+        }
+    }
     if (out->point_array == NULL || out->edge_status_array == NULL ||
         out->triangle_face_array == NULL || out->points_is_reference_array == NULL ||
         out->point_reference_array == NULL || out->triangle_point_indices == NULL ||
@@ -2892,6 +2961,9 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
         out->triangle_point_indices[(size_t)emitted * 3 + 1] = idx[1];
         out->triangle_point_indices[(size_t)emitted * 3 + 2] = idx[2];
         out->triangle_mesh_order[emitted] = cur;
+
+        if (st.seed_measure)
+            st.chain_of[cur] = st.current_chain;
 
         /* PROBE (2026-08-06): see alltri_tilt_max's own comment on prc_encode_state.
            Computed for EVERY triangle (chain-start or grow), not just chain-starts. */
@@ -3190,6 +3262,96 @@ prc_encode_traversal(prc_context *ctx, const prc_encode_mesh *mesh,
             st.posbucket_err_max[5], st.posbucket_count[5]);
     }
 
+    /* PRC_DIAG_SEED_EDGE: what happened across each chain start's base edge --
+       the third edge, the one with no status bit. See seed_base_nb's comment
+       on prc_encode_state for why this is the question.
+
+       Only one bucket is real evidence, and separating it from the one that
+       merely looks like evidence is the whole point of the breakdown.
+
+       stranded_to_later_chain  the base neighbour was still unvisited when
+                                this seed started, and went on to be claimed
+                                by a LATER chain. A third growable edge would
+                                have absorbed it. This is the bucket that
+                                shows the two-edge rule in the output.
+
+       taken_by_earlier_chain   the neighbour had already been consumed by an
+                                earlier chain. A third edge would have found
+                                it visited and changed nothing, so this is NOT
+                                evidence either way, however suggestive the
+                                different chain id looks. Chain ids are
+                                assigned in increasing order, which is what
+                                makes the two distinguishable at all.
+
+       absorbed_same_chain      the neighbour was reached anyway, by some
+                                other edge, into this same chain -- the
+                                two-edge rule left no trace for that seed. */
+    if (st.seed_measure)
+    {
+        uint32_t seeds = 0, no_neighbour = 0, later = 0, earlier = 0;
+        uint32_t absorbed = 0, unreached = 0;
+
+        for (i = 0; i < num_tris; i++)
+        {
+            int32_t nb = st.seed_base_nb[i];
+
+            if (nb == -2)
+                continue;
+            seeds++;
+            if (nb < 0)
+            {
+                no_neighbour++;
+                continue;
+            }
+            if (st.chain_of[nb] == 0xFFFFFFFFu)
+                unreached++;      /* neighbour never emitted at all */
+            else if (st.chain_of[nb] == st.chain_of[i])
+                absorbed++;
+            else if (st.chain_of[nb] > st.chain_of[i])
+                later++;
+            else
+                earlier++;
+        }
+
+        printf("PRC_DIAG_SEED_EDGE: chains=%u seeds=%u base_edge_no_neighbour=%u "
+            "stranded_to_later_chain=%u taken_by_earlier_chain=%u "
+            "absorbed_same_chain=%u neighbour_unreached=%u\n",
+            st.current_chain + 1, seeds, no_neighbour, later, earlier,
+            absorbed, unreached);
+
+        /* Mesh connectivity, over ALL triangles rather than the chain starts
+           above, because seeds are not a random sample of triangles: one
+           becomes a chain start precisely because its neighbours were absent
+           or already consumed, so seeds are enriched for poor connectivity by
+           construction. Without this line the seed figures cannot be told
+           apart from a mesh that is simply disconnected -- which is the
+           expected shape for a CAD tessellation, where each B-rep face is
+           tessellated separately and adjacent faces need not share vertices,
+           and is NOT the shape of a printed-model STL. */
+        {
+            uint32_t slots = num_tris * 3, boundary = 0;
+            uint32_t deg[4];
+            uint32_t t;
+
+            deg[0] = deg[1] = deg[2] = deg[3] = 0;
+            for (t = 0; t < num_tris; t++)
+            {
+                uint32_t d = 0, e;
+                for (e = 0; e < 3; e++)
+                {
+                    if (st.neighbor[(size_t)t * 3 + e] < 0)
+                        boundary++;
+                    else
+                        d++;
+                }
+                deg[d]++;
+            }
+            printf("PRC_DIAG_SEED_EDGE: triangles=%u edge_slots=%u boundary_slots=%u "
+                "tris_with_0_nb=%u 1_nb=%u 2_nb=%u 3_nb=%u\n",
+                num_tris, slots, boundary, deg[0], deg[1], deg[2], deg[3]);
+        }
+    }
+
     /* PROBE (2026-08-05), mixed_chains investigation continued: scans this
        entry's own DECODED (reconstructed) positions -- computed exactly as a
        compliant decoder would reconstruct them -- for any two DIFFERENT point
@@ -3275,6 +3437,10 @@ cleanup:
         prc_free(ctx, st.tri_zbasis);
     if (st.tri_reversed != NULL)
         prc_free(ctx, st.tri_reversed);
+    if (st.chain_of != NULL)
+        prc_free(ctx, st.chain_of);
+    if (st.seed_base_nb != NULL)
+        prc_free(ctx, st.seed_base_nb);
     if (st.stack != NULL)
         prc_free(ctx, st.stack);
     return ret;
