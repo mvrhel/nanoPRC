@@ -1712,6 +1712,44 @@ prc_release_multiple_connex(prc_context *ctx, prc_multi_compressed_connex *data)
     }
 }
 
+/* Release a shared curve/vertex table that a compressed body took ownership of
+   at the end of its parse. Both compressed body types transfer the table out
+   of the context this way -- PRC_TYPE_TOPO_BrepDataCompress because its faces
+   reference curves across the body, PRC_TYPE_TOPO_SingleWireBodyCompress
+   because a composite curve's sub-curves live in the table and the parsed
+   records keep pointers into it. */
+void
+prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data)
+{
+    uint32_t k;
+
+    if (compressed_data == NULL)
+        return;
+
+    if (compressed_data->vertices != NULL)
+    {
+        prc_free(ctx, compressed_data->vertices);
+    }
+    if (compressed_data->curves != NULL)
+    {
+        /* The table owns both the slots and their contents. Sweeping the whole
+           capacity rather than up to current_curve_index: slots are allocated
+           on demand and the index is advanced before the curve is parsed, so a
+           parse that failed part way can leave an allocated slot at or past the
+           index. Unused slots are null and cost nothing to skip. */
+        for (k = 0; k < compressed_data->curves_capacity; k++)
+        {
+            if (compressed_data->curves[k] != NULL)
+            {
+                prc_release_compressed_curve(ctx, compressed_data->curves[k]);
+                prc_free(ctx, compressed_data->curves[k]);
+            }
+        }
+        prc_free(ctx, compressed_data->curves);
+    }
+    prc_free(ctx, compressed_data);
+}
+
 static void
 prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *data)
 {
@@ -1737,36 +1775,8 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
         prc_free(ctx, data->base_topology);
     }
 
-    if (data->ref_data != NULL)
-    {
-        prc_nano_brep_compressed_data *compressed_data = data->ref_data;
-        if (compressed_data != NULL)
-        {
-            if (compressed_data->vertices != NULL)
-            {
-                prc_free(ctx, compressed_data->vertices);
-            }
-            if (compressed_data->curves != NULL)
-            {
-                /* The table owns both the slots and their contents. Sweeping
-                   the whole capacity rather than up to current_curve_index:
-                   slots are allocated on demand and the index is advanced
-                   before the curve is parsed, so a parse that failed part way
-                   can leave an allocated slot at or past the index. Unused
-                   slots are null and cost nothing to skip. */
-                for (uint32_t k = 0; k < compressed_data->curves_capacity; k++)
-                {
-                    if (compressed_data->curves[k] != NULL)
-                    {
-                        prc_release_compressed_curve(ctx, compressed_data->curves[k]);
-                        prc_free(ctx, compressed_data->curves[k]);
-                    }
-                }
-                prc_free(ctx, compressed_data->curves);
-            }
-            prc_free(ctx, compressed_data);
-        }
-    }
+    prc_release_nano_brep_ref_data(ctx, data->ref_data);
+    data->ref_data = NULL;
 }
 
 static void
@@ -2640,6 +2650,11 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
                 prc_release_compressed_curve(ctx, body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve);
                 body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve = NULL;
             }
+            /* Released after the body's own curve, not before: that curve may
+               be a composite whose record array is freed above while its
+               sub-curves live in this table. */
+            prc_release_nano_brep_ref_data(ctx, body->topo_single_wire_compress->ref_data);
+            body->topo_single_wire_compress->ref_data = NULL;
             prc_free(ctx, body->topo_single_wire_compress);
             body->topo_single_wire_compress = NULL;
         }

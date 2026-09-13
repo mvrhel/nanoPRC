@@ -14,11 +14,13 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "prc_parse_extra_geometry.h"
 #include "prc_parse_common.h"
+#include "prc_diag_env.h"
 #include "debug.h"
 
 #define TRIM_LOOP_INITIAL_SIZE 10
@@ -356,6 +358,32 @@ prc_parse_hcg_bspline_hermite_curve(prc_context *ctx, prc_bit_state *bit_state,
     data->number_bits = prc_bitread_uint_variable_bit(ctx, bit_state, 4);
     data->number_points = prc_bitread_uint_variable_bit(ctx, bit_state, data->number_bits);
     data->point_number_bits = prc_bitread_uint_variable_bit(ctx, bit_state, 6);
+
+    /* number_points arrives straight from the file and is used two lines
+       later in an unsigned subtraction. Two ways it can be nonsense: fewer
+       than the two endpoints the curve is defined around, which underflows
+       to about four billion; or more points than the remaining input could
+       encode, which allocates and then loops on a count the file merely
+       asserted. Each point costs at least a bit, so the remaining bit count
+       bounds it -- the same guard, for the same reason, as the sub-curve
+       count in prc_parse_hcg_composite_curve.
+
+       This carries more weight than it used to. Wire bodies are now parsed
+       speculatively (see prc_parse_single_wire_body_compress), so a curve
+       type that used to be reached only on a genuinely damaged file is
+       reached routinely on a sound one, as the first of two candidate
+       readings -- and one of those readings is expected to be wrong. A
+       misread that merely fails is a retry; a misread that spins is a hang,
+       and this one span on a real corpus file. */
+    if (data->number_points < 2 ||
+        (int64_t)data->number_points > bit_state->bit_count)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "Hermite curve declares %u points, fewer than its two endpoints or more "
+            "than the remaining input could encode\n", data->number_points);
+        return PRC_ERROR_PARSE;
+    }
+
     number_points = data->number_points - 2;
 
     if (number_points > 0)
@@ -770,6 +798,17 @@ prc_curve_table_slot(prc_context *ctx, prc_nano_brep_compressed_data *compressed
     {
         prc_compressed_curve **new_curves;
         uint32_t new_capacity = compressed_data->curves_capacity;
+
+        /* Doubling cannot lift a capacity of zero off the floor -- 0 * 2 is 0,
+           so the loop below would spin forever. An empty table is not a
+           hypothetical: prc_parse_brep_data_compress seeds one, but
+           prc_parse_single_wire_body_compress allocates its shared state with
+           prc_calloc and starts with none, so the first sub-curve of a
+           composite curve inside a wire body arrives here with capacity 0.
+           That hangs the parser on a 68-byte file, which is why this is a
+           floor rather than an assertion. */
+        if (new_capacity == 0)
+            new_capacity = BREP_EDGE_INITIAL_SIZE;
 
         /* Doubling until it covers index, rather than once, so the table stays
            correct if a caller ever skips ahead. */
@@ -3886,6 +3925,23 @@ prc_parse_brep_data(prc_context *ctx, prc_bit_state *bit_state,
     return 0;
 }
 
+/* The fields a wire body's shared table needs before its curve is parsed.
+   Factored out because the body may be parsed twice -- see the two readings
+   described in prc_parse_single_wire_body_compress -- and the second attempt
+   starts from a freshly allocated table that needs exactly the same setup.
+
+   curve_trimming_face is FALSE here per 7.9.20: "When decoding sub-structures
+   of PRC_TYPE_TOPO_SingleWireBodyCompress, the implicit value of
+   curve_trimming_face is always FALSE." */
+static void
+prc_wire_body_init_shared_state(prc_nano_brep_compressed_data *compressed_data,
+                                double curve_tolerance)
+{
+    compressed_data->curve_trimming_face = 0;
+    compressed_data->is_a_SingleWireBodyCompress = 1;
+    compressed_data->tolerance = curve_tolerance / 100.0;
+}
+
 static int
 prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
                                     prc_topo_single_wire_compress *data,
@@ -3894,6 +3950,8 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
     int code;
     prc_nano_brep_compressed_data *compressed_data;
     prc_ref_or_compressed_curve *curve;
+    prc_bit_state saved_bit_state;
+    prc_exception *saved_exception;
 
     if (ctx->internal.nano_brep_data == NULL)
     {
@@ -3930,27 +3988,128 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
 
     data->curve_tolerance = prc_bitread_double(ctx, bit_state);
 
-    compressed_data->curve_trimming_face = 0;
-    compressed_data->is_a_SingleWireBodyCompress = 1;
-    compressed_data->tolerance = data->curve_tolerance / 100.0;
+    prc_wire_body_init_shared_state(compressed_data, data->curve_tolerance);
 
     /* Deal with this ref_or_compressed_curve as a special case as it does NOT
        get added to any referencing */
     curve = &data->ref_or_compressed_curve;
-    curve->curve_is_not_already_stored = prc_bitread_bit(ctx, bit_state);
     curve->compressed_curve = &data->compressed_curve;
 
-    /* Per the spec, that value HAS to be one */
-    if (!curve->curve_is_not_already_stored)
-    {
-        prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_single_wire_body_compress: curve_is_not_already_stored must be 1\n");
-        return PRC_ERROR_PARSE;
-    }
+    /* Two readings of what comes next are in circulation, and a file gives no
+       advance notice of which one it uses.
 
+       Table 198 "PRC_TYPE_TOPO_SingleWireBodyCompress" says the body holds a
+       bare `CompressedCurve`. Some writers emit exactly that. Others emit a
+       leading `curve_is_not_already_stored` flag first, as though the field
+       were a `RefOrCompressedCurve` -- which is also what this parser used to
+       assume unconditionally, and what a second independent implementation
+       reports as correct. Measured over a 315-file corpus, the readings split
+       by producer: conformance fixtures from one vendor need the bare form,
+       while the writer behind 83 of 310 files in the public prc-db corpus
+       needs the flag, and neither reading parses the other's files.
+
+       There is no cheap way to tell them apart up front. The flag, when
+       present, must be 1; the `is_curve` bit that opens a CompressedEntityType
+       must also be 1; so the leading bit is 1 either way, and the bits after
+       it decode to a plausible curve type under both readings. Only carrying
+       the parse further separates them, so that is what this does: try the
+       specification's reading, and if the curve does not decode, rewind and
+       try the other.
+
+       The rewind has to be total. A failed attempt can have claimed slots in
+       the shared curve table (a composite curve appends its sub-curves there)
+       and allocated inside the body's own curve, so both are released and
+       rebuilt rather than reused. */
+    saved_bit_state = *bit_state;
+    saved_exception = ctx->exception;
+
+    curve->curve_is_not_already_stored = 1;
     code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
                                       curve->compressed_curve);
-    prc_free(ctx, compressed_data);
+
+    /* A speculative parse needs a stricter test of success than an ordinary
+       one. Returning 0 only says the decoder found fields it was willing to
+       accept; on the wrong reading of a wire body it will happily do that and
+       run off the end of the section doing it, which is a silent misdecode
+       rather than a failure. The overrun flag is the cheap, exact statement of
+       "this reading consumed bits that do not exist", and one real corpus file
+       needs it -- without this test its fifth wire body was accepted under the
+       bare reading with the cursor 35,000 bits past the end of an 9,384-bit
+       section. Restoring the saved bit state below also restores overrun to
+       what it was, so the retry starts clean. */
+    if (code < 0 || bit_state->overrun)
+    {
+        prc_release_compressed_curve(ctx, &data->compressed_curve);
+        memset(&data->compressed_curve, 0, sizeof(data->compressed_curve));
+
+        prc_release_nano_brep_ref_data(ctx, compressed_data);
+        ctx->internal.nano_brep_data = NULL;
+
+        compressed_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1,
+            sizeof(prc_nano_brep_compressed_data));
+        if (compressed_data == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error retrying prc_parse_single_wire_body_compress\n");
+            return PRC_ERROR_MEMORY;
+        }
+        ctx->internal.nano_brep_data = compressed_data;
+        prc_wire_body_init_shared_state(compressed_data, data->curve_tolerance);
+
+        *bit_state = saved_bit_state;
+
+        curve->curve_is_not_already_stored = prc_bitread_bit(ctx, bit_state);
+        if (!curve->curve_is_not_already_stored)
+        {
+            /* Neither reading applies: the bare form did not decode, and the
+               flag form is excluded by its own rule that the flag must be 1. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Parsing error in prc_parse_single_wire_body_compress: the curve did not "
+                "decode as a bare CompressedCurve, and the alternative RefOrCompressedCurve "
+                "reading is excluded because curve_is_not_already_stored is 0\n");
+            code = PRC_ERROR_PARSE;
+        }
+        else
+        {
+            code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
+                                              curve->compressed_curve);
+            if (code == 0 && bit_state->overrun)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE,
+                    "Parsing error in prc_parse_single_wire_body_compress: neither reading "
+                    "of the body's curve stays inside the section\n");
+                code = PRC_ERROR_PARSE;
+            }
+        }
+
+        if (code == 0)
+        {
+            /* The first attempt's complaints describe a reading that was
+               abandoned on purpose; drop them so they cannot be mistaken for
+               a problem with the file that was just parsed successfully. */
+            while (ctx->exception != saved_exception)
+                prc_error_pop(ctx);
+        }
+
+        if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+            fprintf(stderr, "[cet] wire body: bare CompressedCurve failed, "
+                "RefOrCompressedCurve (leading flag) %s\n",
+                code == 0 ? "succeeded" : "failed too");
+    }
+    else if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+    {
+        fprintf(stderr, "[cet] wire body: bare CompressedCurve reading succeeded\n");
+    }
+
+    /* Move ownership of the curve table out of the context and into the body,
+       exactly as the PRC_TYPE_TOPO_BrepDataCompress case in prc_parse_topo
+       does. This used to be a bare prc_free of the struct, which was safe only
+       while the table was guaranteed empty -- and it was guaranteed empty only
+       because a composite curve inside a wire body could not be reached
+       without hanging in prc_curve_table_slot. Transferring on the failure
+       path too: a partly parsed composite has already claimed slots. */
+    data->ref_data = compressed_data;
     ctx->internal.nano_brep_data = NULL;
+
     if (code < 0)
     {
         prc_error(ctx, code, "Failed in prc_parse_compressed_curve\n");
