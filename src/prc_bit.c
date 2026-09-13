@@ -240,8 +240,27 @@ double
 prc_bitread_double_with_variable_bit_number(prc_context *ctx, prc_bit_state *state,
     unsigned int number_of_bits, double tolerance)
 {
-    uint8_t is_negative = prc_bitread_bit(ctx, state);
-    uint32_t mantissa = prc_bitread_uint_variable_bit(ctx, state, number_of_bits - 1);
+    uint8_t is_negative;
+    uint32_t mantissa;
+
+    /* number_of_bits is the whole field, sign bit included, so a zero width
+       describes nothing at all -- and subtracting one from it wraps. Callers
+       take the width straight from the bitstream (point_number_bits and
+       tangent_number_bits in the Hermite curve, among others), so a misread
+       reaches here as a legitimate-looking zero. Rejected explicitly here as
+       well as in prc_bitread_uint_variable_bit, because the wrap is this
+       function's arithmetic and the reason is only obvious at this site. */
+    if (number_of_bits == 0)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "A compressed double with a zero-bit field width carries neither a sign "
+            "nor a mantissa\n");
+        state->overrun = 1;
+        return 0.0;
+    }
+
+    is_negative = prc_bitread_bit(ctx, state);
+    mantissa = prc_bitread_uint_variable_bit(ctx, state, number_of_bits - 1);
 
     return tolerance * (is_negative ? -1.0 : 1.0) * (double)mantissa;
 }
@@ -926,6 +945,28 @@ prc_bitread_uint_variable_bit(prc_context *ctx, prc_bit_state *state, uint32_t b
     uint32_t value = 0;
     uint32_t k;
     uint8_t bit;
+
+    /* A width past 32 cannot describe a field whose result is a uint32, so
+       it never came from the file directly -- it came from a caller doing
+       arithmetic on a width it read. The case that bit us is
+       `number_of_bits - 1` in prc_bitread_double_with_variable_bit_number:
+       an unsigned zero wraps to 4294967295 and turns the loop below into
+       four billion iterations, each shifting by an amount that is undefined
+       behaviour anyway. Guarding here rather than only at that one caller
+       because every variable-width read in the parser funnels through this
+       function, and the same wrap is available to any of them.
+
+       Marking the stream overrun rather than only returning zero: a width
+       like this means the cursor is no longer on anything meaningful, and
+       callers that do check overrun should see it. */
+    if (bit_length > 32)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "A variable-width field of %u bits cannot be read into a 32-bit value; "
+            "the width was computed, not stored, and has wrapped\n", bit_length);
+        state->overrun = 1;
+        return 0;
+    }
 
     for (k = 0; k < bit_length; k++)
     {

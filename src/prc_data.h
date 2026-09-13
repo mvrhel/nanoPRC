@@ -3723,6 +3723,12 @@ struct prc_topo_single_wire_compress_s
     double curve_tolerance;
     prc_ref_or_compressed_curve ref_or_compressed_curve;
     prc_compressed_curve compressed_curve;
+    /* Owns the shared curve table the body's curve was parsed against, on the
+       same terms as prc_topo_brep_data_compress::ref_data below. A wire body
+       whose curve is a composite puts that composite's sub-curves in this
+       table and keeps pointers into it, so the table has to outlive the parse
+       rather than be freed at the end of it. */
+    prc_nano_brep_compressed_data *ref_data;
 };
 
 /* Table 198 PRC_TYPE_TOPO_BrepDataCompress */
@@ -3940,6 +3946,21 @@ struct prc_nano_brep_compressed_data_s
 
 prc_data* prc_open_contents(prc_context *ctx, const char *infile);
 void prc_release_data(prc_context *ctx, prc_data *data);
+
+/* Release the contents of one compressed curve (not the struct itself), and
+   release a shared curve/vertex table together with every slot it owns. Both
+   live in prc_release.c and are declared here because the parser needs them
+   too: prc_parse_single_wire_body_compress parses a wire body's curve twice
+   under two different readings of the bitstream, and has to undo the first
+   attempt completely before trying the second. */
+void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
+void prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data);
+
+/* Discard the most recent entry on the context error stack. Used to drop the
+   diagnostics of a speculative parse that was retried successfully, so a
+   caller printing the stack after an overall success does not see complaints
+   about an attempt that was abandoned on purpose. */
+void prc_error_pop(prc_context *ctx);
 int prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint32_t *num_tessellations);
 
 #endif

@@ -822,11 +822,26 @@ prc_parse_file_geometry(prc_context *ctx, prc_filestructure *file_struct)
     }
 
     code = prc_parse_exact_geometry(ctx, &bit_state, &data->exact_geometry);
+
+    /* Where the exact-geometry walk actually stopped, and whether it stopped
+       because it finished or because it failed. A reading that sits on the
+       right bit boundaries consumes the section to within a byte or so of its
+       end; one that is a bit out desyncs and stops short. Neither fact is
+       observable from the return code, which says only whether the walk
+       failed and never where it stopped -- and a reading that is a bit out
+       can still return cleanly, having consumed the wrong number of bits.
+       Reported alongside the [cet] offsets because it is
+       the same question at a different scale -- those say where each entity
+       type was read, this says whether the run of them added up. */
+    if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+        fprintf(stderr, "[cet] --- exact geometry stopped at bit %lld of %u, code %d ---\n",
+            (long long)bit_state.bit_position,
+            (unsigned)(file_struct->geometry_size * 8), code);
+
     if (code < 0)
     {
         prc_error(ctx, code, "Failed in prc_parse_exact_geometry\n");
-        return 0; /* Eat this */
-        //return code;
+        return code;
     }
 
     code = prc_parse_user_data(ctx, &bit_state, &data->user_data);
