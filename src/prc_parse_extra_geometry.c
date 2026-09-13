@@ -2422,6 +2422,7 @@ static int
 prc_parse_ptr_topology(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_topology *data)
 {
     int code;
+    prc_nano_brep_ref_data *ref_data;
 
     data->is_stored = prc_bitread_bit(ctx, bit_state);
 
@@ -2432,7 +2433,24 @@ prc_parse_ptr_topology(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_topol
         {
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_ptr_topology\n");
             return PRC_ERROR_MEMORY;
+        
+        }        
+        /* Add this one to our storage -- before it is parsed! */
+        ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data->topo_ref_capacity <= ref_data->number_of_topo_refs)
+        {
+            uint32_t new_capacity = (ref_data->topo_ref_capacity == 0) ? 4 : ref_data->topo_ref_capacity * 2;
+            prc_topo **new_array = (prc_topo **)prc_realloc(ctx, ref_data->topo_refs, new_capacity * sizeof(prc_topo **));
+            if (!new_array)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Memory allocation failed in prc_parse_ptr_topology\n");
+                return PRC_ERROR_MEMORY;
+            }
+            ref_data->topo_refs = new_array;
+            ref_data->topo_ref_capacity = new_capacity;
         }
+        ref_data->topo_refs[ref_data->number_of_topo_refs++] = data->topo;
+
         code = prc_parse_topo(ctx, bit_state, data->topo, 0);
         if (code < 0)
         {
@@ -3402,6 +3420,7 @@ static int
 prc_parse_ptr_curve(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_curve *data)
 {
     int code;
+    prc_nano_brep_ref_data *ref_data;
 
     data->is_referenced = prc_bitread_bit(ctx, bit_state);
 
@@ -3411,6 +3430,22 @@ prc_parse_ptr_curve(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_curve *d
     }
     else
     {
+        /* Add this one to our ref storage -- before it is parsed! */
+        ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data->curve_ref_capacity <= ref_data->number_of_curve_refs)
+        {
+            uint32_t new_capacity = (ref_data->curve_ref_capacity == 0) ? 4 : ref_data->curve_ref_capacity * 2;
+            prc_ptr_curve **new_array = (prc_ptr_curve **)prc_realloc(ctx, ref_data->curve_refs, new_capacity * sizeof(prc_ptr_curve **));
+            if (!new_array)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Memory allocation failed in prc_parse_ptr_curve\n");
+                return PRC_ERROR_MEMORY;
+            }
+            ref_data->curve_refs = new_array;
+            ref_data->curve_ref_capacity = new_capacity;
+        }
+        ref_data->curve_refs[ref_data->number_of_curve_refs++] = data;
+
         /* First get the curve type */
         data->curve_type = prc_bitread_uint32(ctx, bit_state);
 
@@ -3864,6 +3899,7 @@ prc_parse_brep_data(prc_context *ctx, prc_bit_state *bit_state,
 {
     int code;
     uint32_t k;
+    prc_nano_brep_ref_data *brep_ref_data;
 
     if (read_tag)
     {
@@ -3878,6 +3914,18 @@ prc_parse_brep_data(prc_context *ctx, prc_bit_state *bit_state,
     {
         data->tag = PRC_TYPE_TOPO_BrepData;
     }
+
+    /* Get the referencing data set up */
+    if (ctx->internal.nano_brep_ref_data == NULL)
+    {
+        ctx->internal.nano_brep_ref_data = (prc_nano_brep_ref_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_ref_data));
+        if (ctx->internal.nano_brep_ref_data == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_brep_data\n");
+            return PRC_ERROR_MEMORY;
+        }
+    }
+    brep_ref_data = ctx->internal.nano_brep_ref_data;
 
     /* They all have Table 193 ContentBody */
     code = prc_parse_content_body(ctx, bit_state, &data->base);
@@ -3953,16 +4001,16 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
     prc_bit_state saved_bit_state;
     prc_exception *saved_exception;
 
-    if (ctx->internal.nano_brep_data == NULL)
+    if (ctx->internal.nano_compressed_brep_ref_data == NULL)
     {
-        ctx->internal.nano_brep_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_compressed_data));
-        if (ctx->internal.nano_brep_data == NULL)
+        ctx->internal.nano_compressed_brep_ref_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_compressed_data));
+        if (ctx->internal.nano_compressed_brep_ref_data == NULL)
         {
-            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_brep_data_compress\n");
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_single_wire_body_compress\n");
             return PRC_ERROR_MEMORY;
         }
     }
-    compressed_data = ctx->internal.nano_brep_data;
+    compressed_data = ctx->internal.nano_compressed_brep_ref_data;
 
     if (read_tag)
     {
@@ -4052,7 +4100,7 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error retrying prc_parse_single_wire_body_compress\n");
             return PRC_ERROR_MEMORY;
         }
-        ctx->internal.nano_brep_data = compressed_data;
+        ctx->internal.nano_compressed_brep_ref_data = compressed_data;
         prc_wire_body_init_shared_state(compressed_data, data->curve_tolerance);
 
         *bit_state = saved_bit_state;
@@ -4108,7 +4156,7 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
        without hanging in prc_curve_table_slot. Transferring on the failure
        path too: a partly parsed composite has already claimed slots. */
     data->ref_data = compressed_data;
-    ctx->internal.nano_brep_data = NULL;
+    ctx->internal.nano_compressed_brep_ref_data = NULL;
 
     if (code < 0)
     {
@@ -4228,16 +4276,16 @@ prc_parse_brep_data_compress(prc_context *ctx, prc_bit_state *bit_state,
     uint32_t number_of_faces;
     uint32_t k;
 
-    if (ctx->internal.nano_brep_data == NULL)
+    if (ctx->internal.nano_compressed_brep_ref_data == NULL)
     {
-        ctx->internal.nano_brep_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_compressed_data));
-        if (ctx->internal.nano_brep_data == NULL)
+        ctx->internal.nano_compressed_brep_ref_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1, sizeof(prc_nano_brep_compressed_data));
+        if (ctx->internal.nano_compressed_brep_ref_data == NULL)
         {
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_brep_data_compress\n");
             return PRC_ERROR_MEMORY;
         }
     }
-    compressed_data = ctx->internal.nano_brep_data;
+    compressed_data = ctx->internal.nano_compressed_brep_ref_data;
 
     if (read_tag)
     {
@@ -5852,6 +5900,7 @@ static int
 prc_parse_ptr_surface(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_surface *data)
 {
     int code = 0;
+    prc_nano_brep_ref_data *ref_data;
 
     data->is_referenced = prc_bitread_bit(ctx, bit_state);
 
@@ -5861,6 +5910,22 @@ prc_parse_ptr_surface(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_surfac
     }
     else
     {
+        /* Add this one to our ref storage before we parse! */
+        ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data->surface_ref_capacity <= ref_data->number_of_surface_refs)
+        {
+            uint32_t new_capacity = (ref_data->surface_ref_capacity == 0) ? 4 : ref_data->surface_ref_capacity * 2;
+            prc_type_surf **new_array = (prc_type_surf **)prc_realloc(ctx, ref_data->surface_refs, new_capacity * sizeof(prc_type_surf **));
+            if (!new_array)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Memory allocation failed in prc_parse_ptr_topology\n");
+                return PRC_ERROR_MEMORY;
+            }
+            ref_data->surface_refs = new_array;
+            ref_data->surface_ref_capacity = new_capacity;
+        }
+        ref_data->surface_refs[ref_data->number_of_surface_refs++] = &data->surface;
+
         code = prc_parse_surf(ctx, bit_state, &data->surface);
         if (code < 0)
         {
@@ -6191,8 +6256,8 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
             prc_error(ctx, PRC_ERROR_MEMORY, "ref_data in topo_brep_data_compress should be NULL\n");
             return PRC_ERROR_MEMORY;
         }
-        data->topo_brep_data_compress->ref_data = ctx->internal.nano_brep_data;
-        ctx->internal.nano_brep_data = NULL;
+        data->topo_brep_data_compress->ref_data = ctx->internal.nano_compressed_brep_ref_data;
+        ctx->internal.nano_compressed_brep_ref_data = NULL;
         break;
 
     default:
@@ -6258,6 +6323,9 @@ prc_parse_topo_contexts(prc_context *ctx, prc_bit_state *bit_state,
         for (k = 0; k < data->number_of_bodies; k++)
         {
             code = prc_parse_topo(ctx, bit_state, &data->bodies[k], 0);
+            /* Transfers ownership too */
+            data->bodies[k].brep_ref_data = ctx->internal.nano_brep_ref_data;
+            ctx->internal.nano_brep_ref_data = NULL;
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_topo\n");
