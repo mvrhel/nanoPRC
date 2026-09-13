@@ -4091,7 +4091,7 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
         memset(&data->compressed_curve, 0, sizeof(data->compressed_curve));
 
         prc_release_nano_brep_ref_data(ctx, compressed_data);
-        ctx->internal.nano_brep_data = NULL;
+        ctx->internal.nano_compressed_brep_ref_data = NULL;
 
         compressed_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1,
             sizeof(prc_nano_brep_compressed_data));
