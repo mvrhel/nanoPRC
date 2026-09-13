@@ -42,6 +42,7 @@
 typedef struct prc_context_s prc_context;
 typedef struct prc_exception prc_exception;
 typedef struct prc_nano_brep_compressed_data_s prc_nano_brep_compressed_data;
+typedef struct prc_nano_brep_ref_data_s prc_nano_brep_ref_data;
 
 /**
  * @brief Caller-provided allocation hooks and opaque user payload.
@@ -81,7 +82,9 @@ typedef struct {
 typedef struct {
     uint32_t reader_version;
     void *schema;
-    prc_nano_brep_compressed_data *nano_brep_data;
+    uint8_t is_compressed;
+    prc_nano_brep_compressed_data *nano_compressed_brep_ref_data;
+    prc_nano_brep_ref_data *nano_brep_ref_data;
 } prc_internal;
 
 #if PRC_DEBUG_MEMORY

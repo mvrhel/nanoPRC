@@ -1770,7 +1770,7 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
 }
 
 static void
-prc_release_nano_brep_data(prc_context *ctx, prc_nano_brep_compressed_data *data)
+prc_release_nano_compressed_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *data)
 {
     int k;
 
@@ -2534,6 +2534,12 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
     if (depth > PRC_RELEASE_TOPO_BODY_RECURSION_MAX)
         return;
 
+    if (body->brep_ref_data != NULL)
+    {
+        prc_free(ctx, body->brep_ref_data);
+        body->brep_ref_data = NULL;
+    }
+
     switch (body->tag)
     {
     case PRC_TYPE_TOPO_MultipleVertex:
@@ -2633,6 +2639,12 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
         }
         break;
     case PRC_TYPE_TOPO_SingleWireBodyCompress:
+        if (ctx->internal.nano_compressed_brep_ref_data != NULL)
+        {
+            prc_release_nano_compressed_brep_ref_data(ctx, ctx->internal.nano_compressed_brep_ref_data);
+            prc_free(ctx, ctx->internal.nano_compressed_brep_ref_data);
+            ctx->internal.nano_compressed_brep_ref_data = NULL;
+        }
         if (body->topo_single_wire_compress != NULL)
         {
             if (body->topo_single_wire_compress->ref_or_compressed_curve.compressed_curve != NULL)
@@ -2645,11 +2657,11 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
         }
         break;
     case PRC_TYPE_TOPO_BrepDataCompress:
-        if (ctx->internal.nano_brep_data != NULL)
+        if (ctx->internal.nano_compressed_brep_ref_data != NULL)
         {
-            prc_release_nano_brep_data(ctx, ctx->internal.nano_brep_data);
-            prc_free(ctx, ctx->internal.nano_brep_data);
-            ctx->internal.nano_brep_data = NULL;
+            prc_release_nano_compressed_brep_ref_data(ctx, ctx->internal.nano_compressed_brep_ref_data);
+            prc_free(ctx, ctx->internal.nano_compressed_brep_ref_data);
+            ctx->internal.nano_compressed_brep_ref_data = NULL;
         }
         if (body->topo_brep_data_compress != NULL)
         {

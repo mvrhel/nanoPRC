@@ -5249,6 +5249,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
 
     /* Find out how many shells and how many faces we are dealing with here */
     prc_count_shells_faces_in_topo(ctx, topo, &num_shells, &num_faces);
+    //num_faces = 3; /* For debug testing */
     num_wires = prc_count_wires_in_topo(ctx, topo);
 
     /* I *think* we do not have wires AND faces */
@@ -5297,6 +5298,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of faces in prc_approximate_objects_exact_geom\n");
             return PRC_ERROR_MEMORY;
         }
+        //num_faces_in_shell = num_faces; /* For debug testing */
         data->exact_geom_tess_part[geom_count].shells[i].number_of_faces = num_faces_in_shell;
     }
 
