@@ -3604,6 +3604,7 @@ struct prc_topo_s
         prc_topo_single_wire_compress *topo_single_wire_compress;
         prc_topo_brep_data_compress *topo_brep_data_compress;
     };
+    prc_nano_brep_ref_data *brep_ref_data;
 };
 
 /* Abstract type 8.9.15 prc_type_topo_body */
@@ -3886,6 +3887,20 @@ struct prc_schema_read_s
         prc_bounding_box bbox_val;
         prc_unsigned_int parent_type;
     };
+};
+
+/* We need to maintain referencing when processing non-compressed brep data */
+struct prc_nano_brep_ref_data_s
+{
+    uint32_t number_of_curve_refs;
+    uint32_t number_of_surface_refs;
+    uint32_t number_of_topo_refs;
+    uint32_t curve_ref_capacity;
+    uint32_t surface_ref_capacity;
+    uint32_t topo_ref_capacity;
+    prc_topo **topo_refs;
+    prc_type_surf **surface_refs;
+    prc_ptr_curve **curve_refs;
 };
 
 /* A structure to maintain compressed brep data as vertices and curve
