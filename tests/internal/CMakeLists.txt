@@ -191,3 +191,7 @@ target_include_directories(brep_entity_census PRIVATE tests)
 add_executable(compressed_tess_census tests/internal/compressed_tess_census.c)
 target_link_libraries(compressed_tess_census prc_static)
 target_include_directories(compressed_tess_census PRIVATE tests)
+
+add_executable(vertex_color_desync tests/internal/vertex_color_desync.c)
+target_link_libraries(vertex_color_desync prc_static)
+target_include_directories(vertex_color_desync PRIVATE tests)
