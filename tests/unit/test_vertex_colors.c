@@ -14,68 +14,49 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
-/* INTERNAL DEVELOPMENT TOOL -- not registered with CTest.
+/* Regression test for the vertex-colour count derivation, Table 143
+   "VertexColors".
 
-   WHAT: Hand-assembles one PRC_TYPE_TESS_3D record carrying a per-face
-   vertex-colour array, parses it back with the real prc_parse_tess_3d, and
-   reports whether the parser consumed the whole record or stopped short.
+   That array stores no element count. It is delta-encoded -- the first colour
+   in full, then one is_same bit per entry and a full colour only when that bit
+   is clear -- so nothing in the bitstream says how many entries there are, and
+   both sides have to derive it. A reader that derives the wrong count does not
+   fail: it stops at the wrong bit, and every field after the array is then read
+   from the wrong offset.
 
-   usage: vertex_color_desync            (runs all three fixtures)
+   nanoPRC used to derive triangulateddata[0] * 3, which is right only for a
+   face built from plain triangles. Table 139 lists twelve triangle-shaped
+   entity groups and a face may carry any combination of them, with their counts
+   stored back to back in flag order, so element 0 describes only whichever
+   group comes first.
 
-   WHY IT EXISTS: the vertex-colour array in Table 143 "VertexColors" stores
-   no element count. It is delta-encoded -- the first colour in full, then one
-   is_same bit per remaining entry and a full colour only when that bit is
-   clear -- and nothing in the bitstream says how many entries there are. Both
-   sides have to DERIVE the count from something else, and the specification
-   never says from what. nanoPRC derives it at prc_parse_tess.c:
+   Three fixtures, assembled by hand and parsed with the real
+   prc_parse_tess_3d. The control is a face of 14 plain triangles, where the old
+   derivation was already correct. The other two are 20-triangle faces adding an
+   8-index fan and an 8-index strip to that same face: 50 vertex references
+   where the old rule gave 42, leaving 8 colours unread and 200 bits of the
+   record unconsumed. Both are checked rather than just one, because the claim
+   being defended is that ANY second group breaks the derivation, not something
+   particular to fans.
 
-       code = prc_parse_vertexcolors(ctx, bit_state, &data->vertex_colors,
-           data->triangulateddata[0] * 3, true);
+   What is asserted is that the parser consumes each record exactly, to the bit.
+   That is the only observable which catches this. The parse returns 0 either
+   way, so a count error is invisible in the return code and shows up solely as
+   a cursor left in the wrong place -- which is also why the bit total is
+   captured before prc_bitwrite_flush pads the final partial byte.
 
-   with a TODO of our own sitting next to it: "This could be an issue if we
-   have strips or fans or multiple object types".
-
-   That derivation is right for a face built from plain triangles alone, where
-   triangulateddata[0] is the triangle count and every triangle contributes
-   three vertex references. It is wrong the moment a face carries a second
-   entity type, because triangulateddata[0] then describes only the FIRST
-   group and the vertices belonging to the fans or strips after it are never
-   counted. The parser stops early, the remaining colours are left unread, and
-   every field after the colour block is read from the wrong bit offset.
-
-   WHY IT IS HAND-ASSEMBLED RATHER THAN WRITTEN: nanoPRC's own encoder cannot
-   produce this input. prc_write_tess_3d writes has_vertex_colors as a hard 0
-   (prc_write_tess_3d.c, in the per-face record) and emits a single entity type
-   per face, so neither half of the fixture is reachable through the writer.
-   Assembling the bytes directly is also the more faithful choice: the pattern
-   being reproduced is another implementation's, and writing it through our own
-   encoder would bake in our reading of the very ambiguity under test.
-
-   WHY IT IS SYNTHETIC RATHER THAN A CORPUS FILE: across the 310-file public
-   prc-db corpus, all 674 coloured faces are plain Triangle with a single size
-   entry. There is no real file that exercises the mixed-entity case, which is
-   why the fragility has stayed theoretical and why a fixture has to be built
-   to reach it.
-
-   READING THE OUTPUT: the control fixture is a plain-triangle face, where the
-   derivation is correct and the parser should land exactly on the end of the
-   record. The two mixed fixtures add a triangle fan and a triangle strip to
-   that same face -- both, because the TODO quoted above claims the problem for
-   "strips or fans or multiple object types", and one example would leave the
-   other two as assertions. They miscount identically, which is the evidence
-   that the cause is the presence of a second group rather than anything
-   particular to either type.
-
-   Exit status is 0 if every fixture consumes its whole record and 1 if any
-   stops short, so once the derivation is fixed this becomes a ready-made
-   regression check and can be promoted into tests/unit unchanged. Today it
-   exits 1. */
+   Assembled by hand because nanoPRC's own encoder cannot produce this input:
+   prc_write_tess_3d writes has_vertex_colors as a hard 0 and emits one entity
+   type per face. Synthetic because it has to be -- across the 310-file public
+   prc-db corpus all 674 coloured faces are plain Triangle with a single size
+   entry, so no real file reaches the mixed case. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
+#include "prc_test.h"
 #include "prc_context.h"
 #include "prc_data.h"
 #include "prc_bit.h"
@@ -136,7 +117,7 @@ emit_vertex_colors(prc_context *ctx, prc_bit_write_state *w, uint32_t count)
    format, just reachable by hand. */
 static int
 emit_tess_3d(prc_context *ctx, prc_bit_write_state *w, int second_group,
-             uint32_t *colors_written_out, uint32_t *derived_count_out)
+             uint32_t *colors_written_out, uint32_t *old_rule_out)
 {
     uint32_t refs = (second_group == GROUP_NONE) ? PLAIN_REFS : MIXED_REFS;
     uint32_t tri_data[3];
@@ -165,7 +146,9 @@ emit_tess_3d(prc_context *ctx, prc_bit_write_state *w, int second_group,
     }
 
     *colors_written_out = refs;
-    *derived_count_out = tri_data[0] * 3;   /* what prc_parse_tess.c will compute */
+    /* What the superseded rule would have returned, printed alongside the real
+       count so the fixture still shows what it is defending against. */
+    *old_rule_out = tri_data[0] * 3;
 
     if (prc_bitwrite_bit(ctx, w, 0) != 0) return -1;                    /* is_calculated */
 
@@ -224,30 +207,20 @@ release_parsed(prc_context *ctx, prc_tess_3d *d)
     (void)d;
 }
 
-static int
+static void
 run_fixture(prc_context *ctx, int second_group, const char *label)
 {
     prc_bit_write_state w;
     prc_bit_state r;
     prc_tess_3d *parsed = NULL;
-    uint32_t colors_written = 0, derived = 0;
+    uint32_t colors_written = 0, old_rule = 0;
     int64_t total_bits, consumed_bits;
     int code;
-    int short_read;
 
     printf("--- %s ---\n", label);
 
-    if (prc_bitwrite_init(ctx, &w, 4096) != 0)
-    {
-        printf("  could not initialise the write state\n");
-        return 1;
-    }
-    if (emit_tess_3d(ctx, &w, second_group, &colors_written, &derived) != 0)
-    {
-        printf("  could not assemble the fixture\n");
-        prc_bitwrite_release(ctx, &w);
-        return 1;
-    }
+    PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 4096), 0);
+    PRC_ASSERT_EQ(emit_tess_3d(ctx, &w, second_group, &colors_written, &old_rule), 0);
     /* Captured BEFORE the flush. prc_bitwrite_flush pads the final partial
        byte, so w.byte_pos * 8 afterwards overstates the record by up to seven
        bits. Comparing against the padded figure reported a phantom 3-bit
@@ -255,12 +228,7 @@ run_fixture(prc_context *ctx, int second_group, const char *label)
        that would have discredited the real finding on the mixed one. */
     total_bits = (int64_t)w.byte_pos * 8 + (int64_t)w.bit_fill;
 
-    if (prc_bitwrite_flush(ctx, &w) != 0)
-    {
-        printf("  could not flush the fixture\n");
-        prc_bitwrite_release(ctx, &w);
-        return 1;
-    }
+    PRC_ASSERT_EQ(prc_bitwrite_flush(ctx, &w), 0);
 
 
     prc_init_bit_state(ctx, &r, w.buf, w.byte_pos);
@@ -276,52 +244,36 @@ run_fixture(prc_context *ctx, int second_group, const char *label)
                                         : " + one 8-index strip");
     printf("  vertex references in face : %u\n", colors_written);
     printf("  colours written           : %u\n", colors_written);
-    printf("  colours nanoPRC derives   : %u   (triangulateddata[0] * 3)\n", derived);
+    printf("  the superseded rule gave  : %u   (triangulateddata[0] * 3)\n", old_rule);
     printf("  parse return code         : %d\n", code);
     printf("  record size               : %lld bits\n", (long long)total_bits);
     printf("  parser consumed           : %lld bits\n", (long long)consumed_bits);
 
-    short_read = (consumed_bits != total_bits);
-    if (short_read)
-        printf("  RESULT                    : DESYNC, %lld bits unread "
-               "(%u colours never consumed)\n",
-               (long long)(total_bits - consumed_bits),
-               colors_written - derived);
-    else
-        printf("  RESULT                    : clean, whole record consumed\n");
+    /* A wrong colour count leaves the cursor short of the end of the record,
+       and nothing else reports it -- the parse succeeds either way. */
+    PRC_ASSERT_EQ(code, 0);
+    PRC_ASSERT_EQ((long long)consumed_bits, (long long)total_bits);
 
     release_parsed(ctx, parsed);
     prc_bitwrite_release(ctx, &w);
     printf("\n");
-    return short_read ? 1 : 0;
 }
 
 int
 main(void)
 {
     prc_context *ctx;
-    int bad = 0;
+
+    PRC_TEST_BEGIN("vertex-colour count derivation, Table 143 VertexColors");
 
     ctx = prc_new_context(NULL);
-    if (ctx == NULL)
-    {
-        fprintf(stderr, "could not create a prc_context\n");
-        return 2;
-    }
+    PRC_ASSERT_NOT_NULL(ctx);
 
-    printf("vertex-colour count derivation, Table 143 VertexColors\n\n");
-
-    bad |= run_fixture(ctx, GROUP_NONE,  "control: face of plain triangles only");
-    bad |= run_fixture(ctx, GROUP_FAN,   "mixed: same face plus a triangle fan");
-    bad |= run_fixture(ctx, GROUP_STRIP, "mixed: same face plus a triangle strip");
-
-    if (bad)
-        printf("At least one fixture desynced. The derivation at "
-               "prc_parse_tess.c (triangulateddata[0] * 3) does not account "
-               "for every entity type in the face.\n");
-    else
-        printf("Both fixtures consumed their whole record.\n");
+    run_fixture(ctx, GROUP_NONE,  "control: face of plain triangles only");
+    run_fixture(ctx, GROUP_FAN,   "mixed: same face plus a triangle fan");
+    run_fixture(ctx, GROUP_STRIP, "mixed: same face plus a triangle strip");
 
     prc_release_context(ctx);
-    return bad;
+
+    PRC_TEST_END;
 }

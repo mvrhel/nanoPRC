@@ -34,6 +34,11 @@ target_link_libraries(test_tess_3d prc_static)
 target_include_directories(test_tess_3d PRIVATE tests)
 add_test(NAME test_tess_3d COMMAND test_tess_3d)
 
+add_executable(test_vertex_colors tests/unit/test_vertex_colors.c)
+target_link_libraries(test_vertex_colors prc_static)
+target_include_directories(test_vertex_colors PRIVATE tests)
+add_test(NAME test_vertex_colors COMMAND test_vertex_colors)
+
 add_executable(test_wire_tess tests/unit/test_wire_tess.c)
 target_link_libraries(test_wire_tess prc_static)
 target_include_directories(test_wire_tess PRIVATE tests)
