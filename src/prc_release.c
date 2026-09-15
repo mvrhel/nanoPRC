@@ -1434,7 +1434,7 @@ void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
    at: those are elements of the shared per-body curve table,
    prc_nano_brep_compressed_data.curves, handed out by
    prc_parse_ref_or_compressed_curve as &curves[current_curve_index++], and
-   released in one pass over that table by prc_release_nano_brep_data. Freeing
+   released in one pass over that table by prc_release_nano_brep_compressed_data. Freeing
    a sub-curve's contents from here as well would free them twice.
 
    This function used to descend into them, through an explicit heap work list
@@ -1719,7 +1719,7 @@ prc_release_multiple_connex(prc_context *ctx, prc_multi_compressed_connex *data)
    because a composite curve's sub-curves live in the table and the parsed
    records keep pointers into it. */
 void
-prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data)
+prc_release_nano_brep_compressed_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data)
 {
     uint32_t k;
 
@@ -1775,7 +1775,7 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
         prc_free(ctx, data->base_topology);
     }
 
-    prc_release_nano_brep_ref_data(ctx, data->ref_data);
+    prc_release_nano_brep_compressed_data(ctx, data->ref_data);
     data->ref_data = NULL;
 }
 
@@ -2665,7 +2665,7 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
             /* Released after the body's own curve, not before: that curve may
                be a composite whose record array is freed above while its
                sub-curves live in this table. */
-            prc_release_nano_brep_ref_data(ctx, body->topo_single_wire_compress->ref_data);
+            prc_release_nano_brep_compressed_data(ctx, body->topo_single_wire_compress->ref_data);
             body->topo_single_wire_compress->ref_data = NULL;
             prc_free(ctx, body->topo_single_wire_compress);
             body->topo_single_wire_compress = NULL;

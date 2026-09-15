@@ -3954,7 +3954,7 @@ void prc_release_data(prc_context *ctx, prc_data *data);
    under two different readings of the bitstream, and has to undo the first
    attempt completely before trying the second. */
 void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
-void prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data);
+void prc_release_nano_brep_compressed_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data);
 
 /* Discard the most recent entry on the context error stack. Used to drop the
    diagnostics of a speculative parse that was retried successfully, so a
