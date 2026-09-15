@@ -125,9 +125,10 @@ prc_parse_texture_data(prc_context *ctx, prc_bit_state *bit_state)
 /* Table 143 VertexColors */
 static int
 prc_parse_vertexcolors(prc_context *ctx, prc_bit_state *bit_state, prc_vertex_colors *data,
-    uint32_t number_colors, uint8_t is_face)
+    uint32_t number_point_colors, uint32_t number_segment_colors, uint8_t is_face)
 {
     uint32_t k;
+    uint32_t number_colors;
     prc_rgb_color last_value;
 
     data->is_rgba = prc_bitread_bit(ctx, bit_state);
@@ -140,6 +141,20 @@ prc_parse_vertexcolors(prc_context *ctx, prc_bit_state *bit_state, prc_vertex_co
     {
         data->is_segment_color = 0;
     }
+
+    /* 7.8.7.2 "VertexColors", Table 143: "If is_segment_color is FALSE, there
+       is a color for every point in the appropriate array; otherwise, there is
+       a color for every segment in the array."
+
+       Which count applies is therefore not known until the flag above has been
+       read, two bits into the structure -- so the caller supplies both and the
+       choice is made here rather than guessed outside. A polyline has one fewer
+       segment than it has points, whether or not it closes: an open run of n
+       points has n-1 segments, and a closing one has n points plus the implicit
+       repeat of the first, so n segments. The caller's two figures differ by
+       exactly one per wire element for that reason. */
+    number_colors = data->is_segment_color ? number_segment_colors
+                                           : number_point_colors;
     data->b_optimized = prc_bitread_bit(ctx, bit_state); /* Should always be false */
 
     if (!data->b_optimized)
@@ -390,8 +405,12 @@ prc_parse_tess_face(prc_context *ctx, prc_bit_state *bit_state, uint8_t must_cal
             return PRC_ERROR_PARSE;
         }
 
+        /* is_face: Table 143 says is_segment_color "is not present when reading
+           a TessFace", so it reads as FALSE here and the segment count is never
+           consulted. Passed the same figure rather than a sentinel, so that a
+           future caller copying this line cannot accidentally select a zero. */
         code = prc_parse_vertexcolors(ctx, bit_state, &data->vertex_colors,
-            number_colors, true);
+            number_colors, number_colors, true);
         if (code < 0)
         {
             prc_error(ctx, code, "Failed in prc_parse_vertexcolors\n");
@@ -841,8 +860,17 @@ prc_parse_tess_3d_wire(prc_context *ctx, prc_bit_state *bit_state, prc_tess_3d_w
     data->has_vertex_colors = prc_bitread_bit(ctx, bit_state);
     if (data->has_vertex_colors)
     {
+        /* vertex_color_count is the point count: one per stored index, plus the
+           implicit closing point of every PRC_3DWIRETESSDATA_IsClosing element.
+           The segment count is one less per element -- see the derivation in
+           prc_parse_vertexcolors, which picks between them once it has read
+           is_segment_color. */
+        uint32_t segment_color_count = (vertex_color_count >= data->number_of_wire_elements)
+            ? vertex_color_count - data->number_of_wire_elements
+            : 0;
+
         code = prc_parse_vertexcolors(ctx, bit_state, &data->vertex_color_data,
-            vertex_color_count, false);
+            vertex_color_count, segment_color_count, false);
         if (code < 0)
         {
             prc_error(ctx, code, "Failed in prc_parse_vertexcolors\n");
