@@ -170,6 +170,30 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
         if (skip != NULL && skip[i])
             continue;
 
+        /* Texture coordinates are refused rather than ignored where they
+           cannot be honoured. Both halves must be present: prc_write_tess_3d
+           treats a partial pair as "no textures", which would silently drop
+           a caller's UVs, and silence is the wrong answer for data the
+           caller went to the trouble of supplying. Likewise the kinds that
+           have no texture path at all -- the compressed encoder has none,
+           and wire tessellation is line geometry. A demoted COMPRESSED entry
+           reaches the TRIANGLES branch below, but cannot be carrying UVs,
+           because the same check rejected them on the way in. */
+        if ((e->tex_coords != NULL) != (e->tex_indices != NULL))
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_file_structure: tessellation entry %u supplies only one of "
+                "tex_coords/tex_indices; both are required together\n", i);
+            goto fail;
+        }
+        if (e->tex_coords != NULL && e->kind != PRC_WRITE_TESS_KIND_3D)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_file_structure: tessellation entry %u supplies texture "
+                "coordinates, which only PRC_API_WRITE_TESS_KIND_TRIANGLES can write\n", i);
+            goto fail;
+        }
+
         if (e->kind == PRC_WRITE_TESS_KIND_3D || (demote != NULL && demote[i]))
         {
             int must_calc = e->must_calculate_normals;
@@ -204,6 +228,7 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
             if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
             code = prc_write_tess_3d(ctx, s, e->positions, e->num_positions, e->normals, e->num_normals,
                 e->tri_indices, e->norm_indices, e->num_triangles, face_counts, face_count,
+                e->tex_coords, e->num_tex_coords, e->tex_indices,
                 must_calc, crease);
             if (code != 0) goto fail;
         }

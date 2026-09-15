@@ -106,6 +106,197 @@ test_one_triangle_roundtrip(prc_context *ctx)
     prc_write_global_tables_free(ctx, &tables);
 }
 
+/* A textured quad written through the public write struct and read back with
+   the real parser. prc_write_tess_3d already has its own texture case in
+   test_tess_3d.c; this one exists to prove the coordinates survive the whole
+   public path -- prc_api_write_tessellation -> prc_write_file_structure ->
+   the encoder -> deflate -> prc_api_open_contents -- because the fields were
+   present on the encoder for some time while the public struct had no way to
+   reach them, and a capability nothing can call is indistinguishable from one
+   that does not work.
+
+   Three UV pairs for four corners, deliberately: it forces the texture index
+   stream to diverge from the position index stream. With one UV per corner
+   the two run in parallel, and a writer that emitted texture indices into the
+   position slot, or scaled them by 3 instead of 2, would still round-trip and
+   the case would prove nothing. The assertion below checks the streams really
+   do differ before trusting anything else. */
+static void
+build_textured_quad_file(prc_context *ctx, prc_write_global_tables *tables)
+{
+    static const double positions[4 * 3] = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        1.0, 1.0, 0.0,
+        0.0, 1.0, 0.0
+    };
+    static const double normals[3] = { 0.0, 0.0, 1.0 };
+    static const double tex_coords[3 * 2] = {
+        0.0, 0.0,
+        1.0, 0.0,
+        0.5, 1.0
+    };
+    static const uint32_t tris[6]     = { 0, 1, 2,  0, 2, 3 };
+    static const uint32_t norm_idx[6] = { 0, 0, 0,  0, 0, 0 };
+    static const uint32_t tex_idx[6]  = { 0, 1, 2,  0, 2, 1 };
+    static const uint32_t face_tri_counts[1] = { 2 };
+    prc_write_tess_entry tess_entry;
+    prc_write_rep_item ri;
+    prc_write_tree_node root;
+    int streams_differ = 0;
+    int k;
+
+    for (k = 0; k < 6; k++)
+        if (tex_idx[k] != tris[k])
+            streams_differ = 1;
+    PRC_ASSERT(streams_differ);
+
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, tables), 0);
+
+    memset(&tess_entry, 0, sizeof(tess_entry));
+    tess_entry.kind = PRC_WRITE_TESS_KIND_3D;
+    tess_entry.positions = positions;
+    tess_entry.num_positions = 4;
+    tess_entry.normals = normals;
+    tess_entry.num_normals = 1;
+    tess_entry.tri_indices = tris;
+    tess_entry.norm_indices = norm_idx;
+    tess_entry.num_triangles = 2;
+    tess_entry.face_tri_counts = face_tri_counts;
+    tess_entry.num_faces = 1;
+    tess_entry.tex_coords = tex_coords;
+    tess_entry.num_tex_coords = 3;   /* PAIRS, not doubles */
+    tess_entry.tex_indices = tex_idx;
+
+    memset(&ri, 0, sizeof(ri));
+    ri.kind = PRC_WRITE_RI_SURFACE;
+    ri.biased_tessellation_index = 1;
+    ri.is_closed = 0;
+
+    memset(&root, 0, sizeof(root));
+    root.rep_items = &ri;
+    root.num_rep_items = 1;
+    root.bbox_min[0] = 0.0; root.bbox_min[1] = 0.0; root.bbox_min[2] = 0.0;
+    root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0; root.bbox_max[2] = 0.0;
+
+    PRC_ASSERT_EQ(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, tables, &root, &tess_entry, 1), 0);
+}
+
+static void
+test_textured_quad_roundtrip(prc_context *ctx)
+{
+    prc_write_global_tables tables;
+    prc_data *pd;
+    prc_tess_3d *t3d;
+    int k;
+
+    printf("  sub-case: textured quad round trip through the public write struct\n");
+
+    build_textured_quad_file(ctx, &tables);
+
+    pd = (prc_data *)prc_api_open_contents(ctx, TEST_PRC_FILENAME);
+    if (pd == NULL)
+        prc_print_error_stack(ctx);
+    PRC_ASSERT_NOT_NULL(pd);
+
+    PRC_ASSERT_EQ(pd->file_structure_count, 1);
+    PRC_ASSERT_NOT_NULL(pd->file_struct[0].tessellation);
+    PRC_ASSERT_EQ(pd->file_struct[0].tessellation->tess_count, 1);
+
+    t3d = pd->file_struct[0].tessellation->tess[0].tess_3d;
+    PRC_ASSERT_NOT_NULL(t3d);
+
+    /* Stored as a count of DOUBLES, not of (u,v) pairs -- the convention
+       filed as pdf-association/pdf-issues#810. Three pairs in, six out. */
+    PRC_ASSERT_EQ(t3d->number_of_texture_coordinates, 6);
+    PRC_ASSERT_NOT_NULL(t3d->texture_coordinates);
+    for (k = 0; k < 6; k++)
+    {
+        static const double expect[6] = { 0.0, 0.0, 1.0, 0.0, 0.5, 1.0 };
+        PRC_ASSERT_NEAR(t3d->texture_coordinates[k], expect[k], 1e-12);
+    }
+
+    PRC_ASSERT_EQ(t3d->number_of_face_tessellation, 1);
+    PRC_ASSERT_NOT_NULL(t3d->face_tessellation_data);
+    PRC_ASSERT_EQ(t3d->face_tessellation_data[0].number_of_textured_coordinate_indexes, 1);
+
+    prc_api_release_data(ctx, (prc_api_data)pd, NULL, 0, NULL, 0, NULL, 0, NULL);
+    prc_write_global_tables_free(ctx, &tables);
+}
+
+/* The two ways a caller can ask for something the writer cannot honour. Both
+   must be refused rather than quietly dropped: prc_write_tess_3d treats a
+   half-supplied pair as "no textures", and the compressed encoder has no
+   texture path at all, so without these checks the UVs would simply vanish
+   from the output with no error anywhere. */
+static void
+test_texture_misuse_is_refused(prc_context *ctx)
+{
+    static const double positions[3 * 3] = { 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
+    static const double normals[3] = { 0.0, 0.0, 1.0 };
+    static const double tex_coords[3 * 2] = { 0.0, 0.0, 1.0, 0.0, 0.0, 1.0 };
+    static const uint32_t tris[3] = { 0, 1, 2 };
+    static const uint32_t norm_idx[3] = { 0, 0, 0 };
+    static const uint32_t tex_idx[3] = { 0, 1, 2 };
+    static const uint32_t face_tri_counts[1] = { 1 };
+    prc_write_global_tables tables;
+    prc_write_tess_entry tess_entry;
+    prc_write_rep_item ri;
+    prc_write_tree_node root;
+
+    printf("  sub-case: texture coordinates are refused where they cannot be honoured\n");
+
+    memset(&ri, 0, sizeof(ri));
+    ri.kind = PRC_WRITE_RI_SURFACE;
+    ri.biased_tessellation_index = 1;
+
+    memset(&root, 0, sizeof(root));
+    root.rep_items = &ri;
+    root.num_rep_items = 1;
+    root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0;
+
+    memset(&tess_entry, 0, sizeof(tess_entry));
+    tess_entry.kind = PRC_WRITE_TESS_KIND_3D;
+    tess_entry.positions = positions;
+    tess_entry.num_positions = 3;
+    tess_entry.normals = normals;
+    tess_entry.num_normals = 1;
+    tess_entry.tri_indices = tris;
+    tess_entry.norm_indices = norm_idx;
+    tess_entry.num_triangles = 1;
+    tess_entry.face_tri_counts = face_tri_counts;
+    tess_entry.num_faces = 1;
+
+    /* Coordinates without indices. */
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, &tables), 0);
+    tess_entry.tex_coords = tex_coords;
+    tess_entry.num_tex_coords = 3;
+    tess_entry.tex_indices = NULL;
+    PRC_ASSERT(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, &tables, &root, &tess_entry, 1) != 0);
+    prc_write_global_tables_free(ctx, &tables);
+
+    /* Indices without coordinates. */
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, &tables), 0);
+    tess_entry.tex_coords = NULL;
+    tess_entry.num_tex_coords = 0;
+    tess_entry.tex_indices = tex_idx;
+    PRC_ASSERT(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, &tables, &root, &tess_entry, 1) != 0);
+    prc_write_global_tables_free(ctx, &tables);
+
+    /* Both, but on a kind with no texture path. */
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, &tables), 0);
+    tess_entry.kind = PRC_WRITE_TESS_KIND_COMPRESSED;
+    tess_entry.tex_coords = tex_coords;
+    tess_entry.num_tex_coords = 3;
+    tess_entry.tex_indices = tex_idx;
+    PRC_ASSERT(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, &tables, &root, &tess_entry, 1) != 0);
+    prc_write_global_tables_free(ctx, &tables);
+
+    /* Each refusal above leaves an entry on the context error stack. That is
+       expected here -- these cases assert that the writer complains -- and
+       there is no public call to clear it, so nothing tries to. */
+}
+
 static void
 test_prc_signature(prc_context *ctx)
 {
@@ -216,6 +407,8 @@ main(void)
     PRC_ASSERT_NOT_NULL(ctx);
 
     test_one_triangle_roundtrip(ctx);
+    test_textured_quad_roundtrip(ctx);
+    test_texture_misuse_is_refused(ctx);
     test_prc_signature(ctx);
     test_zlib_section_valid(ctx);
 

@@ -1124,6 +1124,37 @@ typedef struct prc_api_write_tessellation_s
         type; see src/prc_write_tess_3d.h for the exact wire format).
         Ignored for COMPRESSED and WIRE. */
     int must_calculate_normals;
+    /** TRIANGLES only: optional texture coordinates, as num_tex_coords (u,v)
+        PAIRS -- 2 doubles each. NULL/0 writes none, which is the default and
+        was the only possibility before this field existed. Must be NULL for
+        WIRE and for COMPRESSED: the compressed encoder has no texture path,
+        and silently dropping supplied UVs would be worse than refusing them,
+        so PRC_API_WRITE_TESS_KIND_COMPRESSED rejects a non-NULL value rather
+        than ignoring it. */
+    const double *tex_coords;
+    uint32_t      num_tex_coords;
+    /** TRIANGLES only: 3 texture indices per triangle (into `tex_coords`,
+        counted in PAIRS -- index 2 means the third (u,v) pair), parallel to
+        tri_indices. Required if and only if `tex_coords` is non-NULL. Every
+        face is then written with one texture index per vertex.
+
+        Not legal together with the computed-one-normal-per-face path
+        (`normals` NULL and `must_calculate_normals` 0): that combination
+        needs PRC_FACETESSDATA_TriangleOneNormalTextured, which this
+        project's own reader currently rejects, so it is refused rather than
+        written unreadable. Supply `normals`/`norm_indices`, or set
+        `must_calculate_normals`.
+
+        Two wire-format conventions here are not stated by ISO 14739 and were
+        measured against real files before being implemented; both are filed
+        as pdf-association/pdf-issues#810. The stored coordinate count is a
+        count of DOUBLES, not of (u,v) pairs, matching how positions are
+        counted; and texture indices are stored pre-multiplied by 2, where
+        position and normal indices are pre-multiplied by 3. Neither is
+        visible through this API -- it takes pair counts and pair indices --
+        but they are why a file written here will not match a reader that
+        assumed the specification's "always a multiple of 3" claim. */
+    const uint32_t *tex_indices;
 
     /* --- PRC_API_WRITE_TESS_KIND_WIRE --- */
     const prc_api_write_wire_element *wire_elements;

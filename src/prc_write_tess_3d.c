@@ -36,6 +36,8 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
     const uint32_t *tri_indices, const uint32_t *norm_indices,
     uint32_t num_triangles,
     const uint32_t *face_tri_counts, uint32_t num_faces,
+    const double *tex_coords, uint32_t num_tex_coords,
+    const uint32_t *tex_indices,
     int must_calculate_normals, double crease_angle_degrees)
 {
     uint32_t *global_idx = NULL;
@@ -43,6 +45,7 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
     double *face_normals = NULL;
     uint32_t global_count = 0;
     uint32_t f, k, c, i, tri_cursor, check_sum;
+    int has_texture;
     int ret = PRC_ERROR_INTERNAL;
 
     (void)num_normals;
@@ -59,6 +62,18 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
             "prc_write_tess_3d: must_calculate_normals is incompatible with supplied norm_indices\n");
         return PRC_ERROR_INTERNAL;
     }
+    has_texture = (tex_indices != NULL && tex_coords != NULL && num_tex_coords > 0);
+    if (has_texture && norm_indices == NULL && !must_calculate_normals)
+    {
+        /* Would need PRC_FACETESSDATA_TriangleOneNormalTextured, which this
+           project's own reader rejects with PRC_ERROR_NOT_IMPLEMENTED, so
+           writing it would produce a file we cannot read back. See the
+           header. */
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_tess_3d: texture coordinates require supplied normals or "
+            "must_calculate_normals (TriangleOneNormalTextured is not supported)\n");
+        return PRC_ERROR_INTERNAL;
+    }
     check_sum = 0;
     for (f = 0; f < num_faces; f++)
         check_sum += face_tri_counts[f];
@@ -68,7 +83,8 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
         return PRC_ERROR_INTERNAL;
     }
 
-    global_idx = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * (size_t)num_triangles * 6);
+    /* Worst case is 3 entries per vertex (normal, texture, point) = 9 per triangle. */
+    global_idx = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * (size_t)num_triangles * 9);
     face_start = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * num_faces);
     if (global_idx == NULL || face_start == NULL)
     {
@@ -118,6 +134,8 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
                 for (c = 0; c < 3; c++)
                 {
                     global_idx[global_count++] = norm_indices[(size_t)t * 3 + c] * 3;
+                    if (has_texture)
+                        global_idx[global_count++] = tex_indices[(size_t)t * 3 + c] * 2;
                     global_idx[global_count++] = tri_indices[(size_t)t * 3 + c] * 3;
                 }
             }
@@ -128,7 +146,11 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
                    holds bare position indices (see prc_adjust_offsets in
                    prc_parse_tess.c, the read-side counterpart of this). */
                 for (c = 0; c < 3; c++)
+                {
+                    if (has_texture)
+                        global_idx[global_count++] = tex_indices[(size_t)t * 3 + c] * 2;
                     global_idx[global_count++] = tri_indices[(size_t)t * 3 + c] * 3;
+                }
             }
             else
             {
@@ -193,17 +215,23 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_line_attributes */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* start_of_wire_data */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_sizes_wire */
-        if (prc_bitwrite_uint32(ctx, s, (norm_indices != NULL || must_calculate_normals) ?
-                (uint32_t)PRC_FACETESSDATA_Triangle : (uint32_t)PRC_FACETESSDATA_TriangleOneNormal) != 0)
+        if (prc_bitwrite_uint32(ctx, s, has_texture ?
+                PRC_FACETESSDATA_TriangleTextured :
+                ((norm_indices != NULL || must_calculate_normals) ?
+                    PRC_FACETESSDATA_Triangle : PRC_FACETESSDATA_TriangleOneNormal)) != 0)
             goto fail;                                                       /* used_entities_flag */
         if (prc_bitwrite_uint32(ctx, s, face_start[f]) != 0) goto fail;       /* start_triangulated */
         if (prc_bitwrite_uint32(ctx, s, 1) != 0) goto fail;                  /* size_of_triangulateddata */
         if (prc_bitwrite_uint32(ctx, s, face_tri_counts[f]) != 0) goto fail;  /* triangulateddata[0] */
-        if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                  /* number_of_textured_coordinate_indexes */
+        if (prc_bitwrite_uint32(ctx, s, has_texture ? 1u : 0u) != 0) goto fail; /* number_of_textured_coordinate_indexes */
         if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                     /* has_vertex_colors */
     }
 
-    if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                      /* number_of_texture_coordinates */
+    /* Counted in DOUBLES, not coordinates -- see the header and #810. */
+    if (prc_bitwrite_uint32(ctx, s, has_texture ? num_tex_coords * 2u : 0u) != 0) goto fail; /* number_of_texture_coordinates */
+    if (has_texture)
+        for (i = 0; i < num_tex_coords * 2u; i++)
+            if (prc_bitwrite_double(ctx, s, tex_coords[i]) != 0) goto fail;
 
     ret = 0;
     goto cleanup;
