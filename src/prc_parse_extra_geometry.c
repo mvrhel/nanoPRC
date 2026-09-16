@@ -5250,7 +5250,17 @@ prc_parse_surf_pipe(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    /* has_transform, per issue #658: every surface except a NURBS surface has
+       a transform, and all of them carry this Boolean before it, save
+       PRC_TYPE_SURF_Plane, where it is always true. The amended 7.11.3.2 says
+       so and the surface tables now carry the field. No file in the public
+       corpus contains a pipe surface, so this read is unexercised here: it
+       follows the clause, not a measurement. */
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_curve(ctx, bit_state, &data->center_curve);
@@ -5622,7 +5632,14 @@ prc_parse_surf_transform(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    /* has_transform, per issue #658 -- see the note in prc_parse_surf_pipe.
+       A transform surface is likewise absent from the public corpus, so this
+       read follows the clause rather than a file. */
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_surface(ctx, bit_state, &data->base_surface);
