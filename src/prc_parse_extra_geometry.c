@@ -6362,7 +6362,16 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
         break;
 
     default:
-        prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_topo\n");
+        /* The tag and the bit it was read from, because without them this
+           failure is indistinguishable between its two causes: a topology
+           type this parser does not implement, and a walk that has lost the
+           stream and is reading a tag out of the middle of something else.
+           The first is a gap to fill, the second is a defect to find, and
+           they want opposite responses. */
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "Unknown topology type %u in prc_parse_topo, read at bit %lld of this "
+            "section\n", (unsigned)data->tag,
+            (long long)(bit_state->bit_position - 32));
         return PRC_ERROR_PARSE;
     }
     return code;
