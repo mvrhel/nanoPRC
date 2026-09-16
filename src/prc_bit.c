@@ -163,12 +163,40 @@ prc_bitread_int32(prc_context *ctx, prc_bit_state *state)
 
     while (prc_bitread_bit(ctx, state))
     {
+        if (pos >= 4)
+            break;
         val |= (((uint32_t)(prc_bitread_uint8(ctx, state))) << (8 * pos++));
     }
 
-    val <<= (4 - pos) * 8;
-    val >>= (4 - pos) * 8;
-    return val;
+    /* Sign-extend from the top bit of the last byte read.
+
+       Clause 9.12 "WriteInteger" stops emitting bytes at
+           (iValue ==  0 && (loc & 0x80) == 0) ||
+           (iValue == -1 && (loc & 0x80) != 0)
+       where iValue is shifted arithmetically. That terminating condition is a
+       sign-extension contract: the writer stops as soon as the remaining bits
+       are all copies of the last byte's high bit, and the reader is expected
+       to restore them. So -1 occupies a single 0xFF byte, and every negative
+       value is stored in the fewest bytes that preserve its sign.
+
+       This used to be a shift pair -- val <<= (4-pos)*8 then val >>= (4-pos)*8
+       -- which is the right idea applied to the wrong type: val is uint32_t,
+       so the right shift zero-fills instead of propagating the sign, and every
+       negative value came back as its unsigned bit pattern. A one-byte -1 read
+       as 255. Nothing desynced, because the bit count is unaffected either
+       way, which is why this survived: it is a value defect that no alignment
+       check can see.
+
+       The shift pair also had no defined behaviour when the loop read no bytes
+       at all, shifting a 32-bit value by 32; pos == 0 is handled separately
+       now. The pos >= 4 guard above stops a malformed run of continuation bits
+       from shifting past the width of val. */
+    if (pos == 0)
+        return 0;
+    if (pos < 4 && (val & (1u << (pos * 8u - 1u))) != 0)
+        val |= (uint32_t)(0xFFFFFFFFu << (pos * 8u));
+
+    return (int32_t)val;
 }
 
 int32_t
