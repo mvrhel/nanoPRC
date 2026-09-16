@@ -5343,7 +5343,25 @@ prc_parse_surf_ruled(prc_context *ctx, prc_bit_state *bit_state,
         prc_error(ctx, code, "Parsing error in prc_parse_content_surface for surface_data\n");
         return code;
     }
-    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+
+    /* has_transform, per issue #658: every surface except a NURBS surface has
+       a transform, and all of them carry this Boolean before it, save
+       PRC_TYPE_SURF_Plane, where it is always true (see the note in
+       prc_parse_surf_plane). Our tables are the 11 June 2026 draft, which
+       predates that amendment and lists transform as Required with nothing in
+       front of it -- so the omission here was a clause we had not implemented,
+       not a gap in the specification.
+
+       Omitting the bit read the transform one bit early, which is enough to
+       lose the rest of the surface: the behaviour byte came out as 0x85,
+       carrying a bit that is not a defined transformation flag at all, and
+       both trim curves then decoded as null where Table 309 marks them
+       Required. */
+    data->has_transform = prc_bitread_bit(ctx, bit_state);
+    if (data->has_transform)
+    {
+        prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    }
     prc_parse_uv_parameterization(ctx, bit_state, &data->parameterization);
 
     code = prc_parse_ptr_curve(ctx, bit_state, &data->first_curve);
