@@ -2437,6 +2437,17 @@ prc_parse_ptr_topology(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_topol
         }        
         /* Add this one to our storage -- before it is parsed! */
         ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data == NULL)
+        {
+            /* Should not be reachable now that every body pushes a table.
+               Kept because dereferencing null here is what this change is
+               fixing, and a clear error beats a crash if a body type is ever
+               added without one. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "No referencing table for this topology; the enclosing body did "
+                "not create one\n");
+            return PRC_ERROR_PARSE;
+        }
         if (ref_data->topo_ref_capacity <= ref_data->number_of_topo_refs)
         {
             uint32_t new_capacity = (ref_data->topo_ref_capacity == 0) ? 4 : ref_data->topo_ref_capacity * 2;
@@ -3432,6 +3443,17 @@ prc_parse_ptr_curve(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_curve *d
     {
         /* Add this one to our ref storage -- before it is parsed! */
         ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data == NULL)
+        {
+            /* Should not be reachable now that every body pushes a table.
+               Kept because dereferencing null here is what this change is
+               fixing, and a clear error beats a crash if a body type is ever
+               added without one. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "No referencing table for this topology; the enclosing body did "
+                "not create one\n");
+            return PRC_ERROR_PARSE;
+        }
         if (ref_data->curve_ref_capacity <= ref_data->number_of_curve_refs)
         {
             uint32_t new_capacity = (ref_data->curve_ref_capacity == 0) ? 4 : ref_data->curve_ref_capacity * 2;
@@ -5912,6 +5934,17 @@ prc_parse_ptr_surface(prc_context *ctx, prc_bit_state *bit_state, prc_ptr_surfac
     {
         /* Add this one to our ref storage before we parse! */
         ref_data = (prc_nano_brep_ref_data *)ctx->internal.nano_brep_ref_data;
+        if (ref_data == NULL)
+        {
+            /* Should not be reachable now that every body pushes a table.
+               Kept because dereferencing null here is what this change is
+               fixing, and a clear error beats a crash if a body type is ever
+               added without one. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "No referencing table for this topology; the enclosing body did "
+                "not create one\n");
+            return PRC_ERROR_PARSE;
+        }
         if (ref_data->surface_ref_capacity <= ref_data->number_of_surface_refs)
         {
             uint32_t new_capacity = (ref_data->surface_ref_capacity == 0) ? 4 : ref_data->surface_ref_capacity * 2;
@@ -6083,6 +6116,47 @@ prc_parse_shell(prc_context *ctx, prc_bit_state *bit_state,
 }
 
 /* Abstract type */
+/* Give a body its own referencing table for the duration of its parse, and hand
+   that table to the body when the parse finishes.
+
+   The table is reached through the context rather than passed down, because the
+   functions that record into it -- prc_parse_ptr_topology, prc_parse_ptr_curve
+   and prc_parse_ptr_surface -- sit many levels below the body and are called
+   from a dozen places. That is the same arrangement PRC_TYPE_TOPO_BrepDataCompress
+   already uses for the compressed table.
+
+   Saving and restoring rather than clearing, which is the one difference from
+   the compressed case. Bodies nest: PRC_TYPE_TOPO_Body recurses into
+   prc_parse_topo, and prc_parse_ptr_topology re-enters it as well. If an inner
+   body finished by setting the context slot to NULL, an outer body still
+   parsing would lose its table and the next reference it recorded would
+   dereference null -- which is the crash this is fixing, in a rarer shape. */
+static int
+prc_topo_push_ref_data(prc_context *ctx, prc_nano_brep_ref_data **saved)
+{
+    *saved = ctx->internal.nano_brep_ref_data;
+
+    ctx->internal.nano_brep_ref_data = (prc_nano_brep_ref_data *)prc_calloc(ctx, 1,
+        sizeof(prc_nano_brep_ref_data));
+    if (ctx->internal.nano_brep_ref_data == NULL)
+    {
+        ctx->internal.nano_brep_ref_data = *saved;
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_topo_push_ref_data\n");
+        return PRC_ERROR_MEMORY;
+    }
+    return 0;
+}
+
+/* Hand the table to the body and put back whatever the enclosing body was
+   using. Called on the failure path too: a partly parsed body still owns
+   whatever it recorded, and releasing the topo will free it. */
+static void
+prc_topo_pop_ref_data(prc_context *ctx, prc_nano_brep_ref_data *saved, prc_topo *data)
+{
+    data->brep_ref_data = ctx->internal.nano_brep_ref_data;
+    ctx->internal.nano_brep_ref_data = saved;
+}
+
 static int
 prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int depth)
 {
@@ -6212,7 +6286,20 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_topo\n");
             return PRC_ERROR_MEMORY;
         }
-        code = prc_parse_topo_single_wire_body(ctx, bit_state, data->topo_single_wire_body, DONT_READ_TAG);
+        {
+            /* The case this crash was reported for. Every affected file in the
+               public corpus reached prc_parse_ptr_topology from here with no
+               table: across the 21 files, the count of wire bodies matched the
+               count of missing-table hits exactly. */
+            prc_nano_brep_ref_data *saved_ref_data;
+
+            code = prc_topo_push_ref_data(ctx, &saved_ref_data);
+            if (code < 0)
+                return code;
+            code = prc_parse_topo_single_wire_body(ctx, bit_state,
+                data->topo_single_wire_body, DONT_READ_TAG);
+            prc_topo_pop_ref_data(ctx, saved_ref_data, data);
+        }
         break;
 
     case PRC_TYPE_TOPO_BrepData:
@@ -6222,7 +6309,21 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
             prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_topo\n");
             return PRC_ERROR_MEMORY;
         }
-        code = prc_parse_brep_data(ctx, bit_state, data->topo_brep_data, DONT_READ_TAG);
+        {
+            /* prc_parse_brep_data allocates a table itself when the context has
+               none, which is why this case never crashed. It never gave the
+               table to anyone, though, so it was leaked -- nothing assigned
+               topo->brep_ref_data anywhere. Owning it here fixes that and makes
+               both body types work the same way. */
+            prc_nano_brep_ref_data *saved_ref_data;
+
+            code = prc_topo_push_ref_data(ctx, &saved_ref_data);
+            if (code < 0)
+                return code;
+            code = prc_parse_brep_data(ctx, bit_state, data->topo_brep_data,
+                DONT_READ_TAG);
+            prc_topo_pop_ref_data(ctx, saved_ref_data, data);
+        }
         break;
 
     case PRC_TYPE_TOPO_SingleWireBodyCompress:
@@ -6322,10 +6423,14 @@ prc_parse_topo_contexts(prc_context *ctx, prc_bit_state *bit_state,
 
         for (k = 0; k < data->number_of_bodies; k++)
         {
+            /* Ownership of the referencing table is settled inside prc_parse_topo,
+               by the body case that created it. It used to be taken here instead,
+               which worked only for bodies whose parse happened to leave a table in
+               the context -- PRC_TYPE_TOPO_BrepData did,
+               PRC_TYPE_TOPO_SingleWireBody did not, and that was the crash. Doing it
+               per body also covers the ones this loop never sees: bodies nested
+               through PRC_TYPE_TOPO_Body or reached by prc_parse_ptr_topology. */
             code = prc_parse_topo(ctx, bit_state, &data->bodies[k], 0);
-            /* Transfers ownership too */
-            data->bodies[k].brep_ref_data = ctx->internal.nano_brep_ref_data;
-            ctx->internal.nano_brep_ref_data = NULL;
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_topo\n");

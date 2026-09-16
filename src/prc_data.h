@@ -3956,6 +3956,11 @@ void prc_release_data(prc_context *ctx, prc_data *data);
 void prc_release_compressed_curve(prc_context *ctx, prc_compressed_curve *data);
 void prc_release_nano_brep_compressed_data(prc_context *ctx, prc_nano_brep_compressed_data *compressed_data);
 
+/* Release an uncompressed body's referencing table: the three index arrays and
+   the struct. The arrays hold pointers to entities owned by the topology graph
+   itself, so what they point at is never freed here. */
+void prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_ref_data *data);
+
 /* Discard the most recent entry on the context error stack. Used to drop the
    diagnostics of a speculative parse that was retried successfully, so a
    caller printing the stack after an overall success does not see complaints

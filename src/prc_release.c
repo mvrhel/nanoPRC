@@ -1779,6 +1779,25 @@ prc_release_brep_data_compress(prc_context *ctx, prc_topo_brep_data_compress *da
     data->ref_data = NULL;
 }
 
+void
+prc_release_nano_brep_ref_data(prc_context *ctx, prc_nano_brep_ref_data *data)
+{
+    if (data == NULL)
+        return;
+
+    /* Only the arrays. Each element points at a prc_topo, prc_type_surf or
+       prc_ptr_curve that the topology graph owns and releases itself, so
+       freeing through these would be a double free. */
+    if (data->topo_refs != NULL)
+        prc_free(ctx, data->topo_refs);
+    if (data->surface_refs != NULL)
+        prc_free(ctx, data->surface_refs);
+    if (data->curve_refs != NULL)
+        prc_free(ctx, data->curve_refs);
+
+    prc_free(ctx, data);
+}
+
 static void
 prc_release_nano_compressed_brep_ref_data(prc_context *ctx, prc_nano_brep_compressed_data *data)
 {
@@ -2546,7 +2565,8 @@ prc_release_topo(prc_context *ctx, prc_topo *body, int depth)
 
     if (body->brep_ref_data != NULL)
     {
-        prc_free(ctx, body->brep_ref_data);
+        /* prc_free alone would leak the three index arrays hanging off it. */
+        prc_release_nano_brep_ref_data(ctx, body->brep_ref_data);
         body->brep_ref_data = NULL;
     }
 
