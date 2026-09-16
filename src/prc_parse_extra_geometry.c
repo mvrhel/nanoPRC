@@ -6161,6 +6161,7 @@ static int
 prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int depth)
 {
     int code = 0;
+    int64_t tag_start;
 
     /* PRC_TYPE_TOPO_Body self-recurses with a tag pair supplied entirely by the
        file (a few bytes per level), so an attacker can drive recursion depth
@@ -6171,6 +6172,13 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
         return PRC_ERROR_PARSE;
     }
 
+    /* Captured before the read because prc_bitread_uint32 is the PRC
+       continuation encoding, not a fixed 32-bit field: a tag occupies between
+       1 and 33 bits depending on its value. Subtracting a constant width from
+       the position afterwards names the wrong bit, by a different amount for
+       every tag, which is worse than naming none at all in a message whose
+       only job is to say where to look. */
+    tag_start = bit_state->bit_position;
     data->tag = prc_bitread_uint32(ctx, bit_state);
 
     switch (data->tag)
@@ -6370,8 +6378,7 @@ prc_parse_topo(prc_context *ctx, prc_bit_state *bit_state, prc_topo *data, int d
            they want opposite responses. */
         prc_error(ctx, PRC_ERROR_PARSE,
             "Unknown topology type %u in prc_parse_topo, read at bit %lld of this "
-            "section\n", (unsigned)data->tag,
-            (long long)(bit_state->bit_position - 32));
+            "section\n", (unsigned)data->tag, (long long)tag_start);
         return PRC_ERROR_PARSE;
     }
     return code;
