@@ -104,10 +104,59 @@ test_uint32(prc_context *ctx)
     }
 }
 
+/* Clause 9.12 spends the fewest bytes that preserve the sign, so the encoded
+   length is part of the contract and not an implementation detail: a reader
+   takes the sign from the last byte it is handed. Pinning the byte counts here
+   is what distinguishes a conforming writer from one that merely round-trips
+   against our own reader. 128 is the case that matters most -- written in one
+   byte it reads back as -128. */
+static void
+test_int32_encoding_length(prc_context *ctx)
+{
+    struct { int32_t value; size_t bytes; } cases[] = {
+        {           0, 0 },   /* the lone terminator bit, no data bytes */
+        {           1, 1 },
+        {         127, 1 },
+        {         128, 2 },   /* not 1: a lone 0x80 is -128 */
+        {         255, 2 },   /* not 1: a lone 0xFF is -1 */
+        {         256, 2 },
+        {       32767, 2 },
+        {       32768, 3 },   /* not 2, for the same reason as 128 */
+        {       65535, 3 },
+        {          -1, 1 },   /* not 4, which is what we used to write */
+        {        -128, 1 },
+        {        -129, 2 },
+        {        -256, 2 },
+        {      -32768, 2 },
+        {      -32769, 3 },
+        {  INT32_MAX, 4 },
+        {  INT32_MIN, 4 }
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        prc_bit_write_state w;
+        LEAK_CHECK_BEGIN(ctx);
+
+        PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 8), 0);
+        PRC_ASSERT_EQ(prc_bitwrite_int32(ctx, &w, cases[i].value), 0);
+        PRC_ASSERT_EQ(prc_bitwrite_flush(ctx, &w), 0);
+
+        /* each data byte costs 9 bits (its tag bit plus the byte), and the run
+           is closed by one more bit; the flush rounds up to whole bytes */
+        PRC_ASSERT_EQ(w.byte_pos, (cases[i].bytes * 9 + 1 + 7) / 8);
+
+        prc_bitwrite_release(ctx, &w);
+        LEAK_CHECK_END(ctx);
+    }
+}
+
 static void
 test_int32(prc_context *ctx)
 {
-    int32_t values[] = { 0, 1, -1, INT32_MIN, INT32_MAX };
+    int32_t values[] = { 0, 1, -1, 127, 128, 255, 256, 32768, 65535, -128, -129,
+                         -32769, INT32_MIN, INT32_MAX };
     size_t i;
 
     for (i = 0; i < sizeof(values) / sizeof(values[0]); i++)
@@ -613,6 +662,7 @@ main(void)
     test_uint8(ctx);
     test_uint32(ctx);
     test_int32(ctx);
+    test_int32_encoding_length(ctx);
     test_double(ctx);
     test_float(ctx);
     test_string(ctx);
