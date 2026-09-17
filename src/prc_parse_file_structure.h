@@ -18,6 +18,15 @@
 #define PRC_PARSE_FILE_STRUCTURE_H
 
 #include "prc_data.h"
+#include "prc_bit.h"   /* prc_bit_state, for the consumption check below */
+
+/* Whether a section walk consumed the buffer it was given: 0 if it ended within
+   a byte of the end or left nothing but zero bits, PRC_ERROR_PARSE otherwise.
+   Exposed rather than static so the rule can be tested directly on hand-built
+   buffers -- the file that motivated it is a third-party fixture that cannot be
+   redistributed here. */
+int prc_check_section_consumed(prc_context *ctx, const prc_bit_state *bit_state,
+    const uint8_t *buffer, uint32_t size_in_bytes, const char *section_name);
 
 int prc_parse_file_extra_geometry(prc_context *ctx, prc_filestructure *file_struct);
 int prc_parse_file_tessellation(prc_context *ctx, prc_filestructure *file_struct, uint8_t debug_tess);
