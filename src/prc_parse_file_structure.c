@@ -699,6 +699,26 @@ prc_parse_file_tree(prc_context *ctx, prc_filestructure *file_struct)
         return code;
     }
 
+    /* Where the tree walk actually stopped, against where the section ends.
+       A walk that is on the right bit boundaries consumes the section to
+       within a byte or so; one that is a bit out desyncs and stops short
+       while still returning cleanly, because nothing in the return code says
+       where it stopped. That distinction is what decides whether a count
+       taken from this tree -- how many views a model declares, say -- is a
+       measurement or an artefact, and it is not otherwise observable.
+
+       The same question as PRC_DIAG_CET_OFFSETS asks of the geometry
+       section, on its own flag because the two are usually wanted
+       separately. The file structure index is not known here; the caller in
+       prc_parse_main.c is the only place that holds it. */
+    if (prc_diag_getenv("PRC_DIAG_TREE_RESIDUE") != NULL)
+        fprintf(stderr,
+            "[tree] parts=%u products=%u stopped at bit %lld of %llu (%lld left)\n",
+            data->parts_count, data->product_count,
+            (long long)bit_state.bit_position,
+            (unsigned long long)file_struct->tree_size * 8,
+            (long long)((long long)file_struct->tree_size * 8 - bit_state.bit_position));
+
     return 0;
 }
 
