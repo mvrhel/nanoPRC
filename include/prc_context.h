@@ -122,6 +122,22 @@ struct prc_context_s
  #endif
 };
 
+/* Tells GCC/Clang to type-check these as printf, so a specifier that does not
+   match its argument is a diagnostic rather than undefined behaviour at
+   runtime. It matters more here than it looks: until the prc_error macro below
+   was corrected, no call site's arguments were ever evaluated, so nothing had
+   ever checked them -- and one of them did not even name a variable that
+   existed. MSVC has no equivalent that works on a plain prototype, so on
+   Windows this is a no-op and the check comes from the C99 conformance gate
+   (tests/internal/check_c99.py), which runs a real Clang frontend over every
+   first-party source. fmt is the 1-based index of the format string, first is
+   the index of the first variadic argument, or 0 for the va_list form. */
+#if defined(__GNUC__) || defined(__clang__)
+#define PRC_PRINTF_FORMAT(fmt, first) __attribute__((format(printf, fmt, first)))
+#else
+#define PRC_PRINTF_FORMAT(fmt, first)
+#endif
+
 /**
  * @brief Push a formatted error entry onto the context error stack.
  *
@@ -132,7 +148,8 @@ struct prc_context_s
  * @param format printf-style format string.
  * @param args Vararg list.
  */
-void prc_vferror(prc_context *ctx, int code, const char *file, int line, const char *format, va_list args);
+void prc_vferror(prc_context *ctx, int code, const char *file, int line, const char *format, va_list args)
+    PRC_PRINTF_FORMAT(5, 0);
 
 /**
  * @brief Push a formatted error entry onto the context error stack.
@@ -143,9 +160,18 @@ void prc_vferror(prc_context *ctx, int code, const char *file, int line, const c
  * @param line Source line number.
  * @param format printf-style format string.
  */
-void prc_ferror(prc_context *ctx, int code, const char *file, int line, const char *format, ...);
+void prc_ferror(prc_context *ctx, int code, const char *file, int line, const char *format, ...)
+    PRC_PRINTF_FORMAT(5, 6);
 
-#define prc_error(ctx, code, format, ...) prc_ferror((ctx), (code), __FILE__, __LINE__, "%s", (format))
+/* Forwards the caller's arguments to prc_ferror instead of printing the format
+   string through "%s". The old form discarded every variadic argument, so
+   thirty-two diagnostics across the library reported a literal "%u" or "%d"
+   where they meant to name the offending type, index or count -- including
+   "Compressed curve type %u is unassigned in ISO 14739", which is quoted in
+   correspondence about the specification and was never able to say which type
+   it had met. prc_ferror has always been a printf-style variadic function;
+   only this macro stood between it and its arguments. */
+#define prc_error(ctx, code, ...) prc_ferror((ctx), (code), __FILE__, __LINE__, __VA_ARGS__)
 
 /**
  * @brief Create a new low-level PRC context.

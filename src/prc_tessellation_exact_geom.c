@@ -4709,7 +4709,12 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             break;
         }
         default:
-            prc_error(ctx, PRC_ERROR_PARSE, "Unknown entity type in prc_tessellate_compressed_face: %u\n", entity_type);
+            /* topo_face->tag is what this switch dispatches on; `entity_type`
+               named nothing in this scope and only compiled because the old
+               prc_error macro discarded its arguments without evaluating them. */
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Unknown entity type in prc_tessellate_compressed_face: %u\n",
+                (unsigned)topo_face->tag);
             return PRC_ERROR_PARSE;
     }
     return 0;
