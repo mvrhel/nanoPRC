@@ -176,22 +176,75 @@ prc_bitwrite_uint32(prc_context *ctx, prc_bit_write_state *state, uint32_t val)
     return prc_bitwrite_bit(ctx, state, 0);
 }
 
-/* Pairs with prc_bitread_int32 (prc_bit.c 346-360). Despite the different
-   return type, prc_bitread_int32 runs the exact same variable-length loop
-   as prc_bitread_uint32 and builds its result in a uint32_t; the trailing
-   "val <<= (4-pos)*8; val >>= (4-pos)*8;" is a no-op given how val is built
-   (the shifted-out/shifted-in bits are already 0 on both sides), so the
-   reader ends up returning the raw accumulated bit pattern reinterpreted as
-   int32_t. Reusing prc_bitwrite_uint32 on the same bit pattern reproduces
-   that exactly. */
+/* How many bytes clause 9.12 spends on a value: the fewest that preserve its
+   sign, which is to say the fewest whose top byte carries a sign bit matching
+   the value. The clause expresses this as a loop that shifts iValue right by 8
+   and stops once what remains is 0 with the last byte's sign bit clear, or -1
+   with it set; this is the same rule stated as a length, and it avoids right-
+   shifting a negative int, which C99 6.5.7 leaves implementation-defined. */
+static uint32_t
+prc_int32_byte_count(int32_t val)
+{
+    uint32_t n;
+
+    for (n = 1; n < 4; n++)
+    {
+        int32_t limit = (int32_t)1 << (8 * n - 1);  /* 0x80, 0x8000, 0x800000 */
+
+        if (val >= -limit && val < limit)
+            return n;
+    }
+    return 4;
+}
+
+/* Clause 9.12 WriteInteger: one byte at a time, low byte first, each preceded
+   by a 1 bit, the run closed by a 0 bit. Pairs with prc_bitread_int32.
+
+   The byte count is the whole of the contract. The reader recovers the sign
+   from the last byte it is given, so the length carries the sign: -1 is a
+   single 0xFF, and 128 needs *two* bytes, 0x80 0x00, because a lone 0x80 is
+   how -128 is spelled.
+
+   This used to memcpy the value into a uint32_t and defer to
+   prc_bitwrite_uint32, which emits one byte per non-zero byte of the raw bit
+   pattern. That is wrong in both directions. It spent four bytes on every
+   negative, -1 included, where the clause spends one. Worse, it wrote 128 as a
+   lone 0x80, 255 as a lone 0xFF and 32768 as 0x00 0x80 -- which a conforming
+   reader decodes as -128, -1 and -32768. A quarter of the values in
+   -65536..65535 came back as a different number.
+
+   Nothing we emit today was affected: the only caller writes a constant 0
+   (prc_write_tree.c, product_load_status). The defect was in the primitive,
+   waiting for a caller with a value in the wrong class. It stayed invisible
+   because our own reader made the matching mistake -- writing and reading with
+   the same wrong assumption agrees with itself, which is exactly why
+   round-tripping our own output is not evidence of conformance. */
 int
 prc_bitwrite_int32(prc_context *ctx, prc_bit_write_state *state, int32_t val)
 {
     uint32_t bits;
+    uint32_t nbytes;
+    uint32_t pos;
+
     if (state->error)
         return -1;
+
+    if (val == 0)
+        return prc_bitwrite_bit(ctx, state, 0);
+
+    /* int32_t is two's complement with no padding (C99 7.18.1.1), so the bit
+       pattern is what the clause's iValue & 0xFF would have yielded. */
     memcpy(&bits, &val, sizeof(bits));
-    return prc_bitwrite_uint32(ctx, state, bits);
+    nbytes = prc_int32_byte_count(val);
+
+    for (pos = 0; pos < nbytes; pos++)
+    {
+        if (prc_bitwrite_bit(ctx, state, 1) != 0)
+            return -1;
+        if (prc_bitwrite_uint8(ctx, state, (uint8_t)((bits >> (8 * pos)) & 0xFF)) != 0)
+            return -1;
+    }
+    return prc_bitwrite_bit(ctx, state, 0);
 }
 
 /* Pairs with prc_bitread_float (prc_bit.c 414-425): 4 raw bytes, low byte
