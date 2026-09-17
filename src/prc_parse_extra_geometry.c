@@ -1188,7 +1188,29 @@ prc_parse_content_compressed_ana_face(prc_context *ctx, prc_bit_state *bit_state
         if (code < 0)
         {
             prc_error(ctx, code, "Failed in prc_parse_ana_trim_loop\n");
-            prc_free(ctx, data->trim_loop);
+            /* Hand the loops parsed so far to teardown rather than freeing the
+               array here. Freeing it here left data->trim_loop dangling while
+               data->is_trimmed stayed set, and the count stayed 0 because it
+               was only assigned on the success path below -- so
+               prc_release_content_compressed_ana_face freed the same block a
+               second time. That is a use-after-free reachable from the public
+               API by any file whose compressed ana-face parse fails.
+
+               Recording the count instead fixes a leak in the same stroke: the
+               loops already built own their trim curves, and freeing the array
+               alone dropped every one of them. Teardown releases both.
+
+               The +1 covers the loop that was being built when the curve
+               failed. prc_parse_ana_face_trim_loop increments the count only
+               once a loop has run to its EndLoop, so on a mid-loop failure the
+               partially built loop sits at index trim_loop_count, uncounted,
+               holding the trim_curves array and any curves already parsed into
+               it. Its slot is always allocated -- the array grows before the
+               index advances -- and every slot is zeroed when allocated, so the
+               extra entry is either that partial loop or zeros, and the release
+               helper is null-guarded either way. */
+            data->trim_loop_count = (trim_loop_count < trim_loop_capacity)
+                ? trim_loop_count + 1 : trim_loop_count;
             return code;
         }
 
@@ -1201,7 +1223,9 @@ prc_parse_content_compressed_ana_face(prc_context *ctx, prc_bit_state *bit_state
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_parse_compressed_point\n");
-                prc_free(ctx, data->trim_loop);
+                /* Same as above: the loops are fully parsed by this point, so
+                   teardown must see the count to release them and the array. */
+                data->trim_loop_count = trim_loop_count;
                 return code;
             }
         }
