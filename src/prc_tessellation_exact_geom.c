@@ -51,13 +51,28 @@
 
 static int prc_tessellate_surface(prc_context *ctx, prc_data *data,
     uint32_t shell_index, uint32_t face_index, prc_topo_face *topo_face,
-    uint8_t orientation);
+    uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data);
 
 /* A standard type for curve sampling */
 typedef prc_vec3 (*curve_func)(prc_context *ctx, void *params, double input);
 
 /* And for surfaces */
 typedef prc_vec3 (*surface_func)(prc_context *ctx, void *params, double u, double v);
+
+/* Something to hold loop samples that should be sufficiently fine to use
+   in the tessellation of a surface. These will be boundary points that should
+   be included in the tessellation of the surface */
+typedef struct prc_loop_samples_s
+{
+    uint32_t num_samples;
+    prc_vec3 *samples;
+} prc_loop_samples;
+
+typedef struct prc_coedge_samples_s
+{
+    uint32_t num_samples;
+    prc_vec3 *samples;
+} prc_coedge_samples;
 
 typedef struct prc_surface_sampling_info_s
 {
@@ -91,13 +106,20 @@ typedef struct prc_curve_sampling_info_s
     curve_func curve_eval_func;
 } prc_curve_sampling_info;
 
+typedef struct prc_surface_params_s
+{
+    void *surface_params;
+    uint32_t num_loops;
+    prc_loop_samples *loop_samples;
+} prc_surface_params;
+
 /* Forward declaration - populates sampling_info (including the valid parametric domain)
    for any prc_type_surf; needed early by the Blend02 bound-projection helpers */
 static int prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
     prc_surface_sampling_info *sampling_info);
 
 /* Forward declaration - used by prc_evaluate_composite before the function body appears */
-static int prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
+static int prc_get_curve_sample_info(prc_context *ctx, prc_ptr_curve *ptr_curve,
     prc_curve_sampling_info *sample_info);
 
 /* Forward declaration - used in curves before surfaces occur */
@@ -1002,7 +1024,7 @@ prc_evaluate_composite(prc_context *ctx, void *params, double u)
 
     subcurve = &composite->subcurves[subcurve_index];
     memset(&subcurve_info, 0, sizeof(subcurve_info));
-    code = prc_get_curve_sample_info(ctx, NULL, &subcurve->ptr_curve, &subcurve_info);
+    code = prc_get_curve_sample_info(ctx, &subcurve->ptr_curve, &subcurve_info);
     if (code < 0)
     {
         prc_error(ctx, code, "Failed to sample composite subcurve in prc_evaluate_composite\n");
@@ -1035,7 +1057,7 @@ prc_evaluate_composite(prc_context *ctx, void *params, double u)
 }
 
 static int
-prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compressed_curve *curve,
+prc_get_compressed_curve_sample_info(prc_context *ctx, prc_compressed_curve *curve,
     prc_curve_sampling_info *sample_info)
 {
     int code;
@@ -1104,7 +1126,7 @@ prc_get_compressed_curve_sample_info(prc_context *ctx, prc_data *data, prc_compr
 }
 
 static int 
-prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_curve,
+prc_get_curve_sample_info(prc_context *ctx, prc_ptr_curve *ptr_curve,
     prc_curve_sampling_info *sample_info)
 {
     int code;
@@ -1141,7 +1163,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             prc_crv_line *line = ptr_curve->crv_line;
             prc_parameterization params = line->parameterization;
 
-            sample_info->curve_params = NULL;
+            sample_info->curve_params = (void *)line;
             sample_info->curve_eval_func = prc_evaluate_line;
             sample_info->start = params.interval.min_value;
             sample_info->end = params.interval.max_value;
@@ -1228,7 +1250,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             }
 
             /* Sample info returns with details for the base_curve */
-            code = prc_get_curve_sample_info(ctx, data, &base_curve, sample_info);
+            code = prc_get_curve_sample_info(ctx, &base_curve, sample_info);
             if (code < 0)
             {
                 return code;
@@ -1262,7 +1284,7 @@ prc_get_curve_sample_info(prc_context *ctx, prc_data *data, prc_ptr_curve *ptr_c
             sample_info->curve_eval_func = prc_evaluate_onsurf;
 
             /* Get details of base curve sample type */
-            code = prc_get_curve_sample_info(ctx, data, &onsurf->uv_curve, &base_curve_sample_info);
+            code = prc_get_curve_sample_info(ctx, &onsurf->uv_curve, &base_curve_sample_info);
             if (code < 0)
             {
                 return code;
@@ -1324,7 +1346,7 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
     int code;
     double tolerance = fmax(CURVE_PRECISION, curve_tolerance);
 
-    code = prc_get_compressed_curve_sample_info(ctx, data, curve, &sample_info);
+    code = prc_get_compressed_curve_sample_info(ctx, curve, &sample_info);
     if (code < 0)
     {
         return code;
@@ -1417,13 +1439,9 @@ prc_sample_compressed_curve(prc_context *ctx, prc_data *data, uint32_t shell_ind
 }
 
 static int
-prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
-    uint32_t face_index, prc_content_wire_edge *curve)
+prc_sample_curve(prc_context *ctx, prc_content_wire_edge *curve,
+    prc_exact_geom_wire_data *wire_data)
 {
-    uint32_t geom_count = data->exact_geom_tess_part_count;
-    uint32_t file_index = data->exact_geom_tess_part[geom_count].file_index;
-    uint32_t topo_index = data->exact_geom_tess_part[geom_count].topo_context_index;
-    uint32_t body_index = data->exact_geom_tess_part[geom_count].body_index;
     uint8_t curve_approx_good = 0;
     void *curve_params = NULL;
     curve_func curve_eval_func = NULL;
@@ -1438,7 +1456,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
     prc_curve_sampling_info sample_info;
     int code;
 
-    code = prc_get_curve_sample_info(ctx, data, &curve->ptr_curve, &sample_info);
+    code = prc_get_curve_sample_info(ctx, &curve->ptr_curve, &sample_info);
     if (code < 0)
     {
         return code;
@@ -1569,7 +1587,7 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
                 uint32_t j;
 
                 memset(&sub_curve_info, 0, sizeof(sub_curve_info));
-                code = prc_get_curve_sample_info(ctx, data, &sub_curve->ptr_curve, &sub_curve_info);
+                code = prc_get_curve_sample_info(ctx, &sub_curve->ptr_curve, &sub_curve_info);
                 if (code < 0)
                 {
                     return code;
@@ -1651,8 +1669,8 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
         }
 
         default:
-            data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
-            return 0;
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid curve type in prc_sample_curve\n");
+            return PRC_ERROR_INTERNAL;
     }
 
     if (exact_geom_trans != NULL && transform != NULL)
@@ -1721,15 +1739,6 @@ prc_sample_curve(prc_context *ctx, prc_data *data, uint32_t shell_index,
 
     /* We now have a sufficient precision on the curve. Lets generate the
        XYZ sample points and store them */
-    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data =
-        (prc_exact_geom_wire_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_wire_data));
-    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data in prc_sample_curve\n");
-        return PRC_ERROR_MEMORY;
-    }
-
-    prc_exact_geom_wire_data *wire_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].wire_data;
     wire_data->number_of_points = num_samples;
     wire_data->points = (prc_vec3 *)prc_calloc(ctx, num_samples, sizeof(prc_vec3));
     if (wire_data->points == NULL)
@@ -1920,10 +1929,13 @@ static prc_vec3
 prc_evaluate_surf_torus(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_torus *torus = (prc_surf_torus *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_torus *torus = (prc_surf_torus *)surf_params->surface_params;
     double major_radius = torus->major_radius;
     double minor_radius = torus->minor_radius;
     double radius;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     radius = major_radius + minor_radius * cos(v);
 
@@ -1943,7 +1955,8 @@ static prc_vec3
 prc_evaluate_surf_fromcurves(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_fromcurves *surf = (prc_surf_fromcurves *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_fromcurves *surf = (prc_surf_fromcurves *)surf_params->surface_params;
     curve_func curve1 = NULL;
     void *curve1_params = NULL;
     double curve1_max_u = 0.0;
@@ -1955,6 +1968,8 @@ prc_evaluate_surf_fromcurves(prc_context *ctx, void *params, double u, double v)
     int code;
     prc_vec3 origin = surf->origin;
     prc_vec3 curve1_point, curve2_point, temp;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     /* We need to take into account the curve parameterization */
     /* Lets get the base evaluation surface function.  We probably should
@@ -2008,10 +2023,13 @@ static prc_vec3
 prc_evaluate_surf_cone(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_cone *cone = (prc_surf_cone *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_cone *cone = (prc_surf_cone *)surf_params->surface_params;
     double bottom_radius = cone->radius;
     double semi_angle = cone->semi_angle;
     double radius;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     radius = bottom_radius + v * tan(semi_angle);
     output.x = radius * cos(u);
@@ -2030,8 +2048,11 @@ static prc_vec3
 prc_evaluate_surf_sphere(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_sphere *sphere = (prc_surf_sphere *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_sphere *sphere = (prc_surf_sphere *)surf_params->surface_params;
     double radius = sphere->radius;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     output.x = radius * cos(v) * cos(u);
     output.y = radius * cos(v) * sin(u);
@@ -2049,8 +2070,11 @@ static prc_vec3
 prc_evaluate_surf_cylinder(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_cylinder *cylinder = (prc_surf_cylinder *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_cylinder *cylinder = (prc_surf_cylinder *)surf_params->surface_params;
     double radius = cylinder->radius;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     output.x = radius * cos(u);
     output.y = radius * sin(u);
@@ -2068,11 +2092,14 @@ static prc_vec3
 prc_evaluate_surf_plane(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output;
-    prc_surf_plane *plane = (prc_surf_plane *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_plane *plane = (prc_surf_plane *)surf_params->surface_params;
     double u_parameter_coeff_a = plane->u_parameter_coeff_a;
     double v_parameter_coeff_a = plane->v_parameter_coeff_a;
     double u_parameter_coeff_b = plane->u_parameter_coeff_b;
     double v_parameter_coeff_b = plane->v_parameter_coeff_b;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     output.x = u * u_parameter_coeff_a + u_parameter_coeff_b;
     output.y = v * v_parameter_coeff_a + v_parameter_coeff_b;
@@ -2088,7 +2115,8 @@ prc_evaluate_surf_plane(prc_context *ctx, void *params, double u, double v)
 static prc_vec3
 prc_evaluate_surf_nurbs(prc_context *ctx, void *params, double u, double v)
 {
-    prc_surf_nurbs *nurbs = (prc_surf_nurbs *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_nurbs *nurbs = (prc_surf_nurbs *)surf_params->surface_params;
     prc_vec3 output = { 0.0, 0.0, 0.0 };
     double Nu[PRC_BSPLINE_MAX_DEGREE + 1];
     double Nv[PRC_BSPLINE_MAX_DEGREE + 1];
@@ -2096,6 +2124,8 @@ prc_evaluate_surf_nurbs(prc_context *ctx, void *params, double u, double v)
     uint32_t num_ctrl_v = nurbs->highest_index_of_control_points_v + 1;
     uint32_t span_u, span_v, i, j;
     double x = 0.0, y = 0.0, z = 0.0, weight_sum = 0.0;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     if (nurbs->du > PRC_BSPLINE_MAX_DEGREE || nurbs->dv > PRC_BSPLINE_MAX_DEGREE)
     {
@@ -2142,13 +2172,16 @@ static prc_vec3
 prc_evaluate_surf_extrusion(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output, base_point, temp;
-    prc_surf_extrusion *extrusion = (prc_surf_extrusion *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_extrusion *extrusion = (prc_surf_extrusion *)surf_params->surface_params;
     curve_func base_curve_func = NULL;
     void *base_curve_params = NULL;
     prc_vec3 sweep_vector = extrusion->sweep_vector;
     double curve_max_u = 0.0;
     double curve_min_u = 0.0;
     int code;
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
 
     /* We need to take into account the curve parameterization */
     /* Lets get the base evaluation surface function.  We probably should
@@ -2186,7 +2219,8 @@ static prc_vec3
 prc_evaluate_surf_revolution(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output, base_point;
-    prc_surf_revolution *revolution = (prc_surf_revolution *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_revolution *revolution = (prc_surf_revolution *)surf_params->surface_params;
     curve_func base_curve_func = NULL;
     void *base_curve_params = NULL;
     double curve_max_u = 0.0;
@@ -2199,7 +2233,9 @@ prc_evaluate_surf_revolution(prc_context *ctx, void *params, double u, double v)
     prc_vec3 point_on_axis;
     prc_vec3 temp_axis_x, temp_axis_y;
     prc_vec3 temp1;
-    
+    uint32_t num_loops = surf_params->num_loops;
+    prc_loop_samples *loops = surf_params->loop_samples;
+
     /* We need to take into account the curve parameterization */
     /* Lets get the base evaluation surface function.  We probably should
        do a 1-D curve sample here to get a good approximation of the curve. ToDo. */
@@ -2697,6 +2733,7 @@ prc_evaluate_surf_cylindrical(prc_context *ctx, void *params, double u, double v
     prc_surf_cylindrical *cylindrical = (prc_surf_cylindrical *)params;
     surface_func base_eval_func = NULL;
     void *base_params = NULL;
+    prc_surface_params surf_params = { 0 };
     int code;
     prc_ptr_surface base_surf = cylindrical->base_surface;
     double base_start_u;
@@ -2735,7 +2772,8 @@ prc_evaluate_surf_cylindrical(prc_context *ctx, void *params, double u, double v
         return output;
     }
 
-    base_point = base_eval_func(ctx, base_params, u, v);
+    surf_params.surface_params = base_params;
+    base_point = base_eval_func(ctx, &surf_params, u, v);
     output.x = base_point.x * cos(base_point.y);
     output.y = base_point.x * sin(base_point.y);
     output.z = base_point.z;
@@ -2746,28 +2784,6 @@ prc_evaluate_surf_cylindrical(prc_context *ctx, void *params, double u, double v
     }
 
     return output;
-}
-
-static prc_vec3
-prc_evaluate_surface_grid_point(prc_context *ctx, surface_func surface_eval_func,
-    void *surface_params, double start_u, double end_u, double start_v, double end_v,
-    uint32_t i, uint32_t j, uint32_t num_samples_u, uint32_t num_samples_v)
-{
-    double u_den = (num_samples_u > 1) ? (double)(num_samples_u - 1) : 1.0;
-    double v_den = (num_samples_v > 1) ? (double)(num_samples_v - 1) : 1.0;
-    double u = start_u + (end_u - start_u) * ((double)i / u_den);
-    double v = start_v + (end_v - start_v) * ((double)j / v_den);
-
-    return surface_eval_func(ctx, surface_params, u, v);
-}
-
-static void
-prc_average_four_points(prc_vec3 p00, prc_vec3 p10, prc_vec3 p01, prc_vec3 p11,
-    prc_vec3 *avg)
-{
-    avg->x = 0.25 * (p00.x + p10.x + p01.x + p11.x);
-    avg->y = 0.25 * (p00.y + p10.y + p01.y + p11.y);
-    avg->z = 0.25 * (p00.z + p10.z + p01.z + p11.z);
 }
 
 static double
@@ -4451,7 +4467,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             synthetic_face.surface_geometry.surface = synthetic_surface;
 
             code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
-                face->orientation_surface_with_shell);
+                face->orientation_surface_with_shell, NULL);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO cylinder\n");
@@ -4639,7 +4655,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             synthetic_face.surface_geometry.surface = synthetic_surface;
 
             code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
-                face->orientation_surface_with_shell);
+                face->orientation_surface_with_shell, NULL);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO torus\n");
@@ -4721,11 +4737,140 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
 }
 
 static int
-prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, uint32_t face_index,
-                            prc_topo_face *topo_face, uint8_t orientation)
+prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
+    prc_coedge_in_loop *topo_coedge, prc_coedge_samples *coedge_samples)
 {
     int code;
-    void *surface_params = NULL;
+
+    /* This function samples a coedge and stores the results in coedge_samples */
+    if (topo_coedge->next_coedge.topo->tag != PRC_TYPE_TOPO_CoEdge)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Error in prc_sample_coedge\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    else
+    {
+        if (topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo->tag != PRC_TYPE_TOPO_Edge)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Error in prc_sample_coedge\n");
+            return PRC_ERROR_INTERNAL;
+        }
+        else
+        {
+            /* Now we finally get to the curve */
+            prc_topo_wire_edge *wire_edge =
+                topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo->topo_wire_edge;
+            prc_exact_geom_wire_data wire_samples = { 0 };
+            code = prc_sample_curve(ctx, &wire_edge->curve, &wire_samples);
+            if (code < 0)
+            {
+                if (wire_samples.points != NULL)
+                {
+                    prc_free(ctx, wire_samples.points);
+                }
+                prc_error(ctx, code, "Error in prc_sample_curve\n");
+                return code;
+            }
+            /* Transfer the samples to the coedge structure */
+            coedge_samples->num_samples = wire_samples.number_of_points;
+            coedge_samples->samples = wire_samples.points;
+        }
+    }
+    return 0;
+}
+
+static int
+prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
+    prc_topo_face *topo_face, prc_ptr_topology *loop, prc_loop_samples *loop_samples)
+{
+    /* Loops are made up of several co-edges which should be curves.
+       Here we make our way through a sampling approximation of the loop */
+    prc_topo_loop *topo_loop;
+    uint32_t num_coedges;
+    uint32_t k, j;
+    int code;
+    prc_coedge_samples *coedge_samples;
+    uint32_t total_samples = 0;
+
+    /* First get the loop that we need */
+    if (!loop->is_stored)
+    {
+        topo_loop = loop->topo->topo_loop;
+    }
+    else
+    {
+        if (loop->topo_identifier >= brep_ref_data->number_of_topo_refs)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid loop identifier in prc_sample_loop\n");
+            return PRC_ERROR_INTERNAL;
+        }
+        topo_loop = brep_ref_data->topo_refs[loop->topo_identifier]->topo_loop;
+    }
+
+    num_coedges = topo_loop->number_of_coedges;
+    coedge_samples = (prc_coedge_samples *)prc_calloc(ctx, num_coedges, sizeof(prc_coedge_samples));
+    if (coedge_samples == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed in allocation prc_sample_loop\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    /* We have to sample each of the coedges and concatenate them together */
+    for (k = 0; k < num_coedges; k++)
+    {
+        code = prc_sample_coedge(ctx, brep_ref_data, &topo_loop->coedge[k], &coedge_samples[k]);
+        if (code < 0)
+        {
+            /* Clean up any coedges that did work */
+            for (j = 0; j <= k; j++)
+            {
+                if (coedge_samples[j].samples != NULL)
+                {
+                    prc_free(ctx, coedge_samples[j].samples);
+                }
+            }
+            prc_free(ctx, coedge_samples);
+            prc_error(ctx, code, "Failed in prc_sample_coedge\n");
+            return code;
+        }
+        total_samples += coedge_samples[k].num_samples;
+    }
+
+    /* Now we have to combine the coedges into one loop */
+    /* TODO: Do we need to replicate the last one? */
+    loop_samples->num_samples = total_samples;
+    loop_samples->samples = (prc_vec3 *)prc_calloc(ctx, total_samples, sizeof(prc_vec3));
+    if (loop_samples->samples != NULL)
+    {
+        uint32_t pos = 0;
+        for (j = 0; j < num_coedges; j++)
+        {
+            memcpy(&loop_samples->samples[pos], coedge_samples[j].samples, sizeof(prc_vec3) * coedge_samples[j].num_samples);
+            pos += coedge_samples[j].num_samples;
+        }
+    }
+
+    /* Free up the coedge samples */
+    for (j = 0; j < num_coedges; j++)
+    {
+        if (coedge_samples[j].samples != NULL)
+        {
+            prc_free(ctx, coedge_samples[j].samples);
+        }
+    }
+    prc_free(ctx, coedge_samples);
+
+    return 0;
+}
+
+static int
+prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
+                       uint32_t face_index, prc_topo_face *topo_face,
+                       uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data)
+{
+    int code;
+    uint32_t k;
+    prc_surface_params surf_params = { 0 };
     surface_func surface_eval_func = NULL;
     uint32_t num_samples_u = 0;
     uint32_t num_samples_v = 0;
@@ -4748,6 +4893,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
     uint32_t cell_count_v;
     prc_exact_geom_transform exact_geom_trans;
     prc_type_surf surface = topo_face->surface_geometry.surface;
+    uint32_t num_loops = topo_face->number_of_loops;
+    prc_ptr_topology *loops = topo_face->loops;
+    prc_loop_samples *loop_samples = NULL;
 
     /* Orientation is either 0 (opposite direction), 1 (same direction), or 2 (unknown.
        If unknown it is needed to do geometric tests to determine the correct orientation.
@@ -4770,6 +4918,56 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
     end_u = sampling_info.end_u;
     end_v = sampling_info.end_v;
 
+    /* Lets get any loops that may be associated with the surface. Loops
+       are curves (or vertices -- e.g. the tip of a cone) that make cuts
+       on the parametric surface. I would expect to see them primarily used
+       with planar surfaces to cut things like a washer for example. These have
+       to be PRC_TYPE_TOPO_Loop a vertex type is supposed to be a line with
+       the same starting and ending position */
+    /* Lets to a sanity check that indeed they are PRC_TYPE_TOPO_Loop. We will
+       not check the is stored values as we should have already tested those */
+    /* The check for brep_ref_data not NULL is due to the fact that this 
+       method is sometimes called from the compressed surface code */
+    if (brep_ref_data != NULL)
+    {
+        for (k = 0; k < num_loops; k++)
+        {
+            if (!loops[k].is_stored)
+            {
+                if (loops[k].topo->tag != PRC_TYPE_TOPO_Loop)
+                {
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Surface loop is of wrong type\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+            }
+        }
+
+        /* For each of these loops we will need to get a set of samples that
+           are sufficient for us to approximate them before we can make use of them.
+           Lets do that first and store the loops in a sampled form */
+        if (num_loops > 0)
+        {
+            loop_samples = (prc_loop_samples *)prc_calloc(ctx, num_loops, sizeof(prc_loop_samples));
+            if (loop_samples == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed in allocation prc_tessellate_surface\n");
+                return PRC_ERROR_MEMORY;
+            }
+            for (k = 0; k < num_loops; k++)
+            {
+                code = prc_sample_loop(ctx, brep_ref_data, topo_face, &loops[k], &loop_samples[k]);
+                if (code < 0)
+                {
+                    prc_free(ctx, loop_samples);
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_sample_loop\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+            }
+        }
+        surf_params.loop_samples = loop_samples;
+        surf_params.num_loops = num_loops;
+    }
+
     switch (surface.surface_type)
     {
         case PRC_TYPE_SURF_FromCurves:
@@ -4777,7 +4975,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_fromcurves *from_curves = surface.surf_fromcurves;
             prc_uv_parameterization params = from_curves->parameterization;
 
-            surface_params = (void *)from_curves;
+            surf_params.surface_params = (void *)from_curves;
             surface_eval_func = prc_evaluate_surf_fromcurves;
             break;
         }
@@ -4787,7 +4985,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_cone *cone = surface.surf_cone;
             prc_uv_parameterization params = cone->parameterization;
 
-            surface_params = (void *)cone;
+            surf_params.surface_params = (void *)cone;
             surface_eval_func = prc_evaluate_surf_cone;
             break;
         }
@@ -4797,7 +4995,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_cylinder *cylinder = surface.surf_cylinder;
             prc_uv_parameterization params = cylinder->parameterization;
 
-            surface_params = (void *)cylinder;
+            surf_params.surface_params = (void *)cylinder;
             surface_eval_func = prc_evaluate_surf_cylinder;
             break;
         }
@@ -4807,7 +5005,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_sphere *sphere = surface.surf_sphere;
             prc_uv_parameterization params = sphere->parameterization;
 
-            surface_params = (void *)sphere;
+            surf_params.surface_params = (void *)sphere;
             surface_eval_func = prc_evaluate_surf_sphere;
             break;
         }
@@ -4817,7 +5015,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_torus *torus = surface.surf_torus;
             prc_uv_parameterization params = torus->parameterization;
 
-            surface_params = (void *)torus;
+            surf_params.surface_params = (void *)torus;
             surface_eval_func = prc_evaluate_surf_torus;
             break;
         }
@@ -4827,7 +5025,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_cylindrical *cylindrical = surface.surf_cylindrical;
             prc_uv_parameterization params = cylindrical->parameterization;
 
-            surface_params = (void *)cylindrical;
+            surf_params.surface_params = (void *)cylindrical;
             surface_eval_func = prc_evaluate_surf_cylindrical;
             break;
         }
@@ -4837,7 +5035,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_extrusion *extrusion = surface.surf_extrusion;
             prc_uv_parameterization params = extrusion->parameterization;
 
-            surface_params = (void *)extrusion;
+            surf_params.surface_params = (void *)extrusion;
             surface_eval_func = prc_evaluate_surf_extrusion;
             break;
         }
@@ -4847,7 +5045,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_revolution *revolution = surface.surf_revolution;
             prc_uv_parameterization params = revolution->parameterization;
 
-            surface_params = (void *)revolution;
+            surf_params.surface_params = (void *)revolution;
             surface_eval_func = prc_evaluate_surf_revolution;
             break;
         }
@@ -4857,7 +5055,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
             prc_surf_plane *plane = surface.surf_plane;
             prc_domain params = plane->domain;
 
-            surface_params = (void *)plane;
+            surf_params.surface_params = (void *)plane;
             surface_eval_func = prc_evaluate_surf_plane;
             break;
         }
@@ -4866,7 +5064,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         {
             prc_surf_offset *offset = surface.surf_offset;
 
-            surface_params = (void *)offset;
+            surf_params.surface_params = (void *)offset;
             surface_eval_func = prc_evaluate_surf_offset;
             break;
         }
@@ -4875,7 +5073,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         {
             prc_surf_nurbs *nurbs = surface.surf_nurbs;
 
-            surface_params = (void *)nurbs;
+            surf_params.surface_params = (void *)nurbs;
             surface_eval_func = prc_evaluate_surf_nurbs;
             break;
         }
@@ -4884,7 +5082,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         {
             prc_surf_blend02 *blend = surface.surf_blend02;
 
-            surface_params = (void *)blend;
+            surf_params.surface_params = (void *)blend;
             surface_eval_func = prc_evaluate_surf_blend02;
             break;
         }
@@ -4893,7 +5091,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
         {
             prc_surf_blend01 *blend = surface.surf_blend01;
 
-            surface_params = (void *)blend;
+            surf_params.surface_params = (void *)blend;
             surface_eval_func = prc_evaluate_surf_blend01;
             break;
         }
@@ -4943,9 +5141,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
                     double u0 = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                     double u1 = prc_get_surface_param(start_u, end_u, next_i, vertex_samples_u, wrap_u);
                     double v = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
-                    prc_vec3 p0 = surface_eval_func(ctx, surface_params, u0, v);
-                    prc_vec3 p1 = surface_eval_func(ctx, surface_params, u1, v);
-                    prc_vec3 mid = surface_eval_func(ctx, surface_params, 0.5 * (u0 + u1), v);
+                    prc_vec3 p0 = surface_eval_func(ctx, &surf_params, u0, v);
+                    prc_vec3 p1 = surface_eval_func(ctx, &surf_params, u1, v);
+                    prc_vec3 mid = surface_eval_func(ctx, &surf_params, 0.5 * (u0 + u1), v);
                     prc_vec3 seg_mid;
 
                     seg_mid.x = 0.5 * (p0.x + p1.x);
@@ -4974,9 +5172,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
                     double u = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                     double v0 = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
                     double v1 = prc_get_surface_param(start_v, end_v, next_j, vertex_samples_v, wrap_v);
-                    prc_vec3 p0 = surface_eval_func(ctx, surface_params, u, v0);
-                    prc_vec3 p1 = surface_eval_func(ctx, surface_params, u, v1);
-                    prc_vec3 mid = surface_eval_func(ctx, surface_params, u, 0.5 * (v0 + v1));
+                    prc_vec3 p0 = surface_eval_func(ctx, &surf_params, u, v0);
+                    prc_vec3 p1 = surface_eval_func(ctx, &surf_params, u, v1);
+                    prc_vec3 mid = surface_eval_func(ctx, &surf_params, u, 0.5 * (v0 + v1));
                     prc_vec3 seg_mid;
 
                     seg_mid.x = 0.5 * (p0.x + p1.x);
@@ -5108,9 +5306,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index, u
                 double u = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                 double v = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
 
-                position = surface_eval_func(ctx, surface_params, u, v);
+                position = surface_eval_func(ctx, &surf_params, u, v);
 
-                code = prc_compute_surface_normal(ctx, surface_eval_func, surface_params,
+                code = prc_compute_surface_normal(ctx, surface_eval_func, &surf_params,
                     u, v, du, dv, start_u, end_u, start_v, end_v, &sampling_info,
                     orientation, &normal);
                 if (code < 0)
@@ -5346,12 +5544,28 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 case PRC_TYPE_TOPO_WireEdge:
                 {
                     prc_topo_wire_edge *wire_edge = body->wire_body.topo->topo_wire_edge;
-                    code = prc_sample_curve(ctx, data, i, j, &wire_edge->curve);
+                    prc_exact_geom_wire_data *wire_data =
+                        (prc_exact_geom_wire_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_wire_data));
+                    if (data->exact_geom_tess_part[geom_count].shells[i].faces[j].wire_data == NULL)
+                    {
+                        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of wire_data\n");
+                        return PRC_ERROR_MEMORY;
+                    }
+                    data->exact_geom_tess_part[geom_count].shells[i].faces[j].wire_data = wire_data;
+                    code = prc_sample_curve(ctx, &wire_edge->curve, wire_data);
                     if (code < 0)
                     {
+                        /* Clean up wire data */
+                        if (wire_data->points != NULL)
+                        {
+                            prc_free(ctx, wire_data->points);
+                            prc_free(ctx, wire_data);
+                            data->exact_geom_tess_part[geom_count].shells[i].faces[j].wire_data = NULL;
+                        }
                         prc_error(ctx, code, "Failed in prc_sample_curve\n");
                         return code;
                     }
+
                     (*num_tessellations)++;
                     break;
                 }
@@ -5394,7 +5608,7 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 orientation = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].orientation;
                 data->exact_geom_tess_part[geom_count].shells[i].faces[j].orientation = orientation;
                 prc_topo_face *topo_face = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].face.topo->topo_face;
-                code = prc_tessellate_surface(ctx, data, i, j, topo_face, orientation);
+                code = prc_tessellate_surface(ctx, data, i, j, topo_face, orientation, topo->brep_ref_data);
                 if (code < 0)
                 {
                     prc_error(ctx, code, "Failed in prc_sample_curve\n");
