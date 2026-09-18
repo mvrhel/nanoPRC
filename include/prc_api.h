@@ -1003,6 +1003,28 @@ typedef struct prc_api_write_rep_item_s
     /** SURFACE only: 1 if the tessellated surface is a closed (watertight)
         shell, 0 otherwise. Ignored for WIRE. */
     uint8_t  is_closed;
+
+    /** 1 to give this item its own material rather than the writer's shared
+        default. Leave 0 and the item is styled exactly as every item written
+        before this field existed: one shared terracotta material, which is
+        there because a genuinely styleless file stops real viewers rendering
+        at all.
+
+        A material written here becomes a GRAPH_Material with its ambient,
+        diffuse and specular slots all pointing at `color`, and its emissive
+        slot at black. That mirrors the shared default's construction, which
+        is itself the shape real producers were observed to use, and it is
+        the reason all four slots are populated: a material with an unset
+        emissive index is rejected outright when a viewer resolves it, even
+        though lighter-weight checks upstream accept it. */
+    uint8_t  has_material;
+    /** Linear RGB in 0..1, used for ambient, diffuse and specular. */
+    double   material_color[3];
+    /** Opacity in 0..1; 1 is opaque. A zero here means fully transparent,
+        not "unset" -- set it explicitly whenever has_material is 1. */
+    double   material_alpha;
+    /** Specular exponent in 0..1. 0 is legal and means a matte surface. */
+    double   material_shininess;
 } prc_api_write_rep_item;
 
 /**

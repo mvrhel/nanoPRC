@@ -94,6 +94,12 @@ uint32_t prc_write_material_add(prc_context *ctx, prc_write_global_tables *table
    transparency, is_rendering_parameters + rendering_parameters), per the
    design's specified style dedup tuple. style->tag is ignored on input;
    the entry is always written out as PRC_TYPE_GRAPH_Style. */
+/* One representation item's own material: colour + material + style, all
+   deduplicated against what the tables already hold. Returns the biased style
+   index, or 0 on failure. */
+uint32_t prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
+    const double color[3], double alpha, double shininess);
+
 uint32_t prc_write_style_add(prc_context *ctx, prc_write_global_tables *tables,
     const prc_graph_style *style);
 

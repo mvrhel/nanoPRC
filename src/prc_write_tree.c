@@ -183,16 +183,127 @@ prc_write_tree_find_index(const prc_write_tree_flat *flat, const prc_write_tree_
     return 0; /* unreachable if `node` really is one of this tree's children */
 }
 
+/* ---- item styles ---- */
+
+static uint32_t
+prc_write_style_for_item(const prc_write_style_map *map, const prc_write_rep_item *ri,
+    uint32_t default_style)
+{
+    uint32_t i;
+
+    if (map == NULL)
+        return default_style;
+    for (i = 0; i < map->count; i++)
+        if (map->items[i] == ri)
+            return map->styles[i];
+    return default_style;
+}
+
+static int
+prc_write_style_map_add(prc_context *ctx, prc_write_style_map *map,
+    const prc_write_rep_item *ri, uint32_t style)
+{
+    if (map->count == map->cap)
+    {
+        uint32_t new_cap = map->cap ? map->cap * 2u : 8u;
+        const prc_write_rep_item **ni = (const prc_write_rep_item **)prc_calloc(ctx,
+            new_cap, sizeof(const prc_write_rep_item *));
+        uint32_t *ns = (uint32_t *)prc_calloc(ctx, new_cap, sizeof(uint32_t));
+
+        if (ni == NULL || ns == NULL)
+        {
+            if (ni != NULL) prc_free(ctx, ni);
+            if (ns != NULL) prc_free(ctx, ns);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_style_map_add\n");
+            return PRC_ERROR_MEMORY;
+        }
+        if (map->count > 0)
+        {
+            memcpy(ni, map->items, sizeof(const prc_write_rep_item *) * map->count);
+            memcpy(ns, map->styles, sizeof(uint32_t) * map->count);
+        }
+        if (map->items != NULL) prc_free(ctx, map->items);
+        if (map->styles != NULL) prc_free(ctx, map->styles);
+        map->items = ni;
+        map->styles = ns;
+        map->cap = new_cap;
+    }
+    map->items[map->count] = ri;
+    map->styles[map->count] = style;
+    map->count++;
+    return 0;
+}
+
+static int
+prc_write_collect_node_styles(prc_context *ctx, prc_write_global_tables *tables,
+    const prc_write_tree_node *node, prc_write_style_map *map)
+{
+    uint32_t k;
+
+    if (node == NULL)
+        return 0;
+
+    for (k = 0; k < node->num_rep_items; k++)
+    {
+        const prc_write_rep_item *ri = &node->rep_items[k];
+        uint32_t style;
+
+        if (!ri->has_material)
+            continue;
+
+        style = prc_write_add_item_style(ctx, tables, ri->material_color,
+                                         ri->material_alpha, ri->material_shininess);
+        if (style == 0)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_collect_item_styles: could not register an item's material\n");
+            return PRC_ERROR_INTERNAL;
+        }
+        if (prc_write_style_map_add(ctx, map, ri, style) != 0)
+            return PRC_ERROR_MEMORY;
+    }
+
+    for (k = 0; k < node->num_children; k++)
+        if (prc_write_collect_node_styles(ctx, tables, node->children[k], map) != 0)
+            return PRC_ERROR_INTERNAL;
+
+    return 0;
+}
+
+int
+prc_write_collect_item_styles(prc_context *ctx, prc_write_global_tables *tables,
+    const prc_write_tree_node *root, prc_write_style_map *map)
+{
+    if (ctx == NULL || tables == NULL || map == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "prc_write_collect_item_styles: invalid arguments\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    memset(map, 0, sizeof(*map));
+    return prc_write_collect_node_styles(ctx, tables, root, map);
+}
+
+void
+prc_write_style_map_release(prc_context *ctx, prc_write_style_map *map)
+{
+    if (map == NULL)
+        return;
+    if (map->items != NULL) prc_free(ctx, map->items);
+    if (map->styles != NULL) prc_free(ctx, map->styles);
+    memset(map, 0, sizeof(*map));
+}
+
 /* ---- per-entity writers ---- */
 
 static int
 prc_write_rep_item_entry(prc_context *ctx, prc_bit_write_state *s, const prc_write_rep_item *ri,
-    uint32_t biased_style_index)
+    uint32_t biased_style_index, const prc_write_style_map *style_map)
 {
     uint32_t tag = (ri->kind == PRC_WRITE_RI_WIRE) ? PRC_TYPE_RI_PolyWire : PRC_TYPE_RI_PolyBrepModel;
+    uint32_t style = prc_write_style_for_item(style_map, ri, biased_style_index);
 
     if (prc_bitwrite_uint32(ctx, s, tag) != 0) return -1;
-    if (prc_write_base_with_graphics_default(ctx, s, 0, NULL, biased_style_index) != 0) return -1;
+    if (prc_write_base_with_graphics_default(ctx, s, 0, NULL, style) != 0) return -1;
     if (prc_bitwrite_uint32(ctx, s, 0) != 0) return -1;                          /* biased_index_local_coordinate_system */
     if (prc_bitwrite_uint32(ctx, s, ri->biased_tessellation_index) != 0) return -1; /* biased_index_tessellation */
 
@@ -215,7 +326,7 @@ prc_write_node_has_part(const prc_write_tree_node *node)
 
 static int
 prc_write_part(prc_context *ctx, prc_bit_write_state *s, const prc_write_tree_node *node,
-    uint32_t biased_style_index)
+    uint32_t biased_style_index, const prc_write_style_map *style_map)
 {
     uint32_t k;
 
@@ -231,7 +342,7 @@ prc_write_part(prc_context *ctx, prc_bit_write_state *s, const prc_write_tree_no
 
     if (prc_bitwrite_uint32(ctx, s, node->num_rep_items) != 0) return -1;
     for (k = 0; k < node->num_rep_items; k++)
-        if (prc_write_rep_item_entry(ctx, s, &node->rep_items[k], biased_style_index) != 0) return -1;
+        if (prc_write_rep_item_entry(ctx, s, &node->rep_items[k], biased_style_index, style_map) != 0) return -1;
 
     if (prc_write_markup_data_empty(ctx, s) != 0) return -1;
     if (prc_bitwrite_uint32(ctx, s, 0) != 0) return -1; /* number_views */
@@ -293,7 +404,7 @@ prc_write_product(prc_context *ctx, prc_bit_write_state *s, const prc_write_tree
 int
 prc_write_tree_to_stream(prc_context *ctx, prc_bit_write_state *s,
     const prc_write_tree_node *root, uint32_t *root_biased_index_out,
-    uint32_t default_biased_style_index)
+    uint32_t default_biased_style_index, const prc_write_style_map *style_map)
 {
     prc_write_tree_flat flat;
     uint32_t i;
@@ -319,7 +430,7 @@ prc_write_tree_to_stream(prc_context *ctx, prc_bit_write_state *s,
     if (prc_bitwrite_uint32(ctx, s, parts_count) != 0) goto fail;
     for (i = 0; i < flat.count; i++)
         if (prc_write_node_has_part(flat.order[i]))
-            if (prc_write_part(ctx, s, flat.order[i], default_biased_style_index) != 0) goto fail;
+            if (prc_write_part(ctx, s, flat.order[i], default_biased_style_index, style_map) != 0) goto fail;
 
     if (prc_bitwrite_uint32(ctx, s, flat.count) != 0) goto fail;
     {

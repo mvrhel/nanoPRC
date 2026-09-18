@@ -453,7 +453,7 @@ int main(int argc, char **argv)
 
         memset(&tree_s, 0, sizeof(tree_s));
         if (prc_bitwrite_init(ctx, &tree_s, 256) != 0) { printf("tree bitwrite_init failed\n"); return 1; }
-        if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index) != 0)
+        if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index, NULL) != 0)
         {
             printf("prc_write_tree_to_stream failed\n");
             prc_api_print_error_stack(ctx);
