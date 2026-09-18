@@ -1156,6 +1156,80 @@ typedef struct prc_api_write_tessellation_s
         assumed the specification's "always a multiple of 3" claim. */
     const uint32_t *tex_indices;
 
+    /* --- TRIANGLES: optional fan and strip primitives ---
+       A face may carry triangles, triangle fans and triangle strips at once;
+       PRC stores them as separate entity groups within the one face, in that
+       fixed order. These arrays describe the fan and strip groups; leave them
+       NULL/0 and a face is triangles only, which is what every caller written
+       before these fields existed gets.
+
+       Fans and strips are described per face, parallel to face_tri_counts, so
+       all three arrays have num_faces entries. The vertex-count and index
+       arrays are flat and run over all faces in face order.
+
+       A fan of n vertices draws n-2 triangles, all sharing vertex 0. A strip
+       of n vertices draws n-2 triangles, each sharing the previous two
+       vertices. Both need n >= 3.
+
+       Normals follow the same rule as triangles: supply fan_norm_indices /
+       strip_norm_indices alongside `normals`, or leave them NULL to get the
+       one-normal-per-group form (PRC_FACETESSDATA_TriangleFanOneNormal and
+       its strip counterpart), where the group's first vertex carries the only
+       normal index and the count word is tagged with the format's
+       single-normal marker. must_calculate_normals omits normal indices
+       entirely, as it does for triangles. */
+    /** Fans in each face, parallel to face_tri_counts. NULL means none. */
+    const uint32_t *face_fan_counts;
+    /** Vertices in each fan, over all faces in order; sum of face_fan_counts
+        entries long. Each value must be >= 3. */
+    const uint32_t *fan_vertex_counts;
+    /** Vertex indices for every fan, concatenated: the first
+        fan_vertex_counts[0] entries are the first fan, and so on. Indices are
+        into `positions`. Required if face_fan_counts is non-NULL. */
+    const uint32_t *fan_indices;
+    /** Normal indices parallel to fan_indices (into `normals`), or NULL for
+        the one-normal-per-fan form. Must be NULL if `normals` is NULL. */
+    const uint32_t *fan_norm_indices;
+
+    /** Strips in each face, parallel to face_tri_counts. NULL means none. */
+    const uint32_t *face_strip_counts;
+    /** Vertices in each strip, over all faces in order. Each >= 3. */
+    const uint32_t *strip_vertex_counts;
+    /** Vertex indices for every strip, concatenated. */
+    const uint32_t *strip_indices;
+    /** Normal indices parallel to strip_indices, or NULL for one normal per
+        strip. */
+    const uint32_t *strip_norm_indices;
+
+    /* --- optional RGB(A) vertex colours ---
+       TRIANGLES and WIRE. One colour per *vertex reference* in the entity
+       groups, not one per entry of `positions`: a position used by three
+       triangles is coloured three times, once for each use. That is how the
+       format stores it and how a reader counts it back, since the stored
+       array carries no count of its own.
+
+       So the expected length is the total number of vertex references the
+       tessellation describes: 3 per triangle, plus each fan's and strip's
+       vertex count. For WIRE it is one colour per point, or one per segment
+       when `vertex_colors_per_segment` is set -- a run of n points has n-1
+       segments, or n when the element closes.
+
+       The wire format delta-encodes these: the first colour in full, then one
+       bit per entry saying "same as the previous one" and a full colour only
+       when it differs. Supplying a flat array of repeated colours is therefore
+       cheap, and no caller needs to do the run-length work itself. */
+    /** 3 bytes per colour (r,g,b), or 4 (r,g,b,a) when
+        `vertex_colors_have_alpha` is set. NULL writes none. */
+    const uint8_t *vertex_colors;
+    /** Number of colours, not of bytes. */
+    uint32_t       num_vertex_colors;
+    /** 1 if `vertex_colors` holds four components per colour rather than
+        three. */
+    int            vertex_colors_have_alpha;
+    /** WIRE only: 1 to colour each segment rather than each point. Ignored
+        for TRIANGLES, where the format has no per-segment form. */
+    int            vertex_colors_per_segment;
+
     /* --- PRC_API_WRITE_TESS_KIND_WIRE --- */
     const prc_api_write_wire_element *wire_elements;
     uint32_t      num_wire_elements;
