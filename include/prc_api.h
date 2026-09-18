@@ -1072,6 +1072,38 @@ typedef enum
  * position/normal/index/face-group fields as TRIANGLES but performs its
  * own welding using `tolerance`.
  */
+
+/**
+ * @brief One triangle fan or triangle strip.
+ *
+ * Self-describing: the group carries its own indices and its own length, so
+ * no two arrays have to be kept in step and no offset into a shared buffer
+ * has to be computed by the caller.
+ */
+typedef struct prc_api_write_tri_group_s
+{
+    /** Vertex indices into `positions`; num_vertices entries. */
+    const uint32_t *vertex_indices;
+    /** Normal indices into `normals`, num_vertices entries, or NULL for the
+        one-normal-per-group form. Must be NULL if `normals` is NULL, and is
+        ignored when must_calculate_normals is set. */
+    const uint32_t *normal_indices;
+    /** Vertices in this group; must be >= 3. A fan or strip of n vertices
+        draws n-2 triangles. */
+    uint32_t num_vertices;
+} prc_api_write_tri_group;
+
+/** @brief The fan and strip groups belonging to one face. */
+typedef struct prc_api_write_face_groups_s
+{
+    /** num_fans entries, or NULL when the face has no fans. */
+    const prc_api_write_tri_group *fans;
+    uint32_t num_fans;
+    /** num_strips entries, or NULL when the face has no strips. */
+    const prc_api_write_tri_group *strips;
+    uint32_t num_strips;
+} prc_api_write_face_groups;
+
 typedef struct prc_api_write_tessellation_s
 {
     prc_api_write_tess_kind_t kind;
@@ -1155,6 +1187,67 @@ typedef struct prc_api_write_tessellation_s
         but they are why a file written here will not match a reader that
         assumed the specification's "always a multiple of 3" claim. */
     const uint32_t *tex_indices;
+
+    /* --- TRIANGLES: optional fan and strip primitives ---
+       A face may carry triangles, triangle fans and triangle strips at once;
+       PRC stores them as separate entity groups within the one face, in that
+       fixed order. These arrays describe the fan and strip groups; leave them
+       NULL/0 and a face is triangles only, which is what every caller written
+       before these fields existed gets.
+
+       Each face's groups are given by one prc_api_write_face_groups entry, so
+       face_groups has num_faces entries and every group states its own length
+       beside its own indices. Nothing has to be kept in step with anything
+       else.
+
+       A fan of n vertices draws n-2 triangles, all sharing vertex 0. A strip
+       of n vertices draws n-2 triangles, each sharing the previous two
+       vertices. Both need n >= 3.
+
+       Normals follow the same rule as triangles: give a group a
+       normal_indices array alongside `normals`, or leave it NULL to get the
+       one-normal-per-group form (PRC_FACETESSDATA_TriangleFanOneNormal and
+       its strip counterpart), where the group's first vertex carries the only
+       normal index and the count word is tagged with the format's
+       single-normal marker.
+
+       must_calculate_normals cannot be combined with fans or strips and is
+       refused: it is a triangles-only mode, both in this project's reader and
+       in practice -- across 307 third-party files, 6,878 entities set it and
+       7,587 carry fans or strips, and none does both. Give the groups normal
+       indices, or leave them NULL for one normal per group. */
+    /** Fan and strip groups of each face; num_faces entries, or NULL for a
+        triangles-only mesh. */
+    const prc_api_write_face_groups *face_groups;
+
+    /* --- optional RGB(A) vertex colours ---
+       TRIANGLES and WIRE. One colour per *vertex reference* in the entity
+       groups, not one per entry of `positions`: a position used by three
+       triangles is coloured three times, once for each use. That is how the
+       format stores it and how a reader counts it back, since the stored
+       array carries no count of its own.
+
+       So the expected length is the total number of vertex references the
+       tessellation describes: 3 per triangle, plus each fan's and strip's
+       vertex count. For WIRE it is one colour per point, or one per segment
+       when `vertex_colors_per_segment` is set -- a run of n points has n-1
+       segments, or n when the element closes.
+
+       The wire format delta-encodes these: the first colour in full, then one
+       bit per entry saying "same as the previous one" and a full colour only
+       when it differs. Supplying a flat array of repeated colours is therefore
+       cheap, and no caller needs to do the run-length work itself. */
+    /** 3 bytes per colour (r,g,b), or 4 (r,g,b,a) when
+        `vertex_colors_have_alpha` is set. NULL writes none. */
+    const uint8_t *vertex_colors;
+    /** Number of colours, not of bytes. */
+    uint32_t       num_vertex_colors;
+    /** 1 if `vertex_colors` holds four components per colour rather than
+        three. */
+    int            vertex_colors_have_alpha;
+    /** WIRE only: 1 to colour each segment rather than each point. Ignored
+        for TRIANGLES, where the format has no per-segment form. */
+    int            vertex_colors_per_segment;
 
     /* --- PRC_API_WRITE_TESS_KIND_WIRE --- */
     const prc_api_write_wire_element *wire_elements;

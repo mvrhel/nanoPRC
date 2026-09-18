@@ -14,6 +14,7 @@
     along with nanoPRC. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include <string.h>
 #include "prc_write_tess_3d.h"
 #include "prc_data.h"
 #include "prc_vector_util.h"
@@ -29,23 +30,103 @@
    layout this mirrors). So the whole array is built in memory first, since
    every face's start_triangulated must be known before any face record is
    written, and the array's own size must be written before its contents. */
-int
-prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
-    const double *positions, uint32_t num_positions,
-    const double *normals, uint32_t num_normals,
-    const uint32_t *tri_indices, const uint32_t *norm_indices,
-    uint32_t num_triangles,
-    const uint32_t *face_tri_counts, uint32_t num_faces,
-    const double *tex_coords, uint32_t num_tex_coords,
-    const uint32_t *tex_indices,
-    int must_calculate_normals, double crease_angle_degrees)
+/* Table 143 VertexColors, for one entity group run.
+
+   `count` is a count of vertex REFERENCES, which is what the read side derives
+   from the face's entity groups -- the array carries no length of its own. The
+   encoding is delta: the first colour in full, then one is_same bit per
+   remaining entry and a full colour only where it changes, so a run of one
+   colour costs three bytes and then a bit each.
+
+   is_segment_color exists only on the wire path; a face never writes it (see
+   prc_parse_vertexcolors, which reads it only when !is_face). b_optimized is
+   always 0: the read side rejects 1 outright. */
+static int
+prc_write_vertex_colors(prc_context *ctx, prc_bit_write_state *s,
+    const uint8_t *colors, uint32_t first, uint32_t count,
+    int have_alpha, int is_wire, int per_segment)
 {
+    uint32_t comps = have_alpha ? 4u : 3u;
+    uint32_t k, c;
+
+    if (prc_bitwrite_bit(ctx, s, have_alpha ? 1 : 0) != 0) return -1;   /* is_rgba */
+    if (is_wire)
+        if (prc_bitwrite_bit(ctx, s, per_segment ? 1 : 0) != 0) return -1; /* is_segment_color */
+    if (prc_bitwrite_bit(ctx, s, 0) != 0) return -1;                    /* b_optimized */
+
+    for (c = 0; c < comps; c++)
+        if (prc_bitwrite_uint8(ctx, s, colors[(size_t)first * comps + c]) != 0) return -1;
+
+    for (k = 1; k < count; k++)
+    {
+        const uint8_t *prev = &colors[(size_t)(first + k - 1) * comps];
+        const uint8_t *cur = &colors[(size_t)(first + k) * comps];
+        int same = 1;
+
+        for (c = 0; c < comps; c++)
+            if (prev[c] != cur[c]) { same = 0; break; }
+
+        if (prc_bitwrite_bit(ctx, s, same ? 1 : 0) != 0) return -1;
+        if (!same)
+            for (c = 0; c < comps; c++)
+                if (prc_bitwrite_uint8(ctx, s, cur[c]) != 0) return -1;
+    }
+    return 0;
+}
+
+int
+prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
+    const prc_write_tess_3d_params *p)
+{
+    const double *positions;
+    uint32_t num_positions;
+    const double *normals;
+    uint32_t num_normals;
+    const uint32_t *tri_indices;
+    const uint32_t *norm_indices;
+    uint32_t num_triangles;
+    const uint32_t *face_tri_counts;
+    uint32_t num_faces;
+    const double *tex_coords;
+    uint32_t num_tex_coords;
+    const uint32_t *tex_indices;
+    int must_calculate_normals;
+    double crease_angle_degrees;
+
+    if (ctx == NULL || s == NULL || p == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "prc_write_tess_3d_ex: invalid arguments\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    positions = p->positions;
+    num_positions = p->num_positions;
+    normals = p->normals;
+    num_normals = p->num_normals;
+    tri_indices = p->tri_indices;
+    norm_indices = p->norm_indices;
+    num_triangles = p->num_triangles;
+    face_tri_counts = p->face_tri_counts;
+    num_faces = p->num_faces;
+    tex_coords = p->tex_coords;
+    num_tex_coords = p->num_tex_coords;
+    tex_indices = p->tex_indices;
+    must_calculate_normals = p->must_calculate_normals;
+    crease_angle_degrees = p->crease_angle_degrees;
+
+    {
     uint32_t *global_idx = NULL;
     uint32_t *face_start = NULL;
+    uint32_t *face_tri_words = NULL;
     double *face_normals = NULL;
     uint32_t global_count = 0;
     uint32_t f, k, c, i, tri_cursor, check_sum;
+    uint32_t total_fans = 0, total_fan_verts = 0;
+    uint32_t total_strips = 0, total_strip_verts = 0;
+    uint32_t color_cursor = 0;
+    uint32_t idx_capacity;
     int has_texture;
+    int has_fans, has_strips;
     int ret = PRC_ERROR_INTERNAL;
 
     (void)num_normals;
@@ -74,6 +155,140 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
             "must_calculate_normals (TriangleOneNormalTextured is not supported)\n");
         return PRC_ERROR_INTERNAL;
     }
+    /* One pass over the groups: establish which kinds are present, that every
+       group is well formed, and the vertex totals the colour check needs. */
+    for (f = 0; f < num_faces; f++)
+    {
+        const prc_api_write_face_groups *fg;
+        uint32_t g;
+
+        if (p->face_groups == NULL)
+            break;
+        fg = &p->face_groups[f];
+
+        if ((fg->num_fans > 0 && fg->fans == NULL) ||
+            (fg->num_strips > 0 && fg->strips == NULL))
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_tess_3d_ex: face %u declares groups but supplies no array\n", f);
+            return PRC_ERROR_INTERNAL;
+        }
+        for (g = 0; g < fg->num_fans; g++)
+        {
+            const prc_api_write_tri_group *grp = &fg->fans[g];
+            if (grp->num_vertices < 3)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan needs at least 3 vertices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->vertex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan needs vertex_indices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->normal_indices != NULL && norm_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan's normal_indices needs triangle norm_indices too\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            /* used_entities_flag carries one bit per group KIND per face, so
+               every fan in a face must agree on whether it supplies normals.
+               A mixed face has no representation in the format. */
+            if ((grp->normal_indices != NULL) != (fg->fans[0].normal_indices != NULL))
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u mixes fans with and without normal_indices, "
+                    "which used_entities_flag cannot express\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            total_fan_verts += grp->num_vertices;
+        }
+        for (g = 0; g < fg->num_strips; g++)
+        {
+            const prc_api_write_tri_group *grp = &fg->strips[g];
+            if (grp->num_vertices < 3)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip needs at least 3 vertices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->vertex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip needs vertex_indices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->normal_indices != NULL && norm_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip's normal_indices needs triangle norm_indices too\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if ((grp->normal_indices != NULL) != (fg->strips[0].normal_indices != NULL))
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u mixes strips with and without normal_indices, "
+                    "which used_entities_flag cannot express\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            total_strip_verts += grp->num_vertices;
+        }
+        total_fans += fg->num_fans;
+        total_strips += fg->num_strips;
+    }
+    has_fans = (total_fans > 0);
+    has_strips = (total_strips > 0);
+
+    if ((has_fans || has_strips) && has_texture)
+    {
+        /* The textured fan and strip forms exist in the format
+           (PRC_FACETESSDATA_TriangleFanTextured and friends) but are not
+           written here yet, and emitting untextured groups beside textured
+           triangles inside one face would silently drop the UVs supplied for
+           them. Refusing is the honest option until the textured forms are
+           implemented. */
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_tess_3d_ex: texture coordinates with fans or strips are not supported yet\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    if ((has_fans || has_strips) && must_calculate_normals)
+    {
+        /* Same reasoning as the textured case above: this project's own reader
+           refuses the combination outright, in prc_tri_primitives_api.c --
+           "if we have to compute the normals, we only support that case where
+           we have pure triangles. No strips or fans." Writing it produces a
+           file that is structurally valid, opens without error, and yields no
+           geometry at all.
+
+           The comment there also asks whether such files occur. Measured
+           across 307 third-party files: 17,522 uncompressed TESS_3D entities,
+           of which 6,878 set must_calculate_normals and 7,587 carry fans or
+           strips -- and ZERO do both. The format permits the combination and
+           no real writer uses it, so refusing costs nothing a caller can
+           reach for, and supplying normals is the way to write fan geometry
+           here. */
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_tess_3d_ex: fans and strips need supplied normals; "
+            "must_calculate_normals is triangles-only, and the read side "
+            "rejects the combination\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    if (p->vertex_colors != NULL)
+    {
+        uint32_t refs = num_triangles * 3u + total_fan_verts + total_strip_verts;
+
+        if (p->num_vertex_colors != refs)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_tess_3d_ex: vertex colours must cover every vertex reference "
+                "(3 per triangle plus each fan and strip vertex)\n");
+            return PRC_ERROR_INTERNAL;
+        }
+    }
+
     check_sum = 0;
     for (f = 0; f < num_faces; f++)
         check_sum += face_tri_counts[f];
@@ -83,10 +298,16 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
         return PRC_ERROR_INTERNAL;
     }
 
-    /* Worst case is 3 entries per vertex (normal, texture, point) = 9 per triangle. */
-    global_idx = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * (size_t)num_triangles * 9);
+    /* Worst case is 3 entries per vertex (normal, texture, point): 9 per
+       triangle, 3 per fan or strip vertex, plus one normal entry per group in
+       the one-normal forms. */
+    idx_capacity = (uint32_t)num_triangles * 9u
+                 + (total_fan_verts + total_strip_verts) * 3u
+                 + total_fans + total_strips;
+    global_idx = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * (size_t)idx_capacity);
     face_start = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * num_faces);
-    if (global_idx == NULL || face_start == NULL)
+    face_tri_words = (uint32_t *)prc_malloc(ctx, sizeof(uint32_t) * num_faces);
+    if (global_idx == NULL || face_start == NULL || face_tri_words == NULL)
     {
         prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_tess_3d\n");
         goto cleanup;
@@ -160,6 +381,33 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
             }
         }
         tri_cursor += face_tri_counts[f];
+
+        /* Fans, then strips: the order the read side visits them in. */
+        if (p->face_groups != NULL)
+        {
+            const prc_api_write_face_groups *fg = &p->face_groups[f];
+            uint32_t kind;
+
+            for (kind = 0; kind < 2; kind++)
+            {
+                const prc_api_write_tri_group *groups = kind ? fg->strips : fg->fans;
+                uint32_t ngroups = kind ? fg->num_strips : fg->num_fans;
+
+                for (k = 0; k < ngroups; k++)
+                {
+                    const prc_api_write_tri_group *grp = &groups[k];
+
+                    for (c = 0; c < grp->num_vertices; c++)
+                    {
+                        if (grp->normal_indices != NULL)
+                            global_idx[global_count++] = grp->normal_indices[c] * 3;
+                        else if (!must_calculate_normals && c == 0)
+                            global_idx[global_count++] = f * 3;   /* one normal, on the first vertex only */
+                        global_idx[global_count++] = grp->vertex_indices[c] * 3;
+                    }
+                }
+            }
+        }
     }
 
     if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                          /* is_calculated */
@@ -215,16 +463,109 @@ prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_line_attributes */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* start_of_wire_data */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_sizes_wire */
-        if (prc_bitwrite_uint32(ctx, s, has_texture ?
-                PRC_FACETESSDATA_TriangleTextured :
-                ((norm_indices != NULL || must_calculate_normals) ?
-                    PRC_FACETESSDATA_Triangle : PRC_FACETESSDATA_TriangleOneNormal)) != 0)
-            goto fail;                                                       /* used_entities_flag */
-        if (prc_bitwrite_uint32(ctx, s, face_start[f]) != 0) goto fail;       /* start_triangulated */
-        if (prc_bitwrite_uint32(ctx, s, 1) != 0) goto fail;                  /* size_of_triangulateddata */
-        if (prc_bitwrite_uint32(ctx, s, face_tri_counts[f]) != 0) goto fail;  /* triangulateddata[0] */
+        {
+            const prc_api_write_face_groups *fg =
+                (p->face_groups != NULL) ? &p->face_groups[f] : NULL;
+            uint32_t flags = 0;
+            uint32_t nfans = (fg != NULL) ? fg->num_fans : 0;
+            uint32_t nstrips = (fg != NULL) ? fg->num_strips : 0;
+            int multi_norm = (norm_indices != NULL || must_calculate_normals);
+            /* Checked uniform across the face during validation, so the first
+               group speaks for all of them. */
+            int fans_multi = nfans > 0 &&
+                (fg->fans[0].normal_indices != NULL || must_calculate_normals);
+            int strips_multi = nstrips > 0 &&
+                (fg->strips[0].normal_indices != NULL || must_calculate_normals);
+            uint32_t words;
+
+            if (face_tri_counts[f] > 0)
+                flags |= has_texture ? PRC_FACETESSDATA_TriangleTextured
+                       : (multi_norm ? PRC_FACETESSDATA_Triangle
+                                     : PRC_FACETESSDATA_TriangleOneNormal);
+            if (nfans > 0)
+                flags |= fans_multi ? PRC_FACETESSDATA_TriangleFan
+                                    : PRC_FACETESSDATA_TriangleFanOneNormal;
+            if (nstrips > 0)
+                flags |= strips_multi ? PRC_FACETESSDATA_TriangleStripe
+                                      : PRC_FACETESSDATA_TriangleStripeOneNormal;
+
+            /* One count word per group kind present, plus one length word per
+               fan and per strip. A face with no triangles writes no triangle
+               count word at all -- the read side only looks for one when the
+               corresponding flag bit is set. */
+            words = (face_tri_counts[f] > 0 ? 1u : 0u)
+                  + (nfans > 0 ? 1u + nfans : 0u)
+                  + (nstrips > 0 ? 1u + nstrips : 0u);
+            face_tri_words[f] = words;
+
+            if (prc_bitwrite_uint32(ctx, s, flags) != 0) goto fail;           /* used_entities_flag */
+            if (prc_bitwrite_uint32(ctx, s, face_start[f]) != 0) goto fail;   /* start_triangulated */
+            if (prc_bitwrite_uint32(ctx, s, words) != 0) goto fail;           /* size_of_triangulateddata */
+
+            if (face_tri_counts[f] > 0)
+                if (prc_bitwrite_uint32(ctx, s, face_tri_counts[f]) != 0) goto fail;
+
+            if (nfans > 0)
+            {
+                uint32_t g;
+
+                if (prc_bitwrite_uint32(ctx, s, nfans) != 0) goto fail;
+                for (g = 0; g < nfans; g++)
+                {
+                    uint32_t len = fg->fans[g].num_vertices;
+
+                    /* The one-normal forms tag the length word; the read side
+                       masks it off again (prc_internal_api_set_fans). */
+                    if (prc_bitwrite_uint32(ctx, s,
+                            fans_multi ? len : (len | PRC_FACETESSDATA_NORMAL_Single)) != 0)
+                        goto fail;
+                }
+            }
+            if (nstrips > 0)
+            {
+                uint32_t g;
+
+                if (prc_bitwrite_uint32(ctx, s, nstrips) != 0) goto fail;
+                for (g = 0; g < nstrips; g++)
+                {
+                    uint32_t len = fg->strips[g].num_vertices;
+
+                    if (prc_bitwrite_uint32(ctx, s,
+                            strips_multi ? len : (len | PRC_FACETESSDATA_NORMAL_Single)) != 0)
+                        goto fail;
+                }
+            }
+        }
         if (prc_bitwrite_uint32(ctx, s, has_texture ? 1u : 0u) != 0) goto fail; /* number_of_textured_coordinate_indexes */
-        if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                     /* has_vertex_colors */
+
+        if (p->vertex_colors == NULL)
+        {
+            if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                 /* has_vertex_colors */
+        }
+        else
+        {
+            /* One colour per vertex reference in this face's groups, in the
+               same order the index stream visits them. */
+            uint32_t refs = face_tri_counts[f] * 3u;
+            uint32_t g;
+
+            if (p->face_groups != NULL)
+            {
+                const prc_api_write_face_groups *cfg = &p->face_groups[f];
+
+                for (g = 0; g < cfg->num_fans; g++)
+                    refs += cfg->fans[g].num_vertices;
+                for (g = 0; g < cfg->num_strips; g++)
+                    refs += cfg->strips[g].num_vertices;
+            }
+
+            if (prc_bitwrite_bit(ctx, s, 1) != 0) goto fail;                 /* has_vertex_colors */
+            if (prc_write_vertex_colors(ctx, s, p->vertex_colors, color_cursor, refs,
+                                        p->vertex_colors_have_alpha, 0, 0) != 0)
+                goto fail;
+
+            color_cursor += refs;
+        }
     }
 
     /* Counted in DOUBLES, not coordinates -- see the header and #810. */
@@ -242,6 +583,42 @@ fail:
 cleanup:
     if (global_idx != NULL) prc_free(ctx, global_idx);
     if (face_start != NULL) prc_free(ctx, face_start);
+    if (face_tri_words != NULL) prc_free(ctx, face_tri_words);
     if (face_normals != NULL) prc_free(ctx, face_normals);
     return ret;
+    }
+}
+
+/* The original entry point, now a thin call through. Kept because it is what
+   every caller written before fans, strips and vertex colours existed uses,
+   and because a plain triangle mesh needs none of the new fields. */
+int
+prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
+    const double *positions, uint32_t num_positions,
+    const double *normals, uint32_t num_normals,
+    const uint32_t *tri_indices, const uint32_t *norm_indices,
+    uint32_t num_triangles,
+    const uint32_t *face_tri_counts, uint32_t num_faces,
+    const double *tex_coords, uint32_t num_tex_coords,
+    const uint32_t *tex_indices,
+    int must_calculate_normals, double crease_angle_degrees)
+{
+    prc_write_tess_3d_params p;
+
+    memset(&p, 0, sizeof(p));
+    p.positions = positions;
+    p.num_positions = num_positions;
+    p.normals = normals;
+    p.num_normals = num_normals;
+    p.tri_indices = tri_indices;
+    p.norm_indices = norm_indices;
+    p.num_triangles = num_triangles;
+    p.face_tri_counts = face_tri_counts;
+    p.num_faces = num_faces;
+    p.tex_coords = tex_coords;
+    p.num_tex_coords = num_tex_coords;
+    p.tex_indices = tex_indices;
+    p.must_calculate_normals = must_calculate_normals;
+    p.crease_angle_degrees = crease_angle_degrees;
+    return prc_write_tess_3d_ex(ctx, s, &p);
 }

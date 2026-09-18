@@ -79,7 +79,82 @@
      reader rejects with PRC_ERROR_NOT_IMPLEMENTED, so it is refused here
      rather than written and left unreadable.
 
-   Face-embedded wire indices are out of scope (not written). */
+   Face-embedded wire indices are out of scope (not written).
+
+   FANS AND STRIPS
+
+     A face may carry triangles, fans and strips at once. PRC stores them as
+     separate entity groups inside the one face, and the read side visits them
+     in a fixed order -- triangles, fans, strips -- so the writer emits them in
+     that order too, both in used_entities_flag and in the index stream.
+
+     Each group kind contributes a count word to the face's triangulateddata,
+     followed by one length word per group:
+
+         [num_triangles]                       when triangles are present
+         [num_fans]   [len0] [len1] ...        when fans are present
+         [num_strips] [len0] [len1] ...        when strips are present
+
+     where each len is the group's *vertex* count, not its triangle count. For
+     the one-normal forms that length word is OR'ed with
+     PRC_FACETESSDATA_NORMAL_Single (0x40000000); the read side masks it off
+     (see prc_internal_api_set_fans in prc_uncompressed_primitives_api.c,
+     which calls it "the crazy mask").
+
+     Within the index stream a fan or strip vertex costs the same entries as a
+     triangle vertex -- (normal, texture, point), (texture, point), or bare
+     point -- except in the one-normal forms, where only the group's FIRST
+     vertex carries a normal index and the rest carry none. That asymmetry is
+     the read side's PRC_INTERNAL_SINGLE_NORM_INITIAL / _SUBSEQUENT
+     distinction.
+
+   VERTEX COLOURS
+
+     Table 143 "VertexColors", written per face after
+     number_of_textured_coordinate_indexes, and per wire element on that path.
+     The array carries no count of its own: a reader derives the length from
+     the entity groups it has just read, which is why the colour count here is
+     one per vertex *reference* (3 per triangle, plus each fan's and strip's
+     vertex count) rather than one per stored position.
+
+     Layout: is_rgba, then is_segment_color for wire only, then b_optimized
+     (always 0 here -- the read side rejects 1), then the first colour in
+     full, then for each remaining entry one is_same bit and, when that bit is
+     clear, a full colour. Writing a run of identical colours therefore costs
+     one bit each after the first. */
+
+/** Everything prc_write_tess_3d_ex needs. Zero-initialise and fill what you
+    use: the all-zero form beyond the required fields is the plain triangle
+    mesh that prc_write_tess_3d has always written. */
+typedef struct
+{
+    const double *positions;
+    uint32_t num_positions;
+    const double *normals;
+    uint32_t num_normals;
+    const uint32_t *tri_indices;
+    const uint32_t *norm_indices;
+    uint32_t num_triangles;
+    const uint32_t *face_tri_counts;
+    uint32_t num_faces;
+    const double *tex_coords;
+    uint32_t num_tex_coords;
+    const uint32_t *tex_indices;
+    int must_calculate_normals;
+    double crease_angle_degrees;
+
+    /* fans and strips, per the note above: num_faces entries, or NULL */
+    const prc_api_write_face_groups *face_groups;
+
+    /* vertex colours, per the note above */
+    const uint8_t *vertex_colors;
+    uint32_t num_vertex_colors;
+    int vertex_colors_have_alpha;
+} prc_write_tess_3d_params;
+
+int prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
+    const prc_write_tess_3d_params *p);
+
 int prc_write_tess_3d(prc_context *ctx, prc_bit_write_state *s,
     const double *positions, uint32_t num_positions,
     const double *normals, uint32_t num_normals,
