@@ -174,6 +174,52 @@ test_two_materials(prc_context *ctx)
         /* ...and they are not the same one, which is what a writer that
            ignored has_material would produce. */
         PRC_ASSERT(styles[0] != styles[1]);
+
+        /* Distinct is not the same as CORRECT, and the difference is not
+           academic: with the colour index written as an entry index rather
+           than a double index, these two styles were still distinct and
+           still resolved -- to the shared default grey, both of them. Acrobat
+           showed grey where red and blue were asked for while this test
+           passed. So follow each style the whole way to a colour and compare
+           it against what went in.
+
+           style -> material -> ambient colour, unbiasing by three at the last
+           step exactly as prc_style_api.c does. */
+        {
+            const prc_file_struct_internal_global_data *gd =
+                &data->file_struct[0].globals->global_data;
+            double want[2][3];
+            uint32_t k;
+
+            want[0][0] = 1.0; want[0][1] = 0.0; want[0][2] = 0.0;   /* red */
+            want[1][0] = 0.0; want[1][1] = 0.0; want[1][2] = 1.0;   /* blue */
+
+            for (k = 0; k < 2; k++)
+            {
+                uint32_t si = styles[k] - 1;
+                uint32_t mi, ci;
+                const prc_graph_style *st;
+                const prc_graph_material *mt;
+                const prc_rgb_color *c;
+
+                PRC_ASSERT(si < gd->style_count);
+                st = &gd->styles[si];
+                PRC_ASSERT(st->is_material);
+
+                mi = st->biased_color_index - 1;
+                PRC_ASSERT(mi < gd->material_count);
+                mt = &gd->materials[mi];
+
+                PRC_ASSERT(mt->biased_ambient_index > 0);
+                ci = (mt->biased_ambient_index - 1) / 3;
+                PRC_ASSERT(ci < gd->color_count);
+                c = &gd->colors[ci];
+
+                PRC_ASSERT(c->red   > want[k][0] - 0.02 && c->red   < want[k][0] + 0.02);
+                PRC_ASSERT(c->green > want[k][1] - 0.02 && c->green < want[k][1] + 0.02);
+                PRC_ASSERT(c->blue  > want[k][2] - 0.02 && c->blue  < want[k][2] + 0.02);
+            }
+        }
     }
 
     /* And the tables really hold both materials. */
