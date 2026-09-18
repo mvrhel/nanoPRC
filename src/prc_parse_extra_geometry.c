@@ -4036,6 +4036,77 @@ prc_wire_body_init_shared_state(prc_nano_brep_compressed_data *compressed_data,
     compressed_data->tolerance = curve_tolerance / 100.0;
 }
 
+/* Did this reading finish the section? Everything left is zero, so there is no
+   further entity for those bits to be -- which is positive evidence that the
+   candidate consumed what it was given.
+
+   The converse proves nothing: a body in the middle of a section is followed by
+   real content, so a non-zero tail is the normal case and cannot distinguish a
+   correct reading from a wrong one. That asymmetry is why the preference below
+   only ever acts on a clean tail. Same test prc_check_section_consumed applies
+   at section level, asked locally. */
+/* Put everything back as it was before a speculative reading, so another can be
+   tried on the same bits. The rewind has to be total: a failed attempt can have
+   claimed slots in the shared curve table and allocated inside the body's own
+   curve, so both are released and rebuilt rather than reused. */
+static int
+prc_wire_body_reset_for_retry(prc_context *ctx, prc_bit_state *bit_state,
+    const prc_bit_state *saved, prc_topo_single_wire_compress *data,
+    prc_nano_brep_compressed_data **compressed_data)
+{
+    prc_release_compressed_curve(ctx, &data->compressed_curve);
+    memset(&data->compressed_curve, 0, sizeof(data->compressed_curve));
+
+    prc_release_nano_brep_compressed_data(ctx, *compressed_data);
+    ctx->internal.nano_compressed_brep_ref_data = NULL;
+
+    *compressed_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1,
+        sizeof(prc_nano_brep_compressed_data));
+    if (*compressed_data == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY,
+            "Allocation error retrying prc_parse_single_wire_body_compress\n");
+        return PRC_ERROR_MEMORY;
+    }
+    ctx->internal.nano_compressed_brep_ref_data = *compressed_data;
+    prc_wire_body_init_shared_state(*compressed_data, data->curve_tolerance);
+    *bit_state = *saved;
+    return 0;
+}
+
+static int
+prc_wire_body_reading_finished_section(const prc_bit_state *state)
+{
+    int64_t remaining = state->bit_count;
+    const uint8_t *p = state->ptr;
+    uint8_t mask = state->bitmask;
+    int64_t in_first_byte = 0;
+
+    if (remaining < 8)
+        return 1;
+
+    /* the bits of the current byte that have not been read are the mask bit
+       and every bit below it */
+    if ((*p & (uint8_t)((mask << 1) - 1)) != 0)
+        return 0;
+
+    while (mask)
+    {
+        in_first_byte++;
+        mask >>= 1;
+    }
+    remaining -= in_first_byte;
+    p++;
+
+    while (remaining >= 8)
+    {
+        if (*p++ != 0)
+            return 0;
+        remaining -= 8;
+    }
+    return 1;
+}
+
 static int
 prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
                                     prc_topo_single_wire_compress *data,
@@ -4046,6 +4117,8 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
     prc_ref_or_compressed_curve *curve;
     prc_bit_state saved_bit_state;
     prc_exception *saved_exception;
+    int bare_ok;
+    int bare_finished;
 
     if (ctx->internal.nano_compressed_brep_ref_data == NULL)
     {
@@ -4129,69 +4202,101 @@ prc_parse_single_wire_body_compress(prc_context *ctx, prc_bit_state *bit_state,
        "this reading consumed bits that do not exist", and one real corpus file
        needs it -- without this test its fifth wire body was accepted under the
        bare reading with the cursor 35,000 bits past the end of an 9,384-bit
-       section. Restoring the saved bit state below also restores overrun to
-       what it was, so the retry starts clean. */
-    if (code < 0 || bit_state->overrun)
+       section.
+
+       Overrun is not the only way to be wrong, though, and this is the half
+       that was missing. A reading can also stop *short*: decode a curve it is
+       willing to believe, return 0, and leave the rest of the section unread.
+       Two of the nine conformance fixtures parse cleanly under both readings --
+       circle-full and circle-particular-arc -- and the only thing separating
+       them is consumption: the specification reading ends at bit 322 of 328,
+       six bits of byte padding from the end, while the alternative stops at
+       161 and leaves 167 bits behind. Taking whichever candidate was tried
+       first decides those files by luck of ordering.
+
+       So prefer the candidate that finished the section. The preference acts
+       only on positive evidence -- a clean tail means there is no further
+       entity those bits could be -- because a non-zero tail proves nothing: a
+       body in the middle of a section is followed by real content. Where
+       neither candidate finishes, the specification's reading keeps
+       precedence, as before. */
+    bare_ok = (code >= 0 && !bit_state->overrun);
+    bare_finished = bare_ok && prc_wire_body_reading_finished_section(bit_state);
+
+    if (!bare_finished)
     {
-        prc_release_compressed_curve(ctx, &data->compressed_curve);
-        memset(&data->compressed_curve, 0, sizeof(data->compressed_curve));
+        int flag_ok = 0;
+        int flag_finished = 0;
 
-        prc_release_nano_brep_compressed_data(ctx, compressed_data);
-        ctx->internal.nano_compressed_brep_ref_data = NULL;
-
-        compressed_data = (prc_nano_brep_compressed_data *)prc_calloc(ctx, 1,
-            sizeof(prc_nano_brep_compressed_data));
-        if (compressed_data == NULL)
-        {
-            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error retrying prc_parse_single_wire_body_compress\n");
+        if (prc_wire_body_reset_for_retry(ctx, bit_state, &saved_bit_state,
+                                          data, &compressed_data) != 0)
             return PRC_ERROR_MEMORY;
-        }
-        ctx->internal.nano_compressed_brep_ref_data = compressed_data;
-        prc_wire_body_init_shared_state(compressed_data, data->curve_tolerance);
 
-        *bit_state = saved_bit_state;
-
+        curve->compressed_curve = &data->compressed_curve;
         curve->curve_is_not_already_stored = prc_bitread_bit(ctx, bit_state);
         if (!curve->curve_is_not_already_stored)
         {
-            /* Neither reading applies: the bare form did not decode, and the
-               flag form is excluded by its own rule that the flag must be 1. */
-            prc_error(ctx, PRC_ERROR_PARSE,
-                "Parsing error in prc_parse_single_wire_body_compress: the curve did not "
-                "decode as a bare CompressedCurve, and the alternative RefOrCompressedCurve "
-                "reading is excluded because curve_is_not_already_stored is 0\n");
+            /* The flag form is excluded by its own rule that the flag must
+               be 1, so there is no second candidate to weigh. */
             code = PRC_ERROR_PARSE;
         }
         else
         {
             code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
                                               curve->compressed_curve);
-            if (code == 0 && bit_state->overrun)
-            {
-                prc_error(ctx, PRC_ERROR_PARSE,
-                    "Parsing error in prc_parse_single_wire_body_compress: neither reading "
-                    "of the body's curve stays inside the section\n");
-                code = PRC_ERROR_PARSE;
-            }
+            flag_ok = (code >= 0 && !bit_state->overrun);
+            flag_finished = flag_ok &&
+                            prc_wire_body_reading_finished_section(bit_state);
+        }
+
+        if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
+            fprintf(stderr, "[cet] wire body: bare ok=%d finished=%d, "
+                "leading-flag ok=%d finished=%d\n",
+                bare_ok, bare_finished, flag_ok, flag_finished);
+
+        if (flag_finished || (flag_ok && !bare_ok))
+        {
+            /* Keep the alternative: either it finished the section and the
+               specification reading did not, or it is the only one that
+               parsed at all. */
+            code = 0;
+        }
+        else if (bare_ok)
+        {
+            /* The alternative is no better than the reading we already had, so
+               go back to it. Re-parsing is the price of having tried: the
+               attempt above consumed the shared state that reading built. */
+            if (prc_wire_body_reset_for_retry(ctx, bit_state, &saved_bit_state,
+                                              data, &compressed_data) != 0)
+                return PRC_ERROR_MEMORY;
+
+            curve->compressed_curve = &data->compressed_curve;
+            curve->curve_is_not_already_stored = 1;
+            code = prc_parse_compressed_curve(ctx, bit_state, compressed_data,
+                                              curve->compressed_curve);
+        }
+        else
+        {
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "Parsing error in prc_parse_single_wire_body_compress: neither the bare "
+                "CompressedCurve reading nor the RefOrCompressedCurve one decodes this "
+                "body and stays inside the section\n");
+            code = PRC_ERROR_PARSE;
         }
 
         if (code == 0)
         {
-            /* The first attempt's complaints describe a reading that was
-               abandoned on purpose; drop them so they cannot be mistaken for
-               a problem with the file that was just parsed successfully. */
+            /* The abandoned attempts' complaints describe readings that were
+               dropped on purpose; they must not be mistaken for a problem with
+               the file that was just parsed successfully. */
             while (ctx->exception != saved_exception)
                 prc_error_pop(ctx);
         }
-
-        if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
-            fprintf(stderr, "[cet] wire body: bare CompressedCurve failed, "
-                "RefOrCompressedCurve (leading flag) %s\n",
-                code == 0 ? "succeeded" : "failed too");
     }
     else if (prc_diag_getenv("PRC_DIAG_CET_OFFSETS") != NULL)
     {
-        fprintf(stderr, "[cet] wire body: bare CompressedCurve reading succeeded\n");
+        fprintf(stderr, "[cet] wire body: bare CompressedCurve reading consumed "
+            "the section\n");
     }
 
     /* Move ownership of the curve table out of the context and into the body,

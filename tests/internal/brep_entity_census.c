@@ -102,6 +102,8 @@ typedef struct census_s
     long face_trimmed;
     long face_tolerance;
     long loop;
+    long loop_single_coedge;
+    long loop_vertex;            /* single coedge, degenerate edge */
     long coedge;
     long edge;
     long vertex_unique;
@@ -188,6 +190,84 @@ tally_crv(census *c, uint32_t type)
 
 static void
 walk_topo(census *c, prc_topo *topo);
+
+/* 7.9.21.7.1: a vertex loop is "represented by a degenerate line which has
+   identical start and end vertices". Here that means a loop of one coedge,
+   whose edge starts and ends at the same vertex.
+
+   "Identical" has to mean the same position, not the same stored entity: a
+   degenerate line's two ends are written as separate UniqueVertex entities
+   holding the same point. Measured on a known fixture, where the two differ
+   by pointer and by nothing else -- both are unstored and both carry id 0, so
+   neither the pointer nor the identifier distinguishes them. Comparing by
+   pointer alone reports zero vertex loops everywhere, including on files that
+   demonstrably contain them. */
+static int
+vertex_position(const prc_ptr_topology *ptr, prc_vec3 *out)
+{
+    const prc_topo *topo;
+
+    if (ptr == NULL || ptr->topo == NULL)
+        return 0;
+    topo = ptr->topo;
+    if (topo->tag == PRC_TYPE_TOPO_UniqueVertex)
+    {
+        if (topo->topo_unique_vertex == NULL)
+            return 0;
+        *out = topo->topo_unique_vertex->vertex;
+        return 1;
+    }
+    if (topo->tag == PRC_TYPE_TOPO_MultipleVertex)
+    {
+        if (topo->topo_multiple_vertex == NULL ||
+            topo->topo_multiple_vertex->number_of_points == 0 ||
+            topo->topo_multiple_vertex->points == NULL)
+            return 0;
+        *out = topo->topo_multiple_vertex->points[0];
+        return 1;
+    }
+    return 0;
+}
+
+static int
+same_vertex(const prc_ptr_topology *a, const prc_ptr_topology *b)
+{
+    prc_vec3 pa, pb;
+
+    if (a != NULL && b != NULL && a->topo != NULL && a->topo == b->topo)
+        return 1;                       /* genuinely the same entity */
+    if (!vertex_position(a, &pa) || !vertex_position(b, &pb))
+        return 0;
+    return (pa.x == pb.x && pa.y == pb.y && pa.z == pb.z);
+}
+
+static int
+loop_is_vertex_loop(const prc_topo_loop *loop)
+{
+    const prc_topo *co_topo;
+    const prc_topo_coedge *coedge;
+    const prc_topo *edge_topo;
+    const prc_topo_edge *edge;
+
+    if (loop == NULL || loop->number_of_coedges != 1 || loop->coedge == NULL)
+        return 0;
+
+    co_topo = loop->coedge[0].next_coedge.topo;
+    if (co_topo == NULL || co_topo->tag != PRC_TYPE_TOPO_CoEdge)
+        return 0;
+    coedge = co_topo->topo_coedge;
+    if (coedge == NULL)
+        return 0;
+
+    edge_topo = coedge->ptr_topology.topo;
+    if (edge_topo == NULL || edge_topo->tag != PRC_TYPE_TOPO_Edge)
+        return 0;
+    edge = edge_topo->topo_edge;
+    if (edge == NULL)
+        return 0;
+
+    return same_vertex(&edge->start_vertex, &edge->end_vertex);
+}
 
 static void
 walk_ptr_topo(census *c, prc_ptr_topology *ptr)
@@ -290,6 +370,12 @@ walk_topo(census *c, prc_topo *topo)
         c->loop++;
         if (loop == NULL)
             break;
+        if (loop->number_of_coedges == 1)
+        {
+            c->loop_single_coedge++;
+            if (loop_is_vertex_loop(loop))
+                c->loop_vertex++;
+        }
         for (i = 0; i < loop->number_of_coedges; i++)
             walk_ptr_topo(c, &loop->coedge[i].next_coedge);
         break;
@@ -406,7 +492,7 @@ report_census(const census *c)
            c->shell, c->shell_closed);
     printf("  faces                        : %ld (trimmed %ld, with tolerance %ld)\n",
            c->face, c->face_trimmed, c->face_tolerance);
-    printf("  loops                        : %ld\n", c->loop);
+    printf("  loops                        : %ld (single-coedge %ld, VERTEX LOOPS %ld)\n", c->loop, c->loop_single_coedge, c->loop_vertex);
     printf("  coedges                      : %ld\n", c->coedge);
     printf("  edges                        : %ld\n", c->edge);
     printf("  unique vertices              : %ld\n", c->vertex_unique);

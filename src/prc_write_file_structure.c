@@ -194,6 +194,26 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
             goto fail;
         }
 
+        /* Same reasoning as the texture pairs above: refuse what cannot be
+           honoured rather than drop it silently. Fans and strips are a
+           TRIANGLES-only shape -- the compressed encoder builds its own
+           traversal and has nowhere to put them, and wire tessellation is line
+           geometry. */
+        if (e->face_groups != NULL && e->kind != PRC_WRITE_TESS_KIND_3D)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_file_structure: tessellation entry %u supplies fans or strips, "
+                "which only PRC_API_WRITE_TESS_KIND_TRIANGLES can write\n", i);
+            goto fail;
+        }
+        if (e->vertex_colors != NULL && e->kind == PRC_WRITE_TESS_KIND_COMPRESSED)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_file_structure: tessellation entry %u supplies vertex colours, "
+                "which the compressed encoder cannot write\n", i);
+            goto fail;
+        }
+
         if (e->kind == PRC_WRITE_TESS_KIND_3D || (demote != NULL && demote[i]))
         {
             int must_calc = e->must_calculate_normals;
@@ -225,12 +245,38 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
                 }
             }
 
-            if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
-            code = prc_write_tess_3d(ctx, s, e->positions, e->num_positions, e->normals, e->num_normals,
-                e->tri_indices, e->norm_indices, e->num_triangles, face_counts, face_count,
-                e->tex_coords, e->num_tex_coords, e->tex_indices,
-                must_calc, crease);
-            if (code != 0) goto fail;
+            {
+                prc_write_tess_3d_params tp;
+
+                memset(&tp, 0, sizeof(tp));
+                tp.positions = e->positions;
+                tp.num_positions = e->num_positions;
+                tp.normals = e->normals;
+                tp.num_normals = e->num_normals;
+                tp.tri_indices = e->tri_indices;
+                tp.norm_indices = e->norm_indices;
+                tp.num_triangles = e->num_triangles;
+                tp.face_tri_counts = face_counts;
+                tp.num_faces = face_count;
+                tp.tex_coords = e->tex_coords;
+                tp.num_tex_coords = e->num_tex_coords;
+                tp.tex_indices = e->tex_indices;
+                tp.must_calculate_normals = must_calc;
+                tp.crease_angle_degrees = crease;
+
+                /* A demoted COMPRESSED entry reaches this branch with a
+                   synthesised single face, so its fan/strip arrays -- which the
+                   check above refused for COMPRESSED anyway -- are NULL here. */
+                if (e->kind == PRC_WRITE_TESS_KIND_3D)
+                    tp.face_groups = e->face_groups;
+                tp.vertex_colors = e->vertex_colors;
+                tp.num_vertex_colors = e->num_vertex_colors;
+                tp.vertex_colors_have_alpha = e->vertex_colors_have_alpha;
+
+                if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
+                code = prc_write_tess_3d_ex(ctx, s, &tp);
+                if (code != 0) goto fail;
+            }
         }
         else if (e->kind == PRC_WRITE_TESS_KIND_COMPRESSED)
         {

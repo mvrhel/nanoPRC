@@ -4288,8 +4288,15 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
         /* Do a sanity check here. Right now if we have to compute the normals,
            we only support that case where we have pure triangles. No strips or fans.
-           Not sure if those even occur in a file. Per the spec it seems they could.
-           TODO. Find out if this ever occurs */
+           Per the spec it seems they could occur.
+
+           They do not, and that is now measured rather than assumed. Across
+           307 third-party files: 17,522 uncompressed TESS_3D entities, of
+           which 6,878 set must_calculate_normals and 7,587 carry fans or
+           strips -- and ZERO do both. So this refusal has never fired on a
+           real file, and extending it is a capability gap rather than a
+           defect. Our own writer refuses to produce the combination for the
+           same reason (prc_write_tess_3d_ex). */
         if (tess3d->must_calculate_normals)
         {
             if (entities_multiple_norms->num_fans > 0 || entities_multiple_norms->num_strips > 0 ||

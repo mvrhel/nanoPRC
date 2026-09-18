@@ -14,6 +14,11 @@ target_link_libraries(test_bitwrite prc_static)
 target_include_directories(test_bitwrite PRIVATE tests)
 add_test(NAME test_bitwrite COMMAND test_bitwrite)
 
+add_executable(test_section_residue tests/unit/test_section_residue.c)
+target_link_libraries(test_section_residue prc_static)
+target_include_directories(test_section_residue PRIVATE tests)
+add_test(NAME test_section_residue COMMAND test_section_residue)
+
 add_executable(test_compress_tess tests/unit/test_compress_tess.c)
 target_link_libraries(test_compress_tess prc_static)
 target_include_directories(test_compress_tess PRIVATE tests)
@@ -38,6 +43,11 @@ add_executable(test_write_materials tests/unit/test_write_materials.c)
 target_link_libraries(test_write_materials prc_static)
 target_include_directories(test_write_materials PRIVATE tests)
 add_test(NAME test_write_materials COMMAND test_write_materials)
+
+add_executable(test_tess_primitives tests/unit/test_tess_primitives.c)
+target_link_libraries(test_tess_primitives prc_static)
+target_include_directories(test_tess_primitives PRIVATE tests)
+add_test(NAME test_tess_primitives COMMAND test_tess_primitives)
 
 add_executable(test_vertex_colors tests/unit/test_vertex_colors.c)
 target_link_libraries(test_vertex_colors prc_static)
