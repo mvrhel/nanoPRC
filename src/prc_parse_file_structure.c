@@ -29,6 +29,52 @@
 
 #define DEBUG_MODEL_PARSING 1
 
+/* Did the walk actually consume the section it was given?
+
+   A return code says whether the walk failed, never where it stopped, and a
+   reading that is wrong but self-consistent can return cleanly having read a
+   fraction of the bits. The tolerant reading of a compressed wire body is the
+   case that prompted this: on one conformance fixture the specification's
+   reading fails, the alternative reading then decodes the curve as a Line and
+   returns success with the cursor at bit 194 of 560, and the file is reported
+   as read. 366 bits are not.
+
+   Two conditions, because either alone is wrong. Ending short is not by itself
+   an error: 86 of the 2,816 geometry sections in the 310-file public corpus
+   stop 8 or more bits early, 81 of them at exactly 81 bits, from a writer that
+   pads its sections generously -- the same writer and the same padding already
+   measured on the tree section by PRC_DIAG_TREE_RESIDUE. What separates padding
+   from unread content is the tail: every one of those 86 tails is entirely
+   zero, while the 366 bits the wire body left behind are not. So a section
+   passes if it ends within a byte, or if everything left is zero.
+
+   Measured over the whole corpus, this rejects nothing that previously parsed. */
+int
+prc_check_section_consumed(prc_context *ctx, const prc_bit_state *bit_state,
+    const uint8_t *buffer, uint32_t size_in_bytes, const char *section_name)
+{
+    int64_t total_bits = (int64_t)size_in_bytes * 8;
+    int64_t residue = total_bits - bit_state->bit_position;
+    int64_t k;
+
+    if (residue < 8)
+        return 0;
+
+    for (k = bit_state->bit_position; k < total_bits; k++)
+    {
+        if ((buffer[k >> 3] >> (7 - (k & 7))) & 1)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "The %s section was not consumed: success at bit %lld of %lld left %lld bits "
+                "that are not padding, so the reading stopped short of what the file holds.\n",
+                section_name, (long long)bit_state->bit_position,
+                (long long)total_bits, (long long)residue);
+            return PRC_ERROR_PARSE;
+        }
+    }
+    return 0;
+}
+
 static int
 prc_parse_entity_schema(prc_context *ctx, prc_bit_state *bit_state, prc_entity_schema *data)
 {
@@ -409,6 +455,7 @@ prc_parse_file_extra_geometry(prc_context *ctx, prc_filestructure *file_struct)
             }
         }
     }
+
     return 0;
 }
 
@@ -870,6 +917,13 @@ prc_parse_file_geometry(prc_context *ctx, prc_filestructure *file_struct)
         prc_error(ctx, code, "Parsing error in prc_parse_user_data\n");
         return code;
     }
+
+    /* Only here is "short" unambiguous: user_data is the last field of the
+       section, so what remains after it should be padding and nothing else. */
+    code = prc_check_section_consumed(ctx, &bit_state, file_struct->geometry_unzipped,
+                                      file_struct->geometry_size, "geometry");
+    if (code < 0)
+        return code;
 
     return 0;
 }
