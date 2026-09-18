@@ -17,6 +17,8 @@
 #ifndef PRC_WRITE_TREE_H
 #define PRC_WRITE_TREE_H
 
+#include "prc_write_global.h"
+
 #include "prc_write_common.h"
 #include "prc_data.h"
 #include "prc_bit.h"
@@ -70,8 +72,35 @@ typedef prc_api_write_node prc_write_tree_node;
    reader you're targeting tolerates a completely styleless file; every
    real-world PRC producer checked during this write facility's
    development always attaches at least a default material somewhere. */
+/* Which style each representation item ends up with.
+
+   The globals section, styles and all, is serialised before the tree is
+   written, so an item's own material cannot be registered while the tree is
+   being walked -- it has to be resolved first. Keying that by the item's
+   address rather than by its position in a traversal means the two passes
+   cannot drift apart: whatever order either one visits in, an item finds its
+   own answer.
+
+   Lookup is linear. Trees here are small, and an item without a material never
+   reaches the map at all. */
+typedef struct
+{
+    const prc_write_rep_item **items;
+    uint32_t *styles;
+    uint32_t count;
+    uint32_t cap;
+} prc_write_style_map;
+
+/* Walks the tree, registering a colour/material/style for every item with
+   has_material set, and records the biased style index for each. Items without
+   one are absent from the map and fall back to the shared default. */
+int prc_write_collect_item_styles(prc_context *ctx, prc_write_global_tables *tables,
+    const prc_write_tree_node *root, prc_write_style_map *map);
+
+void prc_write_style_map_release(prc_context *ctx, prc_write_style_map *map);
+
 int prc_write_tree_to_stream(prc_context *ctx, prc_bit_write_state *s,
     const prc_write_tree_node *root, uint32_t *root_biased_index_out,
-    uint32_t default_biased_style_index);
+    uint32_t default_biased_style_index, const prc_write_style_map *style_map);
 
 #endif

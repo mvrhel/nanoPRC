@@ -212,7 +212,7 @@ int main(int argc, char **argv)
 
     memset(&tree_s, 0, sizeof(tree_s));
     if (prc_bitwrite_init(ctx, &tree_s, 256) != 0) { printf("tree init failed\n"); return 1; }
-    if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index) != 0) { printf("tree write failed\n"); prc_api_print_error_stack(ctx); return 1; }
+    if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index, NULL) != 0) { printf("tree write failed\n"); prc_api_print_error_stack(ctx); return 1; }
     if (prc_bitwrite_flush(ctx, &tree_s) != 0) { printf("tree flush failed\n"); return 1; }
     if (prc_write_deflate(ctx, tree_s.buf, tree_s.byte_pos, &tree_comp, &tree_comp_len) != 0) { printf("tree deflate failed\n"); return 1; }
     printf("Generated tree section: %zu bytes compressed, root_biased_index=%u\n", tree_comp_len, root_biased_index);

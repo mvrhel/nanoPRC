@@ -39,6 +39,11 @@ target_link_libraries(test_tess_3d prc_static)
 target_include_directories(test_tess_3d PRIVATE tests)
 add_test(NAME test_tess_3d COMMAND test_tess_3d)
 
+add_executable(test_write_materials tests/unit/test_write_materials.c)
+target_link_libraries(test_write_materials prc_static)
+target_include_directories(test_write_materials PRIVATE tests)
+add_test(NAME test_write_materials COMMAND test_write_materials)
+
 add_executable(test_tess_primitives tests/unit/test_tess_primitives.c)
 target_link_libraries(test_tess_primitives prc_static)
 target_include_directories(test_tess_primitives PRIVATE tests)

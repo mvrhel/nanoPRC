@@ -65,6 +65,21 @@ prc_write_global_array_grow(prc_context *ctx, void **arr, uint32_t *cap, uint32_
     return 0;
 }
 
+/* Adds a colour, deduplicating, and returns the 1-biased index that every
+   colour-referencing field expects. 0 means failure.
+
+   The index counts DOUBLES, not colour entries: the Nth colour is index
+   N*3+1, because the array is addressed by its individual components. The
+   specification describes these fields as "an index into the RGB array",
+   which reads as an entry index and is what this function used to return --
+   real readers divide by three. Our own does, in prc_style_api.c:
+
+       color_index = (graph_material.biased_ambient_index - 1) / 3;
+
+   The entry-index form was harmless while only one real colour existed, since
+   entry 0 is index 1 either way, which is why it survived until per-item
+   materials added a second. Reported against the specification's wording as
+   pdf-association/pdf-issues#816. */
 uint32_t
 prc_write_color_add(prc_context *ctx, prc_write_global_tables *tables, const prc_rgb_color *color)
 {
@@ -81,7 +96,7 @@ prc_write_color_add(prc_context *ctx, prc_write_global_tables *tables, const prc
         if (tables->colors[i].red == color->red &&
             tables->colors[i].green == color->green &&
             tables->colors[i].blue == color->blue)
-            return i + 1;
+            return i * 3 + 1;
     }
 
     if (prc_write_global_array_grow(ctx, (void **)&tables->colors, &tables->color_cap,
@@ -90,7 +105,7 @@ prc_write_color_add(prc_context *ctx, prc_write_global_tables *tables, const prc
 
     tables->colors[tables->color_count] = *color;
     tables->color_count++;
-    return tables->color_count;
+    return (tables->color_count - 1) * 3 + 1;
 }
 
 static int

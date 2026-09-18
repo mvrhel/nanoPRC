@@ -243,6 +243,58 @@ prc_write_main_header_bytes(uint8_t *out, uint32_t section_count, const uint32_t
    independently-produced, proven-working PDF/PRC container) to being the
    difference that keeps real 3D-capable PDF viewers from rendering this
    facility's output. */
+/* Adds one item's own material and returns its biased style index, or 0 on
+   failure. The colour, material and style tables all deduplicate, so two items
+   asking for the same colour share one entry and the file carries one of each.
+
+   Ambient, diffuse and specular all take `color` and emissive takes black, for
+   the reason given in prc_api_write_rep_item's doc comment: a material with an
+   unset emissive index is rejected when a viewer resolves it. */
+uint32_t
+prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
+    const double color[3], double alpha, double shininess)
+{
+    prc_rgb_color rgb, black;
+    prc_graph_material material;
+    prc_graph_style style;
+    uint32_t biased_color_index, biased_black_index, biased_material_index;
+
+    memset(&rgb, 0, sizeof(rgb));
+    rgb.red = color[0];
+    rgb.green = color[1];
+    rgb.blue = color[2];
+    rgb.alpha = alpha;
+    biased_color_index = prc_write_color_add(ctx, tables, &rgb);
+    if (biased_color_index == 0)
+        return 0;
+
+    memset(&black, 0, sizeof(black));
+    black.alpha = 1.0;
+    biased_black_index = prc_write_color_add(ctx, tables, &black);
+    if (biased_black_index == 0)
+        return 0;
+
+    memset(&material, 0, sizeof(material));
+    material.tag = PRC_TYPE_GRAPH_Material;
+    material.biased_ambient_index = biased_color_index;
+    material.biased_diffuse_index = biased_color_index;
+    material.biased_specular_index = biased_color_index;
+    material.biased_emissive_index = biased_black_index;
+    material.shininess = shininess;
+    material.ambient_alpha = alpha;
+    material.diffuse_alpha = alpha;
+    material.emissive_alpha = 1.0;
+    material.specular_alpha = alpha;
+    biased_material_index = prc_write_material_add(ctx, tables, &material);
+    if (biased_material_index == 0)
+        return 0;
+
+    memset(&style, 0, sizeof(style));
+    style.is_material = 1;
+    style.biased_color_index = biased_material_index;
+    return prc_write_style_add(ctx, tables, &style);
+}
+
 static uint32_t
 prc_write_add_default_style(prc_context *ctx, prc_write_global_tables *tables)
 {
@@ -314,6 +366,7 @@ prc_write_prc_buffer(prc_context *ctx,
     size_t schema_comp_len = 0, tree_comp_len = 0, tess_comp_len = 0, geom_comp_len = 0, extra_geom_comp_len = 0, model_comp_len = 0;
     uint32_t root_biased_index = 0;
     uint32_t default_style_index;
+    prc_write_style_map item_styles;
     int ret = PRC_ERROR_INTERNAL;
     /* See PRC_WRITE_PRC_FILE_SECTION_COUNT's doc comment: file-struct-header
        (implicit) + schema_globals + tree + tessellation + geometry +
@@ -331,6 +384,7 @@ prc_write_prc_buffer(prc_context *ctx,
     uint8_t *buf = NULL;
     size_t total_size;
 
+    memset(&item_styles, 0, sizeof(item_styles));
     memset(&schema_s, 0, sizeof(schema_s));
     memset(&tree_s, 0, sizeof(tree_s));
     memset(&tess_s, 0, sizeof(tess_s));
@@ -353,12 +407,17 @@ prc_write_prc_buffer(prc_context *ctx,
         return PRC_ERROR_MEMORY;
     }
 
+    /* Before the globals section is serialised, because every style an item
+       asks for has to be in the tables by the time they are written out. */
+    if (prc_write_collect_item_styles(ctx, tables, root, &item_styles) != 0) goto cleanup;
+
     if (prc_bitwrite_init(ctx, &schema_s, 1024) != 0) goto cleanup;
     if (prc_write_schema_and_globals_to_stream(ctx, &schema_s, tables) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &schema_s) != 0) goto cleanup;
 
     if (prc_bitwrite_init(ctx, &tree_s, 1024) != 0) goto cleanup;
-    if (prc_write_tree_to_stream(ctx, &tree_s, root, &root_biased_index, default_style_index) != 0) goto cleanup;
+    if (prc_write_tree_to_stream(ctx, &tree_s, root, &root_biased_index, default_style_index,
+            &item_styles) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &tree_s) != 0) goto cleanup;
 
     if (prc_bitwrite_init(ctx, &tess_s, 1024) != 0) goto cleanup;
@@ -442,6 +501,7 @@ too_large:
     ret = PRC_ERROR_INTERNAL;
 
 cleanup:
+    prc_write_style_map_release(ctx, &item_styles);
     if (buf != NULL) prc_free(ctx, buf);
     if (schema_comp != NULL) prc_free(ctx, schema_comp);
     if (tree_comp != NULL) prc_free(ctx, tree_comp);

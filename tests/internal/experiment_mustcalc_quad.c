@@ -238,7 +238,7 @@ int main(int argc, char **argv)
     root.name = "quad";
 
     if (prc_bitwrite_init(ctx, &tree_s, 1024) != 0) { printf("tree init failed\n"); return 1; }
-    if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index) != 0) { printf("tree write failed\n"); return 1; }
+    if (prc_write_tree_to_stream(ctx, &tree_s, &root, &root_biased_index, default_style_index, NULL) != 0) { printf("tree write failed\n"); return 1; }
     if (prc_bitwrite_flush(ctx, &tree_s) != 0) { printf("tree flush failed\n"); return 1; }
 
     if (prc_bitwrite_init(ctx, &tess_s, 1024) != 0) { printf("tess init failed\n"); return 1; }
