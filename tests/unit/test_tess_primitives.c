@@ -454,6 +454,27 @@ test_refusals(prc_context *ctx)
     PRC_ASSERT(prc_write_tess_3d_ex(ctx, &w, &p) != 0);
     prc_bitwrite_release(ctx, &w);
 
+    /* a fan together with must_calculate_normals. The read side refuses this
+       combination outright (prc_tri_primitives_api.c), so writing it would
+       produce a file that opens cleanly and yields no geometry -- which is
+       what it did before this refusal existed, and what a fixture opened in a
+       real viewer showed. Measured absent from 307 third-party files. */
+    memset(&p, 0, sizeof(p));
+    p.positions = positions; p.num_positions = 3;
+    p.tri_indices = tris; p.num_triangles = 1;
+    p.face_tri_counts = face_tri_counts; p.num_faces = 1;
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].vertex_indices = fan_indices;
+    fans[0].num_vertices = 3;
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+    p.face_groups = groups;
+    p.must_calculate_normals = 1;
+    PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 256), 0);
+    PRC_ASSERT(prc_write_tess_3d_ex(ctx, &w, &p) != 0);
+    prc_bitwrite_release(ctx, &w);
+
     /* a group declared with no indices to go with it */
     memset(&p, 0, sizeof(p));
     p.positions = positions; p.num_positions = 3;
@@ -501,6 +522,9 @@ test_fan_through_public_api(prc_context *ctx)
     uint32_t tris[3] = { 0, 1, 2 };
     uint32_t face_tri_counts[1] = { 1 };
     uint32_t fan_indices[4] = { 4, 0, 1, 2 };
+    double normals[2 * 3] = { 0,0,1,  0,1,0 };
+    uint32_t tri_norm[3] = { 0, 0, 0 };
+    uint32_t fan_norm[4] = { 1, 1, 1, 1 };
     prc_api_write_tri_group fans[1];
     prc_api_write_face_groups groups[1];
     prc_api_write_tessellation tess[1];
@@ -517,6 +541,7 @@ test_fan_through_public_api(prc_context *ctx)
     memset(fans, 0, sizeof(fans));
     memset(groups, 0, sizeof(groups));
     fans[0].vertex_indices = fan_indices;
+    fans[0].normal_indices = fan_norm;
     fans[0].num_vertices = 4;
     groups[0].fans = fans;
     groups[0].num_fans = 1;
@@ -529,9 +554,10 @@ test_fan_through_public_api(prc_context *ctx)
     tess[0].num_triangles = 1;
     tess[0].face_tri_counts = face_tri_counts;
     tess[0].num_faces = 1;
+    tess[0].normals = normals;
+    tess[0].num_normals = 2;
+    tess[0].norm_indices = tri_norm;
     tess[0].face_groups = groups;
-    tess[0].must_calculate_normals = 1;
-    tess[0].crease_angle_degrees = 30.0;
 
     memset(items, 0, sizeof(items));
     items[0].kind = PRC_API_WRITE_RI_SURFACE;
@@ -574,8 +600,9 @@ test_fan_through_public_api(prc_context *ctx)
         PRC_ASSERT(t3d->number_of_face_tessellation >= 1);
         face = &t3d->face_tessellation_data[0];
 
-        /* must_calculate_normals is set above, so the fan takes the
-           multi-normal form and its length word is NOT masked. */
+        /* The fan supplies normal indices, so it takes the multi-normal form
+           and its length word is NOT masked. (It used to reach this state via
+           must_calculate_normals, which the writer now refuses with fans.) */
         PRC_ASSERT(face->used_entities_flag & PRC_FACETESSDATA_TriangleFan);
         PRC_ASSERT_EQ(face->size_of_triangulateddata, 3);   /* tri count, fan count, one length */
         PRC_ASSERT_EQ(face->triangulateddata[1], 1u);       /* one fan */

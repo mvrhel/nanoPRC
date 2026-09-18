@@ -1209,8 +1209,13 @@ typedef struct prc_api_write_tessellation_s
        one-normal-per-group form (PRC_FACETESSDATA_TriangleFanOneNormal and
        its strip counterpart), where the group's first vertex carries the only
        normal index and the count word is tagged with the format's
-       single-normal marker. must_calculate_normals omits normal indices
-       entirely, as it does for triangles. */
+       single-normal marker.
+
+       must_calculate_normals cannot be combined with fans or strips and is
+       refused: it is a triangles-only mode, both in this project's reader and
+       in practice -- across 307 third-party files, 6,878 entities set it and
+       7,587 carry fans or strips, and none does both. Give the groups normal
+       indices, or leave them NULL for one normal per group. */
     /** Fan and strip groups of each face; num_faces entries, or NULL for a
         triangles-only mesh. */
     const prc_api_write_face_groups *face_groups;

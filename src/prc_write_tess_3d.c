@@ -254,6 +254,28 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             "prc_write_tess_3d_ex: texture coordinates with fans or strips are not supported yet\n");
         return PRC_ERROR_INTERNAL;
     }
+    if ((has_fans || has_strips) && must_calculate_normals)
+    {
+        /* Same reasoning as the textured case above: this project's own reader
+           refuses the combination outright, in prc_tri_primitives_api.c --
+           "if we have to compute the normals, we only support that case where
+           we have pure triangles. No strips or fans." Writing it produces a
+           file that is structurally valid, opens without error, and yields no
+           geometry at all.
+
+           The comment there also asks whether such files occur. Measured
+           across 307 third-party files: 17,522 uncompressed TESS_3D entities,
+           of which 6,878 set must_calculate_normals and 7,587 carry fans or
+           strips -- and ZERO do both. The format permits the combination and
+           no real writer uses it, so refusing costs nothing a caller can
+           reach for, and supplying normals is the way to write fan geometry
+           here. */
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_tess_3d_ex: fans and strips need supplied normals; "
+            "must_calculate_normals is triangles-only, and the read side "
+            "rejects the combination\n");
+        return PRC_ERROR_INTERNAL;
+    }
     if (p->vertex_colors != NULL)
     {
         uint32_t refs = num_triangles * 3u + total_fan_verts + total_strip_verts;
