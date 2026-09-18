@@ -121,11 +121,9 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
     double *face_normals = NULL;
     uint32_t global_count = 0;
     uint32_t f, k, c, i, tri_cursor, check_sum;
-    uint32_t fan_cursor = 0, fan_vert_cursor = 0;
-    uint32_t strip_cursor = 0, strip_vert_cursor = 0;
     uint32_t total_fans = 0, total_fan_verts = 0;
     uint32_t total_strips = 0, total_strip_verts = 0;
-    uint32_t color_cursor = 0, color_fan_cursor = 0, color_strip_cursor = 0;
+    uint32_t color_cursor = 0;
     uint32_t idx_capacity;
     int has_texture;
     int has_fans, has_strips;
@@ -157,21 +155,93 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             "must_calculate_normals (TriangleOneNormalTextured is not supported)\n");
         return PRC_ERROR_INTERNAL;
     }
-    has_fans = (p->face_fan_counts != NULL);
-    has_strips = (p->face_strip_counts != NULL);
+    /* One pass over the groups: establish which kinds are present, that every
+       group is well formed, and the vertex totals the colour check needs. */
+    for (f = 0; f < num_faces; f++)
+    {
+        const prc_api_write_face_groups *fg;
+        uint32_t g;
 
-    if (has_fans && (p->fan_vertex_counts == NULL || p->fan_indices == NULL))
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL,
-            "prc_write_tess_3d_ex: face_fan_counts needs fan_vertex_counts and fan_indices\n");
-        return PRC_ERROR_INTERNAL;
+        if (p->face_groups == NULL)
+            break;
+        fg = &p->face_groups[f];
+
+        if ((fg->num_fans > 0 && fg->fans == NULL) ||
+            (fg->num_strips > 0 && fg->strips == NULL))
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_tess_3d_ex: face %u declares groups but supplies no array\n", f);
+            return PRC_ERROR_INTERNAL;
+        }
+        for (g = 0; g < fg->num_fans; g++)
+        {
+            const prc_api_write_tri_group *grp = &fg->fans[g];
+            if (grp->num_vertices < 3)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan needs at least 3 vertices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->vertex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan needs vertex_indices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->normal_indices != NULL && norm_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a fan's normal_indices needs triangle norm_indices too\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            /* used_entities_flag carries one bit per group KIND per face, so
+               every fan in a face must agree on whether it supplies normals.
+               A mixed face has no representation in the format. */
+            if ((grp->normal_indices != NULL) != (fg->fans[0].normal_indices != NULL))
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u mixes fans with and without normal_indices, "
+                    "which used_entities_flag cannot express\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            total_fan_verts += grp->num_vertices;
+        }
+        for (g = 0; g < fg->num_strips; g++)
+        {
+            const prc_api_write_tri_group *grp = &fg->strips[g];
+            if (grp->num_vertices < 3)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip needs at least 3 vertices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->vertex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip needs vertex_indices\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if (grp->normal_indices != NULL && norm_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a strip's normal_indices needs triangle norm_indices too\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            if ((grp->normal_indices != NULL) != (fg->strips[0].normal_indices != NULL))
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u mixes strips with and without normal_indices, "
+                    "which used_entities_flag cannot express\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            total_strip_verts += grp->num_vertices;
+        }
+        total_fans += fg->num_fans;
+        total_strips += fg->num_strips;
     }
-    if (has_strips && (p->strip_vertex_counts == NULL || p->strip_indices == NULL))
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL,
-            "prc_write_tess_3d_ex: face_strip_counts needs strip_vertex_counts and strip_indices\n");
-        return PRC_ERROR_INTERNAL;
-    }
+    has_fans = (total_fans > 0);
+    has_strips = (total_strips > 0);
+
     if ((has_fans || has_strips) && has_texture)
     {
         /* The textured fan and strip forms exist in the format
@@ -184,45 +254,6 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             "prc_write_tess_3d_ex: texture coordinates with fans or strips are not supported yet\n");
         return PRC_ERROR_INTERNAL;
     }
-    if (has_fans && p->fan_norm_indices != NULL && norm_indices == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL,
-            "prc_write_tess_3d_ex: fan_norm_indices needs triangle norm_indices too\n");
-        return PRC_ERROR_INTERNAL;
-    }
-    if (has_strips && p->strip_norm_indices != NULL && norm_indices == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL,
-            "prc_write_tess_3d_ex: strip_norm_indices needs triangle norm_indices too\n");
-        return PRC_ERROR_INTERNAL;
-    }
-
-    for (f = 0; f < num_faces; f++)
-    {
-        if (has_fans) total_fans += p->face_fan_counts[f];
-        if (has_strips) total_strips += p->face_strip_counts[f];
-    }
-    for (k = 0; k < total_fans; k++)
-    {
-        if (p->fan_vertex_counts[k] < 3)
-        {
-            prc_error(ctx, PRC_ERROR_INTERNAL,
-                "prc_write_tess_3d_ex: a fan needs at least 3 vertices\n");
-            return PRC_ERROR_INTERNAL;
-        }
-        total_fan_verts += p->fan_vertex_counts[k];
-    }
-    for (k = 0; k < total_strips; k++)
-    {
-        if (p->strip_vertex_counts[k] < 3)
-        {
-            prc_error(ctx, PRC_ERROR_INTERNAL,
-                "prc_write_tess_3d_ex: a strip needs at least 3 vertices\n");
-            return PRC_ERROR_INTERNAL;
-        }
-        total_strip_verts += p->strip_vertex_counts[k];
-    }
-
     if (p->vertex_colors != NULL)
     {
         uint32_t refs = num_triangles * 3u + total_fan_verts + total_strip_verts;
@@ -330,44 +361,29 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
         tri_cursor += face_tri_counts[f];
 
         /* Fans, then strips: the order the read side visits them in. */
-        if (has_fans)
+        if (p->face_groups != NULL)
         {
-            for (k = 0; k < p->face_fan_counts[f]; k++)
+            const prc_api_write_face_groups *fg = &p->face_groups[f];
+            uint32_t kind;
+
+            for (kind = 0; kind < 2; kind++)
             {
-                uint32_t n = p->fan_vertex_counts[fan_cursor];
+                const prc_api_write_tri_group *groups = kind ? fg->strips : fg->fans;
+                uint32_t ngroups = kind ? fg->num_strips : fg->num_fans;
 
-                for (c = 0; c < n; c++)
+                for (k = 0; k < ngroups; k++)
                 {
-                    uint32_t v = fan_vert_cursor + c;
+                    const prc_api_write_tri_group *grp = &groups[k];
 
-                    if (p->fan_norm_indices != NULL)
-                        global_idx[global_count++] = p->fan_norm_indices[v] * 3;
-                    else if (!must_calculate_normals && c == 0)
-                        global_idx[global_count++] = f * 3;   /* one normal, on the first vertex only */
-                    global_idx[global_count++] = p->fan_indices[v] * 3;
+                    for (c = 0; c < grp->num_vertices; c++)
+                    {
+                        if (grp->normal_indices != NULL)
+                            global_idx[global_count++] = grp->normal_indices[c] * 3;
+                        else if (!must_calculate_normals && c == 0)
+                            global_idx[global_count++] = f * 3;   /* one normal, on the first vertex only */
+                        global_idx[global_count++] = grp->vertex_indices[c] * 3;
+                    }
                 }
-                fan_vert_cursor += n;
-                fan_cursor++;
-            }
-        }
-        if (has_strips)
-        {
-            for (k = 0; k < p->face_strip_counts[f]; k++)
-            {
-                uint32_t n = p->strip_vertex_counts[strip_cursor];
-
-                for (c = 0; c < n; c++)
-                {
-                    uint32_t v = strip_vert_cursor + c;
-
-                    if (p->strip_norm_indices != NULL)
-                        global_idx[global_count++] = p->strip_norm_indices[v] * 3;
-                    else if (!must_calculate_normals && c == 0)
-                        global_idx[global_count++] = f * 3;
-                    global_idx[global_count++] = p->strip_indices[v] * 3;
-                }
-                strip_vert_cursor += n;
-                strip_cursor++;
             }
         }
     }
@@ -419,8 +435,6 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
         if (prc_bitwrite_uint32(ctx, s, global_idx[i]) != 0) goto fail;
 
     if (prc_bitwrite_uint32(ctx, s, num_faces) != 0) goto fail;               /* number_of_face_tessellation */
-    fan_cursor = 0;
-    strip_cursor = 0;
     for (f = 0; f < num_faces; f++)
     {
         if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_Face) != 0) goto fail;  /* tag */
@@ -428,10 +442,18 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* start_of_wire_data */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_sizes_wire */
         {
+            const prc_api_write_face_groups *fg =
+                (p->face_groups != NULL) ? &p->face_groups[f] : NULL;
             uint32_t flags = 0;
-            uint32_t nfans = has_fans ? p->face_fan_counts[f] : 0;
-            uint32_t nstrips = has_strips ? p->face_strip_counts[f] : 0;
+            uint32_t nfans = (fg != NULL) ? fg->num_fans : 0;
+            uint32_t nstrips = (fg != NULL) ? fg->num_strips : 0;
             int multi_norm = (norm_indices != NULL || must_calculate_normals);
+            /* Checked uniform across the face during validation, so the first
+               group speaks for all of them. */
+            int fans_multi = nfans > 0 &&
+                (fg->fans[0].normal_indices != NULL || must_calculate_normals);
+            int strips_multi = nstrips > 0 &&
+                (fg->strips[0].normal_indices != NULL || must_calculate_normals);
             uint32_t words;
 
             if (face_tri_counts[f] > 0)
@@ -439,13 +461,11 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                        : (multi_norm ? PRC_FACETESSDATA_Triangle
                                      : PRC_FACETESSDATA_TriangleOneNormal);
             if (nfans > 0)
-                flags |= (p->fan_norm_indices != NULL || must_calculate_normals)
-                       ? PRC_FACETESSDATA_TriangleFan
-                       : PRC_FACETESSDATA_TriangleFanOneNormal;
+                flags |= fans_multi ? PRC_FACETESSDATA_TriangleFan
+                                    : PRC_FACETESSDATA_TriangleFanOneNormal;
             if (nstrips > 0)
-                flags |= (p->strip_norm_indices != NULL || must_calculate_normals)
-                       ? PRC_FACETESSDATA_TriangleStripe
-                       : PRC_FACETESSDATA_TriangleStripeOneNormal;
+                flags |= strips_multi ? PRC_FACETESSDATA_TriangleStripe
+                                      : PRC_FACETESSDATA_TriangleStripeOneNormal;
 
             /* One count word per group kind present, plus one length word per
                fan and per strip. A face with no triangles writes no triangle
@@ -466,36 +486,32 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             if (nfans > 0)
             {
                 uint32_t g;
-                int one_normal = (p->fan_norm_indices == NULL && !must_calculate_normals);
 
                 if (prc_bitwrite_uint32(ctx, s, nfans) != 0) goto fail;
                 for (g = 0; g < nfans; g++)
                 {
-                    uint32_t len = p->fan_vertex_counts[fan_cursor + g];
+                    uint32_t len = fg->fans[g].num_vertices;
 
                     /* The one-normal forms tag the length word; the read side
                        masks it off again (prc_internal_api_set_fans). */
                     if (prc_bitwrite_uint32(ctx, s,
-                            one_normal ? (len | PRC_FACETESSDATA_NORMAL_Single) : len) != 0)
+                            fans_multi ? len : (len | PRC_FACETESSDATA_NORMAL_Single)) != 0)
                         goto fail;
                 }
-                fan_cursor += nfans;
             }
             if (nstrips > 0)
             {
                 uint32_t g;
-                int one_normal = (p->strip_norm_indices == NULL && !must_calculate_normals);
 
                 if (prc_bitwrite_uint32(ctx, s, nstrips) != 0) goto fail;
                 for (g = 0; g < nstrips; g++)
                 {
-                    uint32_t len = p->strip_vertex_counts[strip_cursor + g];
+                    uint32_t len = fg->strips[g].num_vertices;
 
                     if (prc_bitwrite_uint32(ctx, s,
-                            one_normal ? (len | PRC_FACETESSDATA_NORMAL_Single) : len) != 0)
+                            strips_multi ? len : (len | PRC_FACETESSDATA_NORMAL_Single)) != 0)
                         goto fail;
                 }
-                strip_cursor += nstrips;
             }
         }
         if (prc_bitwrite_uint32(ctx, s, has_texture ? 1u : 0u) != 0) goto fail; /* number_of_textured_coordinate_indexes */
@@ -511,12 +527,15 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             uint32_t refs = face_tri_counts[f] * 3u;
             uint32_t g;
 
-            if (has_fans)
-                for (g = 0; g < p->face_fan_counts[f]; g++)
-                    refs += p->fan_vertex_counts[color_fan_cursor + g];
-            if (has_strips)
-                for (g = 0; g < p->face_strip_counts[f]; g++)
-                    refs += p->strip_vertex_counts[color_strip_cursor + g];
+            if (p->face_groups != NULL)
+            {
+                const prc_api_write_face_groups *cfg = &p->face_groups[f];
+
+                for (g = 0; g < cfg->num_fans; g++)
+                    refs += cfg->fans[g].num_vertices;
+                for (g = 0; g < cfg->num_strips; g++)
+                    refs += cfg->strips[g].num_vertices;
+            }
 
             if (prc_bitwrite_bit(ctx, s, 1) != 0) goto fail;                 /* has_vertex_colors */
             if (prc_write_vertex_colors(ctx, s, p->vertex_colors, color_cursor, refs,
@@ -524,8 +543,6 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                 goto fail;
 
             color_cursor += refs;
-            if (has_fans) color_fan_cursor += p->face_fan_counts[f];
-            if (has_strips) color_strip_cursor += p->face_strip_counts[f];
         }
     }
 

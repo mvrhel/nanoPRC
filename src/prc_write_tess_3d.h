@@ -143,15 +143,8 @@ typedef struct
     int must_calculate_normals;
     double crease_angle_degrees;
 
-    /* fans and strips, per the note above */
-    const uint32_t *face_fan_counts;
-    const uint32_t *fan_vertex_counts;
-    const uint32_t *fan_indices;
-    const uint32_t *fan_norm_indices;
-    const uint32_t *face_strip_counts;
-    const uint32_t *strip_vertex_counts;
-    const uint32_t *strip_indices;
-    const uint32_t *strip_norm_indices;
+    /* fans and strips, per the note above: num_faces entries, or NULL */
+    const prc_api_write_face_groups *face_groups;
 
     /* vertex colours, per the note above */
     const uint8_t *vertex_colors;

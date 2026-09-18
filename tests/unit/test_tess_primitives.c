@@ -85,9 +85,9 @@ test_fan_with_triangles(prc_context *ctx)
     };
     uint32_t tris[2 * 3] = { 1, 2, 3, 1, 3, 4 };      /* the base */
     uint32_t face_tri_counts[1] = { 2 };
-    uint32_t face_fan_counts[1] = { 1 };
-    uint32_t fan_vertex_counts[1] = { 6 };            /* apex + 4 rim + wrap */
-    uint32_t fan_indices[6] = { 0, 1, 2, 3, 4, 1 };
+    uint32_t fan_indices[6] = { 0, 1, 2, 3, 4, 1 };   /* apex + 4 rim + wrap */
+    prc_api_write_tri_group fans[1];
+    prc_api_write_face_groups groups[1];
     prc_write_tess_3d_params p;
     prc_bit_write_state w;
     prc_bit_state r;
@@ -104,9 +104,13 @@ test_fan_with_triangles(prc_context *ctx)
     p.num_triangles = 2;
     p.face_tri_counts = face_tri_counts;
     p.num_faces = 1;
-    p.face_fan_counts = face_fan_counts;
-    p.fan_vertex_counts = fan_vertex_counts;
-    p.fan_indices = fan_indices;
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].vertex_indices = fan_indices;
+    fans[0].num_vertices = 6;
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+    p.face_groups = groups;
 
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 512), 0);
     code = prc_write_tess_3d_ex(ctx, &w, &p);
@@ -174,10 +178,10 @@ test_strip_with_normals(prc_context *ctx)
     uint32_t tris[3] = { 0, 1, 2 };
     uint32_t norm_idx[3] = { 0, 0, 0 };
     uint32_t face_tri_counts[1] = { 1 };
-    uint32_t face_strip_counts[1] = { 1 };
-    uint32_t strip_vertex_counts[1] = { 4 };
     uint32_t strip_indices[4] = { 0, 1, 2, 3 };
     uint32_t strip_norm_indices[4] = { 0, 1, 0, 1 };
+    prc_api_write_tri_group strips[1];
+    prc_api_write_face_groups groups[1];
     prc_write_tess_3d_params p;
     prc_bit_write_state w;
     prc_bit_state r;
@@ -197,10 +201,14 @@ test_strip_with_normals(prc_context *ctx)
     p.num_triangles = 1;
     p.face_tri_counts = face_tri_counts;
     p.num_faces = 1;
-    p.face_strip_counts = face_strip_counts;
-    p.strip_vertex_counts = strip_vertex_counts;
-    p.strip_indices = strip_indices;
-    p.strip_norm_indices = strip_norm_indices;
+    memset(strips, 0, sizeof(strips));
+    memset(groups, 0, sizeof(groups));
+    strips[0].vertex_indices = strip_indices;
+    strips[0].normal_indices = strip_norm_indices;
+    strips[0].num_vertices = 4;
+    groups[0].strips = strips;
+    groups[0].num_strips = 1;
+    p.face_groups = groups;
 
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 512), 0);
     code = prc_write_tess_3d_ex(ctx, &w, &p);
@@ -342,9 +350,9 @@ test_vertex_colors_rgba_with_fan(prc_context *ctx)
     };
     uint32_t tris[3] = { 0, 1, 2 };
     uint32_t face_tri_counts[1] = { 1 };
-    uint32_t face_fan_counts[1] = { 1 };
-    uint32_t fan_vertex_counts[1] = { 4 };
     uint32_t fan_indices[4] = { 0, 1, 2, 3 };
+    prc_api_write_tri_group fans[1];
+    prc_api_write_face_groups groups[1];
     /* 3 triangle references + 4 fan references = 7 colours */
     uint8_t colors[7 * 4] = {
         255, 0, 0, 255,
@@ -371,9 +379,13 @@ test_vertex_colors_rgba_with_fan(prc_context *ctx)
     p.num_triangles = 1;
     p.face_tri_counts = face_tri_counts;
     p.num_faces = 1;
-    p.face_fan_counts = face_fan_counts;
-    p.fan_vertex_counts = fan_vertex_counts;
-    p.fan_indices = fan_indices;
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].vertex_indices = fan_indices;
+    fans[0].num_vertices = 4;
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+    p.face_groups = groups;
     p.vertex_colors = colors;
     p.num_vertex_colors = 7;
     p.vertex_colors_have_alpha = 1;
@@ -417,9 +429,9 @@ test_refusals(prc_context *ctx)
     double positions[3 * 3] = { 0,0,0, 1,0,0, 0,1,0 };
     uint32_t tris[3] = { 0, 1, 2 };
     uint32_t face_tri_counts[1] = { 1 };
-    uint32_t face_fan_counts[1] = { 1 };
-    uint32_t short_fan[1] = { 2 };             /* a fan needs 3 */
     uint32_t fan_indices[2] = { 0, 1 };
+    prc_api_write_tri_group fans[1];
+    prc_api_write_face_groups groups[1];
     uint8_t colors[3 * 3] = { 1,2,3, 4,5,6, 7,8,9 };
     prc_write_tess_3d_params p;
     prc_bit_write_state w;
@@ -431,19 +443,28 @@ test_refusals(prc_context *ctx)
     p.positions = positions; p.num_positions = 3;
     p.tri_indices = tris; p.num_triangles = 1;
     p.face_tri_counts = face_tri_counts; p.num_faces = 1;
-    p.face_fan_counts = face_fan_counts;
-    p.fan_vertex_counts = short_fan;
-    p.fan_indices = fan_indices;
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].vertex_indices = fan_indices;
+    fans[0].num_vertices = 2;                  /* a fan needs 3 */
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+    p.face_groups = groups;
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 256), 0);
     PRC_ASSERT(prc_write_tess_3d_ex(ctx, &w, &p) != 0);
     prc_bitwrite_release(ctx, &w);
 
-    /* fan counts without the indices to go with them */
+    /* a group declared with no indices to go with it */
     memset(&p, 0, sizeof(p));
     p.positions = positions; p.num_positions = 3;
     p.tri_indices = tris; p.num_triangles = 1;
     p.face_tri_counts = face_tri_counts; p.num_faces = 1;
-    p.face_fan_counts = face_fan_counts;
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].num_vertices = 3;                  /* but vertex_indices is NULL */
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+    p.face_groups = groups;
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 256), 0);
     PRC_ASSERT(prc_write_tess_3d_ex(ctx, &w, &p) != 0);
     prc_bitwrite_release(ctx, &w);
@@ -462,6 +483,109 @@ test_refusals(prc_context *ctx)
     prc_bitwrite_release(ctx, &w);
 }
 
+/* The other cases call prc_write_tess_3d_ex directly, which proves the writer
+   works but says nothing about whether a caller can REACH it. That gap is not
+   hypothetical: the public fields were once published while
+   prc_write_file_structure.c still called the old fixed-argument writer, so a
+   caller could set face_groups and silently get a plain triangle mesh, and
+   every direct-writer test still passed.
+
+   So this case goes the whole way round: build a mesh through the public
+   prc_api_write_tessellation, write it with prc_api_write_prc_buffer, reopen
+   the file and assert the fan actually survived into the stored face. */
+static void
+test_fan_through_public_api(prc_context *ctx)
+{
+    static const char *fname = "test_tess_primitives_public.prc";
+    double positions[5 * 3] = { 0,0,0,  1,0,0,  1,1,0,  0,1,0,  0.5,0.5,1 };
+    uint32_t tris[3] = { 0, 1, 2 };
+    uint32_t face_tri_counts[1] = { 1 };
+    uint32_t fan_indices[4] = { 4, 0, 1, 2 };
+    prc_api_write_tri_group fans[1];
+    prc_api_write_face_groups groups[1];
+    prc_api_write_tessellation tess[1];
+    prc_api_write_rep_item items[1];
+    prc_api_write_node root;
+    uint8_t *buf = NULL;
+    size_t buf_size = 0;
+    FILE *fid;
+    prc_data *data = NULL;
+    uint32_t num_parts = 0, num_products = 0, num_markups = 0;
+
+    printf("  sub-case: a fan survives the public write API end to end\n");
+
+    memset(fans, 0, sizeof(fans));
+    memset(groups, 0, sizeof(groups));
+    fans[0].vertex_indices = fan_indices;
+    fans[0].num_vertices = 4;
+    groups[0].fans = fans;
+    groups[0].num_fans = 1;
+
+    memset(tess, 0, sizeof(tess));
+    tess[0].kind = PRC_API_WRITE_TESS_KIND_TRIANGLES;
+    tess[0].positions = positions;
+    tess[0].num_positions = 5;
+    tess[0].tri_indices = tris;
+    tess[0].num_triangles = 1;
+    tess[0].face_tri_counts = face_tri_counts;
+    tess[0].num_faces = 1;
+    tess[0].face_groups = groups;
+    tess[0].must_calculate_normals = 1;
+    tess[0].crease_angle_degrees = 30.0;
+
+    memset(items, 0, sizeof(items));
+    items[0].kind = PRC_API_WRITE_RI_SURFACE;
+    items[0].biased_tessellation_index = 1;
+
+    memset(&root, 0, sizeof(root));
+    root.name = "fan_root";
+    root.rep_items = items;
+    root.num_rep_items = 1;
+    root.bbox_max[0] = root.bbox_max[1] = root.bbox_max[2] = 1.0;
+
+    PRC_ASSERT_EQ(prc_api_write_prc_buffer(ctx, "fan_model", &root,
+        tess, 1, &buf, &buf_size), 0);
+    PRC_ASSERT_NOT_NULL(buf);
+    PRC_ASSERT(buf_size > 0);
+
+    fid = fopen(fname, "wb");
+    PRC_ASSERT_NOT_NULL(fid);
+    PRC_ASSERT_EQ(fwrite(buf, 1, buf_size, fid), buf_size);
+    fclose(fid);
+    prc_api_write_prc_buffer_free(ctx, buf);
+
+    data = (prc_data *)prc_api_open_contents(ctx, fname);
+    if (data == NULL)
+        prc_print_error_stack(ctx);
+    PRC_ASSERT_NOT_NULL(data);
+    PRC_ASSERT_EQ(data->file_structure_count, 1);
+    PRC_ASSERT_NOT_NULL(data->file_struct[0].tessellation);
+    PRC_ASSERT_EQ(data->file_struct[0].tessellation->tess_count, 1);
+
+    /* The stored face must carry the fan flag and the fan's length word. A
+       writer that dropped face_groups on the floor would still produce a
+       valid file here -- with a triangle count word only -- so these two
+       assertions are the whole point of the case. */
+    {
+        prc_tess_3d *t3d = data->file_struct[0].tessellation->tess[0].tess_3d;
+        const prc_tess_face *face;
+
+        PRC_ASSERT_NOT_NULL(t3d);
+        PRC_ASSERT(t3d->number_of_face_tessellation >= 1);
+        face = &t3d->face_tessellation_data[0];
+
+        /* must_calculate_normals is set above, so the fan takes the
+           multi-normal form and its length word is NOT masked. */
+        PRC_ASSERT(face->used_entities_flag & PRC_FACETESSDATA_TriangleFan);
+        PRC_ASSERT_EQ(face->size_of_triangulateddata, 3);   /* tri count, fan count, one length */
+        PRC_ASSERT_EQ(face->triangulateddata[1], 1u);       /* one fan */
+        PRC_ASSERT_EQ(face->triangulateddata[2], 4u);       /* four vertices, unmasked */
+    }
+
+    prc_api_release_data(ctx, (prc_api_data)data, NULL, 0, NULL, 0, NULL, 0, NULL);
+    remove(fname);
+}
+
 int
 main(void)
 {
@@ -477,6 +601,7 @@ main(void)
     test_vertex_colors_rgb(ctx);
     test_vertex_colors_rgba_with_fan(ctx);
     test_refusals(ctx);
+    test_fan_through_public_api(ctx);
 
     prc_release_context(ctx);
 
