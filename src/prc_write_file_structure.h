@@ -75,18 +75,36 @@ int prc_write_extra_geometry_section_to_stream(prc_context *ctx, prc_bit_write_s
 int prc_write_deflate(prc_context *ctx, const uint8_t *src, size_t src_len,
     uint8_t **out, size_t *out_len);
 
-/* Fixed-size uncompressed prc_file_structure_header (Table 37, the content
-   at a file structure's section_offset[0]): "PRC" + min_vers_for_read +
-   auth_vers + 2 unique ids + file_count. file_count (the embedded-
-   uncompressed-file / raster-image table) is always written 0 -- no
-   embedded images in this session's scope. Writes exactly
-   PRC_WRITE_FILE_STRUCT_HEADER_SIZE raw (non-bit-packed, little-endian)
-   bytes to `out`; the macro is built from the same PRC_WRITE_*_BYTES unit
-   constants prc_write_file_struct_header_bytes itself writes (in
-   prc_write_common.h), rather than being a separately hand-counted number,
-   so the two can't silently drift apart. */
+/* Uncompressed prc_file_structure_header (Table 37, the content at a file
+   structure's section_offset[0]): "PRC" + min_vers_for_read + auth_vers +
+   2 unique ids + file_count, then one block per embedded file.
+
+   PRC_WRITE_FILE_STRUCT_HEADER_SIZE is the size with NO embedded files, and
+   is what prc_write_file_struct_header_bytes writes. The macro is built from
+   the same PRC_WRITE_*_BYTES unit constants that function writes (in
+   prc_write_common.h) rather than a separately hand-counted number, so the
+   two cannot silently drift apart.
+
+   file_count is the embedded-uncompressed-file table, which is where raster
+   images live -- prc_parse_main.c says so at the read site: "This is where
+   the texture images are stored! Spec is wrong on the type of these". Each
+   block is a uint32 byte count followed by that many raw bytes, with no type
+   tag; what the bytes are is only known once the referring
+   PRC_TYPE_GRAPH_Picture is read. */
 #define PRC_WRITE_FILE_STRUCT_HEADER_SIZE \
     (PRC_WRITE_SIGNATURE_BYTES + 2u * PRC_WRITE_U32_BYTES + 2u * PRC_WRITE_UNIQUE_ID_BYTES + PRC_WRITE_U32_BYTES)
 void prc_write_file_struct_header_bytes(uint8_t *out, uint32_t min_vers_for_read, uint32_t auth_vers);
+
+/* Total header size once `num_files` blocks are appended. Equals
+   PRC_WRITE_FILE_STRUCT_HEADER_SIZE exactly when num_files is 0, so a file
+   with no embedded images is byte-identical to one written before this
+   existed. Returns 0 if the total would overflow. */
+size_t prc_write_file_struct_header_size_ex(const prc_write_embedded_file *files,
+    uint32_t num_files);
+
+/* As prc_write_file_struct_header_bytes, then the blocks. `out` must have
+   room for prc_write_file_struct_header_size_ex bytes. */
+void prc_write_file_struct_header_bytes_ex(uint8_t *out, uint32_t min_vers_for_read,
+    uint32_t auth_vers, const prc_write_embedded_file *files, uint32_t num_files);
 
 #endif

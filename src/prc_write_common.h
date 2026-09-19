@@ -177,4 +177,15 @@ uint8_t *prc_write_le_unique_id(uint8_t *p, uint32_t word0);
    that supply it. */
 int prc_write_name(prc_context *ctx, prc_bit_write_state *s, const char *name);
 
+
+/* One embedded uncompressed file: `size` bytes at `data`, copied verbatim
+   into the file-structure header. Declared here rather than beside the
+   writer that emits it because prc_write_global_tables owns the array and
+   the two headers would otherwise include each other. */
+typedef struct
+{
+    const uint8_t *data;
+    uint32_t size;
+} prc_write_embedded_file;
+
 #endif

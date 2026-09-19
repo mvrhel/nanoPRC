@@ -263,6 +263,54 @@ test_picture_roundtrip(prc_context *ctx)
     idx_jpeg = prc_write_picture_add(ctx, &tables, &pic);
     PRC_ASSERT(idx_jpeg != 0);
 
+    /* Each picture stores its bytes in the embedded-file table and points at
+       them; before that existed every picture was metadata with no image
+       behind it, with biased_uncompressed_file_index always 0.
+
+       The value to check is each PICTURE's link to its image, not what
+       prc_write_picture_add returns -- that is the picture's own index and is
+       1,2,3,4 whatever the images do. A first version of this checked the
+       returned indices and passed with the file table handing every picture
+       image 1, which renders as "the wrong texture" rather than as an error. */
+    PRC_ASSERT_EQ(tables.file_count, 4);
+    PRC_ASSERT_EQ(tables.pictures[0].biased_uncompressed_file_index, 1);
+    PRC_ASSERT_EQ(tables.pictures[1].biased_uncompressed_file_index, 2);
+    PRC_ASSERT_EQ(tables.pictures[2].biased_uncompressed_file_index, 3);
+    PRC_ASSERT_EQ(tables.pictures[3].biased_uncompressed_file_index, 4);
+
+    /* Four different lengths, so a writer using a fixed stride or storing
+       data_size blindly fails here. The raw formats store the pixels the
+       DIMENSIONS describe; PNG/JPEG store the whole encoded file. */
+    PRC_ASSERT_EQ(tables.files[0].size, 10u * 5u * 3u);
+    PRC_ASSERT_EQ(tables.files[1].size, 8u * 4u * 4u);
+    PRC_ASSERT_EQ(tables.files[2].size, (uint32_t)sizeof(png_bytes));
+    PRC_ASSERT_EQ(tables.files[3].size, (uint32_t)sizeof(jpeg_bytes));
+
+    /* And the bytes are the caller's: the RGB buffer was filled with 0x7F and
+       the RGBA with 0x3C, so a mix-up between them shows here. */
+    PRC_ASSERT_EQ(tables.files[0].data[0], 0x7F);
+    PRC_ASSERT_EQ(tables.files[1].data[0], 0x3C);
+    PRC_ASSERT_EQ(tables.files[3].data[0], 0xFF);   /* JPEG SOI */
+    PRC_ASSERT_EQ(tables.files[3].data[1], 0xD8);
+
+    /* A texture definition over the first picture, and a material AFTER it.
+       The material is not incidental: the texture table sits between the
+       pictures and the materials, and a field-order mistake inside Table 96
+       does not fail on its own -- it leaves the stream misaligned and the
+       next thing parsed is what notices. Written without a following
+       material, a definition missing its last four fields round-tripped
+       silently, which is exactly how those fields came to be missing. */
+    PRC_ASSERT(prc_write_texture_definition_add(ctx, &tables, 1, NULL) == 1);
+    {
+        prc_graph_material app;
+
+        memset(&app, 0, sizeof(app));
+        app.tag = PRC_TYPE_GRAPH_TextureApplication;
+        app.biased_material_generic_index = 1;
+        app.biased_texture_definition_index = 1;
+        PRC_ASSERT(prc_write_material_add(ctx, &tables, &app) != 0);
+    }
+
     PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 1024), 0);
     PRC_ASSERT_EQ(prc_write_globals_to_stream(ctx, &w, &tables), 0);
     PRC_ASSERT_EQ(prc_bitwrite_flush(ctx, &w), 0);

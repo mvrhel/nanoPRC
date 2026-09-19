@@ -252,7 +252,8 @@ prc_write_main_header_bytes(uint8_t *out, uint32_t section_count, const uint32_t
    unset emissive index is rejected when a viewer resolves it. */
 uint32_t
 prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
-    const double color[3], double alpha, double shininess)
+    const double color[3], double alpha, double shininess,
+    const prc_write_item_texture *texture)
 {
     prc_rgb_color rgb, black;
     prc_graph_material material;
@@ -288,6 +289,75 @@ prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
     biased_material_index = prc_write_material_add(ctx, tables, &material);
     if (biased_material_index == 0)
         return 0;
+
+    /* A texture is layered ON TOP of the material just built, not instead of
+       it: a PRC_TYPE_GRAPH_TextureApplication carries the underlying
+       material in biased_material_generic_index and the image in
+       biased_texture_definition_index, and the STYLE then points at the
+       application rather than at the material. The reader follows the same
+       two hops -- prc_style_api.c dispatches on graph_style.is_material and
+       hands the application's graph_material to prc_internal_set_texture_style.
+
+       So a textured item's colour still comes from the material underneath,
+       which is why texture_function is modulate: the image multiplies that
+       colour. An all-white material shows the image unaltered. */
+    if (texture != NULL)
+    {
+        prc_write_picture pic;
+        prc_graph_material app;
+        uint32_t biased_picture, biased_definition, biased_app;
+
+        if (texture->image == NULL || texture->image_size == 0)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_add_item_style: has_texture with no image\n");
+            return 0;
+        }
+
+        memset(&pic, 0, sizeof(pic));
+        switch (texture->format)
+        {
+        case PRC_API_WRITE_TEXTURE_RGB:  pic.format = PRC_WRITE_PIX_RGB;  break;
+        case PRC_API_WRITE_TEXTURE_RGBA: pic.format = PRC_WRITE_PIX_RGBA; break;
+        case PRC_API_WRITE_TEXTURE_PNG:  pic.format = PRC_WRITE_PIX_PNG;  break;
+        case PRC_API_WRITE_TEXTURE_JPEG: pic.format = PRC_WRITE_PIX_JPEG; break;
+        default:
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_add_item_style: unknown texture format\n");
+            return 0;
+        }
+        pic.data = texture->image;
+        pic.data_size = texture->image_size;
+        pic.width = texture->width;
+        pic.height = texture->height;
+
+        biased_picture = prc_write_picture_add(ctx, tables, &pic);
+        if (biased_picture == 0)
+            return 0;
+
+        biased_definition = prc_write_texture_definition_add(ctx, tables,
+            biased_picture, NULL);
+        if (biased_definition == 0)
+            return 0;
+
+        memset(&app, 0, sizeof(app));
+        app.tag = PRC_TYPE_GRAPH_TextureApplication;
+        app.biased_material_generic_index = biased_material_index;
+        app.biased_texture_definition_index = biased_definition;
+        app.biased_next_texture_index = 0;   /* no second texture layer */
+
+        /* 1, not 0. The reader unbiases this to uv_coordinates_index =
+           value - 1, so 0 selects no UV set at all rather than the default
+           one -- and every reference producer writes 1. A textured quad
+           written with 0 rendered untextured in Acrobat. */
+        app.biased_uv_coordinates_index = 1;
+
+        biased_app = prc_write_material_add(ctx, tables, &app);
+        if (biased_app == 0)
+            return 0;
+
+        biased_material_index = biased_app;
+    }
 
     memset(&style, 0, sizeof(style));
     style.is_material = 1;
@@ -380,7 +450,8 @@ prc_write_prc_buffer(prc_context *ctx,
     uint32_t section_offsets[PRC_WRITE_PRC_FILE_SECTION_COUNT];
     uint32_t start_offset, end_offset;
     size_t header_size;
-    uint8_t file_struct_header[PRC_WRITE_FILE_STRUCT_HEADER_SIZE];
+    uint8_t *file_struct_header = NULL;
+    size_t file_struct_header_size;
     uint8_t *buf = NULL;
     size_t total_size;
 
@@ -449,10 +520,25 @@ prc_write_prc_buffer(prc_context *ctx,
        direct-to-file writer that doesn't know trailing sizes until it
        has already written the header. */
     header_size = prc_write_main_header_size(section_count);
-    prc_write_file_struct_header_bytes(file_struct_header, prc_write_diag_min_vers_for_read(), prc_write_diag_auth_vers());
+
+    /* The file-structure header carries the embedded uncompressed files, so
+       it is only fixed-size when there are none. Size it first: every
+       section offset after it depends on the answer. */
+    file_struct_header_size = prc_write_file_struct_header_size_ex(tables->files, tables->file_count);
+    if (file_struct_header_size == 0) goto too_large;
+    file_struct_header = (uint8_t *)prc_malloc(ctx, file_struct_header_size);
+    if (file_struct_header == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_prc_buffer\n");
+        ret = PRC_ERROR_MEMORY;
+        goto cleanup;
+    }
+    prc_write_file_struct_header_bytes_ex(file_struct_header,
+        prc_write_diag_min_vers_for_read(), prc_write_diag_auth_vers(),
+        tables->files, tables->file_count);
 
     section_offsets[0] = (uint32_t)header_size;
-    if (prc_write_offset_add(section_offsets[0], sizeof(file_struct_header), &section_offsets[1]) != 0) goto too_large;
+    if (prc_write_offset_add(section_offsets[0], (uint32_t)file_struct_header_size, &section_offsets[1]) != 0) goto too_large;
     if (prc_write_offset_add(section_offsets[1], schema_comp_len, &section_offsets[2]) != 0) goto too_large;
     if (prc_write_offset_add(section_offsets[2], tree_comp_len, &section_offsets[3]) != 0) goto too_large;
     if (prc_write_offset_add(section_offsets[3], tess_comp_len, &section_offsets[4]) != 0) goto too_large;
@@ -481,7 +567,7 @@ prc_write_prc_buffer(prc_context *ctx,
     }
 
     prc_write_main_header_bytes(buf, section_count, section_offsets, start_offset, end_offset);
-    memcpy(buf + section_offsets[0], file_struct_header, sizeof(file_struct_header));
+    memcpy(buf + section_offsets[0], file_struct_header, file_struct_header_size);
     memcpy(buf + section_offsets[1], schema_comp, schema_comp_len);
     memcpy(buf + section_offsets[2], tree_comp, tree_comp_len);
     memcpy(buf + section_offsets[3], tess_comp, tess_comp_len);
@@ -502,6 +588,7 @@ too_large:
 
 cleanup:
     prc_write_style_map_release(ctx, &item_styles);
+    if (file_struct_header != NULL) prc_free(ctx, file_struct_header);
     if (buf != NULL) prc_free(ctx, buf);
     if (schema_comp != NULL) prc_free(ctx, schema_comp);
     if (tree_comp != NULL) prc_free(ctx, tree_comp);

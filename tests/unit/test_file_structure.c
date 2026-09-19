@@ -121,6 +121,107 @@ test_one_triangle_roundtrip(prc_context *ctx)
    position slot, or scaled them by 3 instead of 2, would still round-trip and
    the case would prove nothing. The assertion below checks the streams really
    do differ before trusting anything else. */
+
+/* build_one_triangle_file, plus two embedded uncompressed files added before
+   the write so they land in the file-structure header. */
+static void
+build_one_triangle_file_with_files(prc_context *ctx, prc_write_global_tables *tables,
+    const uint8_t *a, uint32_t a_size, const uint8_t *b, uint32_t b_size,
+    uint32_t *idx_a, uint32_t *idx_b)
+{
+    double positions[3 * 3] = { 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
+    uint32_t tris[3] = { 0, 1, 2 };
+    uint32_t face_tri_counts[1] = { 1 };
+    prc_write_tess_entry tess_entry;
+    prc_write_rep_item ri;
+    prc_write_tree_node root;
+
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, tables), 0);
+
+    *idx_a = prc_write_embedded_file_add(ctx, tables, a, a_size);
+    *idx_b = prc_write_embedded_file_add(ctx, tables, b, b_size);
+
+    memset(&tess_entry, 0, sizeof(tess_entry));
+    tess_entry.kind = PRC_WRITE_TESS_KIND_3D;
+    tess_entry.positions = positions;
+    tess_entry.num_positions = 3;
+    tess_entry.tri_indices = tris;
+    tess_entry.num_triangles = 1;
+    tess_entry.face_tri_counts = face_tri_counts;
+    tess_entry.num_faces = 1;
+
+    memset(&ri, 0, sizeof(ri));
+    ri.kind = PRC_WRITE_RI_SURFACE;
+    ri.biased_tessellation_index = 1;
+
+    memset(&root, 0, sizeof(root));
+    root.rep_items = &ri;
+    root.num_rep_items = 1;
+    root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0;
+
+    PRC_ASSERT_EQ(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, tables, &root, &tess_entry, 1), 0);
+}
+
+/* Embedded uncompressed files in the file-structure header. This is where
+   raster images live -- prc_parse_main.c says so at the read site -- and a
+   prc_graph_picture reaches them through biased_uncompressed_file_index.
+   Nothing wrote them before; file_count was a hardcoded 0.
+
+   The header stops being fixed-size once blocks are present, and every
+   section offset after it is computed from its length, so the risk is that a
+   block shifts the file and the offsets do not follow. That would not fail
+   here -- it would fail somewhere later and look unrelated -- so this case
+   checks the bytes came back AND that the rest of the file still parses. */
+static void
+test_embedded_files(prc_context *ctx)
+{
+    static const uint8_t blob_a[5] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x01 };
+    static const uint8_t blob_b[3] = { 0x11, 0x22, 0x33 };
+    prc_write_global_tables tables;
+    prc_data *pd;
+    uint32_t idx_a, idx_b;
+    uint32_t k;
+
+    printf("  sub-case: embedded uncompressed files round trip\n");
+
+    /* Two blocks of DIFFERENT lengths, because equal lengths would pass
+       against a writer that used a fixed stride, and the second's index must
+       be 2 -- a writer returning the count before appending would give 1
+       twice and both pictures would point at the same image. */
+    build_one_triangle_file_with_files(ctx, &tables, blob_a, sizeof(blob_a),
+                                       blob_b, sizeof(blob_b), &idx_a, &idx_b);
+    PRC_ASSERT_EQ(idx_a, 1);
+    PRC_ASSERT_EQ(idx_b, 2);
+
+    pd = (prc_data *)prc_api_open_contents(ctx, TEST_PRC_FILENAME);
+    if (pd == NULL)
+        prc_print_error_stack(ctx);
+    PRC_ASSERT_NOT_NULL(pd);
+
+    PRC_ASSERT_EQ(pd->file_structure_count, 1);
+    PRC_ASSERT_NOT_NULL(pd->file_struct[0].header);
+    PRC_ASSERT_EQ(pd->file_struct[0].header->file_count, 2);
+    PRC_ASSERT_NOT_NULL(pd->file_struct[0].header->files);
+
+    PRC_ASSERT_EQ(pd->file_struct[0].header->files[0].block_size, sizeof(blob_a));
+    for (k = 0; k < sizeof(blob_a); k++)
+        PRC_ASSERT_EQ(pd->file_struct[0].header->files[0].block[k], blob_a[k]);
+
+    PRC_ASSERT_EQ(pd->file_struct[0].header->files[1].block_size, sizeof(blob_b));
+    for (k = 0; k < sizeof(blob_b); k++)
+        PRC_ASSERT_EQ(pd->file_struct[0].header->files[1].block[k], blob_b[k]);
+
+    /* The blocks shifted every section after the header. If the offsets did
+       not follow, the tessellation is where the geometry should be and this
+       is where it shows. */
+    PRC_ASSERT_NOT_NULL(pd->file_struct[0].tessellation);
+    PRC_ASSERT_EQ(pd->file_struct[0].tessellation->tess_count, 1);
+
+    prc_api_release_data(ctx, (prc_api_data)pd, NULL, 0, NULL, 0, NULL, 0, NULL);
+    prc_write_global_tables_free(ctx, &tables);
+    remove(TEST_PRC_FILENAME);
+}
+
 static void
 build_textured_quad_file(prc_context *ctx, prc_write_global_tables *tables)
 {
@@ -180,6 +281,173 @@ build_textured_quad_file(prc_context *ctx, prc_write_global_tables *tables)
     root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0; root.bbox_max[2] = 0.0;
 
     PRC_ASSERT_EQ(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, tables, &root, &tess_entry, 1), 0);
+}
+
+static void
+build_textured_quad_file_with_image(prc_context *ctx, prc_write_global_tables *tables,
+    const uint8_t *pixels, size_t pixels_size, uint32_t w, uint32_t h)
+{
+    static const double positions[4 * 3] = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        1.0, 1.0, 0.0,
+        0.0, 1.0, 0.0
+    };
+    static const double normals[3] = { 0.0, 0.0, 1.0 };
+    static const double tex_coords[3 * 2] = {
+        0.0, 0.0,
+        1.0, 0.0,
+        0.5, 1.0
+    };
+    static const uint32_t tris[6]     = { 0, 1, 2,  0, 2, 3 };
+    static const uint32_t norm_idx[6] = { 0, 0, 0,  0, 0, 0 };
+    static const uint32_t tex_idx[6]  = { 0, 1, 2,  0, 2, 1 };
+    static const uint32_t face_tri_counts[1] = { 2 };
+    prc_write_tess_entry tess_entry;
+    prc_write_rep_item ri;
+    prc_write_tree_node root;
+    int streams_differ = 0;
+    int k;
+
+    for (k = 0; k < 6; k++)
+        if (tex_idx[k] != tris[k])
+            streams_differ = 1;
+    PRC_ASSERT(streams_differ);
+
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, tables), 0);
+
+    memset(&tess_entry, 0, sizeof(tess_entry));
+    tess_entry.kind = PRC_WRITE_TESS_KIND_3D;
+    tess_entry.positions = positions;
+    tess_entry.num_positions = 4;
+    tess_entry.normals = normals;
+    tess_entry.num_normals = 1;
+    tess_entry.tri_indices = tris;
+    tess_entry.norm_indices = norm_idx;
+    tess_entry.num_triangles = 2;
+    tess_entry.face_tri_counts = face_tri_counts;
+    tess_entry.num_faces = 1;
+    tess_entry.tex_coords = tex_coords;
+    tess_entry.num_tex_coords = 3;   /* PAIRS, not doubles */
+    tess_entry.tex_indices = tex_idx;
+
+    memset(&ri, 0, sizeof(ri));
+    ri.kind = PRC_WRITE_RI_SURFACE;
+    ri.biased_tessellation_index = 1;
+    ri.is_closed = 0;
+    ri.has_material = 1;
+    ri.material_color[0] = ri.material_color[1] = ri.material_color[2] = 1.0;
+    ri.material_alpha = 1.0;
+    ri.has_texture = 1;
+    ri.texture_image = pixels;
+    ri.texture_image_size = pixels_size;
+    ri.texture_format = PRC_API_WRITE_TEXTURE_RGB;
+    ri.texture_width = w;
+    ri.texture_height = h;
+
+    memset(&root, 0, sizeof(root));
+    root.rep_items = &ri;
+    root.num_rep_items = 1;
+    root.bbox_min[0] = 0.0; root.bbox_min[1] = 0.0; root.bbox_min[2] = 0.0;
+    root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0; root.bbox_max[2] = 0.0;
+
+    PRC_ASSERT_EQ(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, tables, &root, &tess_entry, 1), 0);
+}
+
+/* A texture reaches a renderer through a chain of five biased indices, and a
+   break anywhere in it renders as "no texture" or "the wrong texture" rather
+   than as an error:
+
+       style -> TextureApplication -> TextureDefinition -> Picture -> file
+
+   So walk the whole chain rather than checking that a picture exists. Each
+   assertion below is a different way the feature can be wrong. */
+static void
+test_texture_chain_roundtrip(prc_context *ctx)
+{
+    /* 2x2 RGB, four distinguishable pixels. Distinguishable on purpose: a
+       uniform image would pass against a writer that stored the wrong
+       region, and the corner values pin the byte order. */
+    static const uint8_t pixels[2 * 2 * 3] = {
+        0xFF, 0x00, 0x00,   0x00, 0xFF, 0x00,
+        0x00, 0x00, 0xFF,   0xFF, 0xFF, 0x00
+    };
+    prc_write_global_tables tables;
+    prc_data *pd;
+    const prc_file_struct_internal_global_data *gd;
+    uint32_t style_idx, app_idx, def_idx, pic_idx, file_idx, k;
+
+    printf("  sub-case: texture chain style->application->definition->picture->file\n");
+
+    build_textured_quad_file_with_image(ctx, &tables, pixels, sizeof(pixels), 2, 2);
+
+    pd = (prc_data *)prc_api_open_contents(ctx, TEST_PRC_FILENAME);
+    if (pd == NULL)
+        prc_print_error_stack(ctx);
+    PRC_ASSERT_NOT_NULL(pd);
+    gd = &pd->file_struct[0].globals->global_data;
+
+    /* The item's style. */
+    {
+        const prc_asm_file_structure_tree *tree = pd->file_struct[0].tree;
+        const prc_ri *ri;
+
+        PRC_ASSERT_NOT_NULL(tree);
+        PRC_ASSERT(tree->parts_count >= 1);
+        PRC_ASSERT(tree->parts[0].num_rep_items >= 1);
+        ri = &tree->parts[0].rep_items[0];
+        PRC_ASSERT_NOT_NULL(ri->ri_poly_brep_model);
+        style_idx = ri->ri_poly_brep_model->item_content.base.graphics_content.biased_index_of_line_style;
+        PRC_ASSERT(style_idx != 0);
+    }
+
+    /* -> a TextureApplication, not a plain Material. A writer that attached
+       the image to the material itself, or forgot the application layer,
+       fails here. */
+    PRC_ASSERT(style_idx - 1 < gd->style_count);
+    PRC_ASSERT(gd->styles[style_idx - 1].is_material);
+    app_idx = gd->styles[style_idx - 1].biased_color_index;
+    PRC_ASSERT(app_idx != 0 && app_idx - 1 < gd->material_count);
+    PRC_ASSERT_EQ(gd->materials[app_idx - 1].tag, PRC_TYPE_GRAPH_TextureApplication);
+
+    /* -> the underlying material must still be there: the colour a textured
+       item modulates comes from it, so a zero here is a white-out. */
+    PRC_ASSERT(gd->materials[app_idx - 1].biased_material_generic_index != 0);
+
+    /* -> and the UV index must be BIASED. prc_style_api.c stores
+       biased_uv_coordinates_index - 1, and -1 is its "this texture has no UV
+       coordinates" sentinel, so writing the obvious 0 here produces a file
+       that parses, carries the image, and renders untextured. Nothing else
+       in this chain notices: every assertion above and below still holds.
+       Checked by sabotage -- writing 0 leaves all 15 tests passing without
+       this line. */
+    PRC_ASSERT_EQ(gd->materials[app_idx - 1].biased_uv_coordinates_index, 1);
+
+    /* -> the definition. */
+    def_idx = gd->materials[app_idx - 1].biased_texture_definition_index;
+    PRC_ASSERT(def_idx != 0);
+    PRC_ASSERT(def_idx - 1 < gd->texture_count);
+    PRC_ASSERT_EQ(gd->textures[def_idx - 1].texture_mapping_type, PRC_texture_mapping_retrieve_UV);
+
+    /* -> the picture. */
+    pic_idx = gd->textures[def_idx - 1].biased_picture_index;
+    PRC_ASSERT(pic_idx != 0 && pic_idx - 1 < gd->picture_count);
+    PRC_ASSERT_EQ(gd->pictures[pic_idx - 1].pixel_width, 2);
+    PRC_ASSERT_EQ(gd->pictures[pic_idx - 1].pixel_height, 2);
+
+    /* -> the bytes. This is the link that did not exist at all before: every
+       picture used to be written with file index 0. */
+    file_idx = gd->pictures[pic_idx - 1].biased_uncompressed_file_index;
+    PRC_ASSERT(file_idx != 0);
+    PRC_ASSERT_NOT_NULL(pd->file_struct[0].header);
+    PRC_ASSERT(file_idx - 1 < pd->file_struct[0].header->file_count);
+    PRC_ASSERT_EQ(pd->file_struct[0].header->files[file_idx - 1].block_size, sizeof(pixels));
+    for (k = 0; k < sizeof(pixels); k++)
+        PRC_ASSERT_EQ(pd->file_struct[0].header->files[file_idx - 1].block[k], pixels[k]);
+
+    prc_api_release_data(ctx, (prc_api_data)pd, NULL, 0, NULL, 0, NULL, 0, NULL);
+    prc_write_global_tables_free(ctx, &tables);
+    remove(TEST_PRC_FILENAME);
 }
 
 static void
@@ -411,6 +679,8 @@ main(void)
     test_texture_misuse_is_refused(ctx);
     test_prc_signature(ctx);
     test_zlib_section_valid(ctx);
+    test_embedded_files(ctx);
+    test_texture_chain_roundtrip(ctx);
 
     prc_release_context(ctx);
     remove(TEST_PRC_FILENAME);
