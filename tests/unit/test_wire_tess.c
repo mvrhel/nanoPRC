@@ -228,6 +228,104 @@ test_per_vertex_colors(prc_context *ctx)
     prc_bitwrite_release(ctx, &w);
 }
 
+/* Table 143's is_segment_color: one colour per SEGMENT, not per point.
+
+   The count is the whole risk. The array is a delta run with no terminator
+   and the reader derives its length rather than being told it --
+   segment_color_count = vertex_color_count - number_of_wire_elements -- so
+   writing the per-point count with the segment flag set would not fail here,
+   it would leave the reader finishing in the wrong place with everything
+   after it noise.
+
+   Two elements are used, one open and one closed, because they differ: an
+   open run of 3 points has 2 segments, a closed one has 3. A test with only
+   open elements, or only closed, would pass against a writer that got the
+   closed case backwards. */
+static void
+test_per_segment_colors(prc_context *ctx)
+{
+    static const double p[6][3] = {
+        { 0,0,0 }, { 1,0,0 }, { 2,0,0 },        /* open, 3 points -> 2 segments */
+        { 0,1,0 }, { 1,1,0 }, { 1,2,0 }         /* closed, 3 points -> 3 segments */
+    };
+    static const float col[6][4] = {
+        { 1,0,0,1 }, { 0,1,0,1 }, { 0,0,1,1 },
+        { 1,1,0,1 }, { 1,0,1,1 }, { 0,1,1,1 }
+    };
+    prc_write_wire_element elems[2];
+    prc_bit_write_state w;
+    prc_bit_state r;
+    prc_tess_3d_wire *parsed = NULL;
+    int code;
+
+    printf("  sub-case: per-segment colors\n");
+
+    memset(elems, 0, sizeof(elems));
+    elems[0].positions = p[0];
+    elems[0].num_vertices = 3;
+    elems[0].is_closed = 0;
+    elems[0].colors = col[0];
+
+    elems[1].positions = p[3];
+    elems[1].num_vertices = 3;
+    elems[1].is_closed = 1;
+    elems[1].colors = col[3];
+
+    PRC_ASSERT_EQ(prc_bitwrite_init(ctx, &w, 256), 0);
+    PRC_ASSERT_EQ(prc_write_wire_tess_ex(ctx, &w, elems, 2, 1), 0);
+    PRC_ASSERT_EQ(prc_bitwrite_flush(ctx, &w), 0);
+
+    prc_init_bit_state(ctx, &r, w.buf, w.byte_pos);
+    code = prc_parse_tess_3d_wire(ctx, &r, &parsed);
+    if (code < 0)
+        prc_print_error_stack(ctx);
+    PRC_ASSERT_EQ(code, 0);
+    PRC_ASSERT_NOT_NULL(parsed);
+
+    PRC_ASSERT_EQ(parsed->has_vertex_colors, 1);
+    PRC_ASSERT(parsed->vertex_color_data.is_segment_color);
+
+    /* vertex_color_count is the POINT count the reader derives: 3 + (3+1 for
+       the closing element) = 7. The segment count it then uses is that minus
+       one per element, so 5 -- which is 2 + 3, the two elements' segments. */
+    PRC_ASSERT_EQ(parsed->vertex_color_count, 7);
+
+    /* A clean parse proves nothing about the count. Writing too MANY entries
+       leaves trailing bits the reader never reads, and it succeeds -- a first
+       version of this case asserted only the parse and passed with the writer
+       emitting per-point counts under the segment flag.
+
+       So decode the five and compare them. The correct writer skips the last
+       point of the open element and uses all three of the closed one, giving
+       colours 0,1 then 3,4,5. A per-point writer would give 0,1,2 then 3,4 --
+       the third entry differs, and that is what this catches. */
+    {
+        static const float want[5][4] = {
+            { 1,0,0,1 }, { 0,1,0,1 },               /* open: segments 0 and 1 */
+            { 1,1,0,1 }, { 1,0,1,1 }, { 0,1,1,1 }   /* closed: all three */
+        };
+        prc_rgb_color got[5];
+        uint32_t k;
+
+        got[0] = parsed->vertex_color_data.color_data.first_vertex;
+        for (k = 1; k < 5; k++)
+        {
+            PRC_ASSERT(!parsed->vertex_color_data.color_data.remaining_vertices[k - 1].is_same);
+            got[k] = parsed->vertex_color_data.color_data.remaining_vertices[k - 1].color;
+        }
+        for (k = 0; k < 5; k++)
+        {
+            PRC_ASSERT_NEAR(got[k].red   / 255.0, want[k][0], 1.0 / 255.0);
+            PRC_ASSERT_NEAR(got[k].green / 255.0, want[k][1], 1.0 / 255.0);
+            PRC_ASSERT_NEAR(got[k].blue  / 255.0, want[k][2], 1.0 / 255.0);
+            PRC_ASSERT_NEAR(got[k].alpha / 255.0, want[k][3], 1.0 / 255.0);
+        }
+    }
+
+    free_parsed_wire(ctx, parsed);
+    prc_bitwrite_release(ctx, &w);
+}
+
 /* 2 elements sharing one vertex (identical float position): must
    deduplicate to a single entry in tessellation_coordinates. */
 static void
@@ -294,6 +392,7 @@ main(void)
     test_closed_triangle(ctx);
     test_per_vertex_colors(ctx);
     test_shared_vertex_dedup(ctx);
+    test_per_segment_colors(ctx);
 
     prc_release_context(ctx);
 

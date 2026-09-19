@@ -117,6 +117,14 @@ int
 prc_write_wire_tess(prc_context *ctx, prc_bit_write_state *s,
     const prc_write_wire_element *elements, uint32_t num_elements)
 {
+    return prc_write_wire_tess_ex(ctx, s, elements, num_elements, 0);
+}
+
+int
+prc_write_wire_tess_ex(prc_context *ctx, prc_bit_write_state *s,
+    const prc_write_wire_element *elements, uint32_t num_elements,
+    int per_segment)
+{
     uint32_t total_vertices = 0;
     uint32_t any_colors = 0;
     uint32_t closing_count = 0;
@@ -205,13 +213,44 @@ prc_write_wire_tess(prc_context *ctx, prc_bit_write_state *s,
         uint8_t first_written = 0;
 
         if (prc_bitwrite_bit(ctx, s, 1) != 0) goto fail;                     /* is_rgba */
-        if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                     /* is_segment_color */
+        if (prc_bitwrite_bit(ctx, s, per_segment ? 1 : 0) != 0) goto fail;   /* is_segment_color */
         if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;                     /* b_optimized */
 
         for (e = 0; e < num_elements; e++)
         {
             uint32_t n = elements[e].num_vertices;
             uint8_t r0 = 255, g0 = 255, b0 = 255, a0 = 255;
+
+            /* Per SEGMENT rather than per point: exactly one fewer entry per
+               element, which is how the read side derives it --
+               segment_color_count = vertex_color_count - number_of_wire_elements
+               (prc_parse_tess.c). An open run of n points has n-1 segments; a
+               closing one has n, counting the wrap back to the first point.
+               Each segment takes the colour of the point it starts at, so the
+               loop below simply stops one short and the closing element's
+               extra entry is not written. */
+            if (per_segment)
+            {
+                uint32_t segs = elements[e].is_closed ? n : (n > 0 ? n - 1 : 0);
+
+                for (v = 0; v < segs; v++)
+                {
+                    uint8_t r = 255, g = 255, b = 255, a = 255;
+
+                    if (elements[e].colors != NULL)
+                    {
+                        const float *c = &elements[e].colors[(size_t)v * 4];
+
+                        r = prc_wire_color_channel(c[0]);
+                        g = prc_wire_color_channel(c[1]);
+                        b = prc_wire_color_channel(c[2]);
+                        a = prc_wire_color_channel(c[3]);
+                    }
+                    if (prc_write_wire_one_color(ctx, s, r, g, b, a, &first_written) != 0)
+                        goto fail;
+                }
+                continue;
+            }
 
             for (v = 0; v < n; v++)
             {
