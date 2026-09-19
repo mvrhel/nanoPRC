@@ -259,11 +259,14 @@ prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
     prc_graph_style style;
     uint32_t biased_color_index, biased_black_index, biased_material_index;
 
+    /* No alpha here: an RgbColor is three doubles on the wire, and
+       prc_write_color_add deduplicates on the three components alone. The
+       assignment that used to be here reached nothing. Transparency is a
+       property of the STYLE, set below. */
     memset(&rgb, 0, sizeof(rgb));
     rgb.red = color[0];
     rgb.green = color[1];
     rgb.blue = color[2];
-    rgb.alpha = alpha;
     biased_color_index = prc_write_color_add(ctx, tables, &rgb);
     if (biased_color_index == 0)
         return 0;
@@ -292,6 +295,29 @@ prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
     memset(&style, 0, sizeof(style));
     style.is_material = 1;
     style.biased_color_index = biased_material_index;
+
+    /* The material's four alpha components are written above, but nothing
+       renders from them: a reader takes the effective alpha from the STYLE
+       and nowhere else. Ours is explicit about it --
+
+           if (style->is_transparency)
+               *alpha_out = style->transparency / 255.0;
+           else
+               *alpha_out = 1.0f;          (prc_tri_primitives_api.c)
+
+       -- so a style that leaves the flag clear is fully opaque whatever the
+       material says, which is what every item written before this did.
+
+       The field is an OPACITY byte despite its name. 7.5.3
+       PRC_TYPE_GRAPH_Style: "The transparency field values can range from 0
+       (transparent) to 255 (opaque)." So it is alpha*255, not (1-alpha)*255;
+       getting that backwards would round-trip perfectly through our own
+       reader and be wrong in every viewer. */
+    if (alpha < 1.0)
+    {
+        style.is_transparency = 1;
+        style.transparency = (uint8_t)(alpha * 255.0 + 0.5);
+    }
     return prc_write_style_add(ctx, tables, &style);
 }
 
