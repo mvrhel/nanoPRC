@@ -97,7 +97,7 @@ test_two_materials(prc_context *ctx)
     items_b[0].material_color[0] = 0.0;
     items_b[0].material_color[1] = 0.0;
     items_b[0].material_color[2] = 1.0;   /* blue */
-    items_b[0].material_alpha = 0.5;      /* and half transparent */
+    items_b[0].material_alpha = 0.25;     /* and mostly transparent */
     items_b[0].material_shininess = 0.1;
 
     memset(&leaf_a, 0, sizeof(leaf_a));
@@ -218,6 +218,30 @@ test_two_materials(prc_context *ctx)
                 PRC_ASSERT(c->red   > want[k][0] - 0.02 && c->red   < want[k][0] + 0.02);
                 PRC_ASSERT(c->green > want[k][1] - 0.02 && c->green < want[k][1] + 0.02);
                 PRC_ASSERT(c->blue  > want[k][2] - 0.02 && c->blue  < want[k][2] + 0.02);
+
+                /* Transparency lives on the style, not the material: a reader
+                   takes the effective alpha from is_transparency/transparency
+                   and ignores the material's alpha components entirely. The
+                   red item asked for alpha 1.0 and must carry no flag; the
+                   blue asked for 0.25 and must carry 64.
+
+                   0.25 rather than 0.5, deliberately. The field is an OPACITY
+                   byte (7.5.3, "0 (transparent) to 255 (opaque)"), so it is
+                   alpha*255 rounded; writing (1-alpha)*255 instead would be
+                   inverted in every viewer while round-tripping perfectly
+                   through our own reader. At alpha 0.5 both formulas give 128,
+                   so that value cannot detect the inversion -- a first version
+                   of this assertion used it, and a control confirmed it caught
+                   nothing. At 0.25 they give 64 and 191. */
+                if (k == 0)
+                {
+                    PRC_ASSERT_EQ(st->is_transparency, 0);
+                }
+                else
+                {
+                    PRC_ASSERT_EQ(st->is_transparency, 1);
+                    PRC_ASSERT_EQ(st->transparency, 64);
+                }
             }
         }
     }
