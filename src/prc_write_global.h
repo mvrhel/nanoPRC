@@ -70,6 +70,17 @@ typedef struct prc_write_global_tables_s
 
     prc_graph_style     *styles;
     uint32_t             style_count, style_cap;
+
+    /* Embedded uncompressed files, written into the file-structure header
+       rather than the globals section. This is where raster images live: a
+       prc_graph_picture above carries only format and dimensions, and points
+       here through biased_uncompressed_file_index. The bytes are owned by
+       these tables and freed with them. */
+    prc_write_embedded_file *files;
+    uint32_t             file_count, file_cap;
+
+    prc_graph_texture_definition *texture_definitions;
+    uint32_t             texture_definition_count, texture_definition_cap;
 } prc_write_global_tables;
 
 int prc_write_global_tables_init(prc_context *ctx, prc_write_global_tables *tables);
@@ -97,8 +108,19 @@ uint32_t prc_write_material_add(prc_context *ctx, prc_write_global_tables *table
 /* One representation item's own material: colour + material + style, all
    deduplicated against what the tables already hold. Returns the biased style
    index, or 0 on failure. */
+/* Optional diffuse texture for prc_write_add_item_style. Mirrors the public
+   prc_api_write_rep_item texture fields; NULL means no texture. */
+typedef struct
+{
+    const uint8_t *image;
+    size_t         image_size;
+    uint32_t       format;      /* prc_api_write_texture_format */
+    uint32_t       width, height;
+} prc_write_item_texture;
+
 uint32_t prc_write_add_item_style(prc_context *ctx, prc_write_global_tables *tables,
-    const double color[3], double alpha, double shininess);
+    const double color[3], double alpha, double shininess,
+    const prc_write_item_texture *texture);
 
 uint32_t prc_write_style_add(prc_context *ctx, prc_write_global_tables *tables,
     const prc_graph_style *style);
@@ -107,10 +129,14 @@ uint32_t prc_write_style_add(prc_context *ctx, prc_write_global_tables *tables,
    the PNG signature/IHDR chunk or the JPEG SOI marker + a scanned SOF
    marker) purely to recover pixel_width/pixel_height -- consistent with the
    real prc_graph_picture (Table 93), the globals section stores only this
-   format/dimensions metadata, never the encoded/raw bytes themselves; those
-   live in a separate uncompressed-file table (prc_parse_file_structure.c)
-   that is out of this encoder's scope, so biased_uncompressed_file_index is
-   always written 0 (unassigned). */
+   format/dimensions metadata, never the bytes themselves.
+
+   The bytes are copied into the embedded-file table in the file-structure
+   header, and biased_uncompressed_file_index points at them. For the raw
+   formats only width*height*components bytes are stored, not the whole of
+   `data_size`, since a caller may legitimately pass a larger buffer.
+
+   Callers may release their own copy as soon as this returns. */
 uint32_t prc_write_picture_add(prc_context *ctx, prc_write_global_tables *tables,
     const prc_write_picture *picture);
 
@@ -118,5 +144,21 @@ uint32_t prc_write_picture_add(prc_context *ctx, prc_write_global_tables *tables
    prc_parse_global_data expects. */
 int prc_write_globals_to_stream(prc_context *ctx, prc_bit_write_state *s,
     const prc_write_global_tables *tables);
+
+
+/* Adds an embedded uncompressed file (a raster image's bytes) and returns the
+   1-biased index for prc_graph_picture.biased_uncompressed_file_index. The
+   bytes are copied, so the caller may release its own copy immediately. */
+uint32_t prc_write_embedded_file_add(prc_context *ctx, prc_write_global_tables *tables,
+    const uint8_t *data, uint32_t size);
+
+
+/* Binds a picture to UV sampling and returns the 1-biased index for a
+   TextureApplication's biased_texture_definition_index. transformation is
+   optional placement and may be NULL. Only the plain diffuse form is written
+   -- see the implementation for what each field is set to and why. */
+uint32_t prc_write_texture_definition_add(prc_context *ctx, prc_write_global_tables *tables,
+    uint32_t biased_picture_index,
+    const prc_cart_transformation *transformation);
 
 #endif

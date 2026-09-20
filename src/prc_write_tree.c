@@ -246,13 +246,23 @@ prc_write_collect_node_styles(prc_context *ctx, prc_write_global_tables *tables,
     for (k = 0; k < node->num_rep_items; k++)
     {
         const prc_write_rep_item *ri = &node->rep_items[k];
+        prc_write_item_texture tex;
         uint32_t style;
 
         if (!ri->has_material)
             continue;
 
+        if (ri->has_texture)
+        {
+            tex.image = ri->texture_image;
+            tex.image_size = ri->texture_image_size;
+            tex.format = ri->texture_format;
+            tex.width = ri->texture_width;
+            tex.height = ri->texture_height;
+        }
         style = prc_write_add_item_style(ctx, tables, ri->material_color,
-                                         ri->material_alpha, ri->material_shininess);
+                                         ri->material_alpha, ri->material_shininess,
+                                         ri->has_texture ? &tex : NULL);
         if (style == 0)
         {
             prc_error(ctx, PRC_ERROR_INTERNAL,

@@ -39,6 +39,19 @@ prc_write_global_tables_free(prc_context *ctx, prc_write_global_tables *tables)
     if (tables->materials != NULL) prc_free(ctx, tables->materials);
     if (tables->pictures != NULL) prc_free(ctx, tables->pictures);
     if (tables->styles != NULL) prc_free(ctx, tables->styles);
+    if (tables->texture_definitions != NULL) prc_free(ctx, tables->texture_definitions);
+    if (tables->files != NULL)
+    {
+        uint32_t k;
+
+        /* The tables own each blob's bytes: prc_write_picture_add copies the
+           caller's pixels in, so the caller is free to release its own copy
+           as soon as it returns. */
+        for (k = 0; k < tables->file_count; k++)
+            if (tables->files[k].data != NULL)
+                prc_free(ctx, (void *)tables->files[k].data);
+        prc_free(ctx, tables->files);
+    }
     memset(tables, 0, sizeof(*tables));
 }
 
@@ -285,6 +298,185 @@ prc_write_parse_jpeg_dims(const uint8_t *data, size_t size, uint32_t *width, uin
     return -1;
 }
 
+/* Copies `size` bytes into the embedded-file table and returns the 1-biased
+   index a prc_graph_picture's biased_uncompressed_file_index takes. 0 on
+   failure.
+
+   These blobs live in the FILE-STRUCTURE HEADER, not the globals section --
+   see prc_write_file_structure.h. They carry no type tag: what the bytes are
+   is established only by the picture entity that points at them. */
+uint32_t
+prc_write_embedded_file_add(prc_context *ctx, prc_write_global_tables *tables,
+    const uint8_t *data, uint32_t size)
+{
+    uint8_t *copy;
+
+    if (ctx == NULL || tables == NULL || data == NULL || size == 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "prc_write_embedded_file_add: invalid arguments\n");
+        return 0;
+    }
+
+    if (prc_write_global_array_grow(ctx, (void **)&tables->files, &tables->file_cap,
+            tables->file_count, sizeof(prc_write_embedded_file)) != 0)
+        return 0;
+
+    copy = (uint8_t *)prc_malloc(ctx, size);
+    if (copy == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_embedded_file_add\n");
+        return 0;
+    }
+    memcpy(copy, data, size);
+
+    tables->files[tables->file_count].data = copy;
+    tables->files[tables->file_count].size = size;
+    tables->file_count++;
+    return tables->file_count;
+}
+
+/* prc_cart_transformation (the inverse of prc_parse_cart_trans). `name`
+   selects which payload follows, so the two must agree exactly: writing a
+   name whose payload does not match leaves the reader consuming the wrong
+   number of doubles and everything after it is noise.
+
+   Only the forms a texture placement needs are written. Mirror and the
+   rotation pair are readable by the parser but have no meaning for a 2D
+   texture transform, and a name the parser does not know is a hard parse
+   error rather than a skip, so anything else is refused here. */
+static int
+prc_write_cart_trans(prc_context *ctx, prc_bit_write_state *s,
+    const prc_cart_transformation *t)
+{
+    if (prc_bitwrite_uint32(ctx, s, t->name) != 0) return -1;
+
+    switch (t->name)
+    {
+    case PRC_TRANSFORMATION_Identity:
+        break;                                  /* no payload */
+
+    case PRC_TRANSFORMATION_Translate:
+        if (prc_bitwrite_double(ctx, s, t->transform.translation.x) != 0) return -1;
+        if (prc_bitwrite_double(ctx, s, t->transform.translation.y) != 0) return -1;
+        if (prc_bitwrite_double(ctx, s, t->transform.translation.z) != 0) return -1;
+        break;
+
+    case PRC_TRANSFORMATION_Scale:
+        if (prc_bitwrite_double(ctx, s, t->transform.scale) != 0) return -1;
+        break;
+
+    case PRC_TRANSFORMATION_NonUniformScale:
+        if (prc_bitwrite_double(ctx, s, t->transform.non_uniform_scale.x) != 0) return -1;
+        if (prc_bitwrite_double(ctx, s, t->transform.non_uniform_scale.y) != 0) return -1;
+        if (prc_bitwrite_double(ctx, s, t->transform.non_uniform_scale.z) != 0) return -1;
+        break;
+
+    default:
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_cart_trans: only identity, translate, scale and "
+            "non-uniform scale are written\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Adds a texture definition (Table 96) binding a picture to UV sampling, and
+   returns the 1-biased index a PRC_TYPE_GRAPH_TextureApplication's
+   biased_texture_definition_index takes. 0 on failure.
+
+   Only the form a plain diffuse texture needs is written, plus an optional
+   placement transformation. The record has a long tail -- mapping attribute
+   intensity and component arrays, blend functions, an alpha test -- and every
+   one of those is emitted in its benign, empty form. Anything richer is
+   refused rather than half-written, for the reason the fan and strip
+   refusals give: a file we cannot read back is worse than an error.
+
+   Field values, and why each:
+
+     texture_dimension        2, a 2D image.
+     texture_mapping_type     retrieve_UV. The UVs come from the
+                              tessellation's texture coordinates, which this
+                              writer has emitted since #99; the alternatives
+                              ask the reader to synthesise them.
+     texture_mapping_operator unknown. The operators are projections --
+                              planar, cylindrical, spherical, cubic -- used
+                              when coordinates must be generated. With UVs
+                              supplied there is nothing to project.
+     texture_mapping_attributes  0, not a channel mask -- see below.
+     texture_function         modulate, the standard diffuse behaviour --
+                              the image multiplies the underlying colour
+                              rather than replacing it.
+     blend_src_rgb/alpha      0, which suppresses the blend_des_* fields
+                              entirely: the reader only reads each
+                              destination when its source is non-zero.
+     texture_application_mode combine, with no alpha bit set -- a non-zero
+                              alpha bit would make the reader expect two more
+                              fields. See below.
+     wrapping mode s/t        application_choose -- see below. */
+uint32_t
+prc_write_texture_definition_add(prc_context *ctx, prc_write_global_tables *tables,
+    uint32_t biased_picture_index,
+    const prc_cart_transformation *transformation)
+{
+    prc_graph_texture_definition entry;
+
+    if (ctx == NULL || tables == NULL || biased_picture_index == 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_texture_definition_add: invalid arguments\n");
+        return 0;
+    }
+    if (biased_picture_index > tables->picture_count)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_texture_definition_add: picture index past the end of the table\n");
+        return 0;
+    }
+
+    memset(&entry, 0, sizeof(entry));
+    entry.tag = PRC_TYPE_GRAPH_TextureDefinition;
+    entry.biased_picture_index = biased_picture_index;
+    entry.texture_dimension = 2;
+    entry.texture_mapping_type = PRC_texture_mapping_retrieve_UV;
+    entry.texture_mapping_operator = PRC_texture_mapping_operator_unknown;
+    /* Zero, not an rgb/rgba channel mask. Measured across four independent
+       producers in prc-db -- vis5d, Voxler, a welding-robot animation and a
+       PDF3D export -- every texture definition writes 0 here. The enum
+       (Table 99) offers red/green/blue/alpha bits and none of them is used.
+       Writing a mask is the reading the enum invites and is not what real
+       files do -- so the picture's alpha channel does not select anything
+       here, and this function takes no parameter for it. */
+    entry.texture_mapping_attributes = 0;
+    entry.texture_function = PRC_texture_function_modulate;
+    entry.blend_src_rgb = 0;
+    entry.blend_src_alpha = 0;
+    /* combine. Three of the four reference producers write 4 and the fourth
+       writes 0; 4 is taken as the convention. Neither value sets the alpha
+       bit, so no alpha-test fields follow either way. */
+    entry.texture_application_mode = PRC_texture_application_combine;
+    /* application_choose on both axes, which is what all four reference
+       producers write -- not repeat, which is what the enum's names suggest
+       a texture ought to want. texture_dimension is 2, so s and t are
+       written and r is not. */
+    entry.texture_wrapping_mode_s = PRC_texture_wrapping_application_choose;
+    entry.texture_wrapping_mode_t = PRC_texture_wrapping_application_choose;
+
+    if (transformation != NULL)
+    {
+        entry.has_transformation = 1;
+        entry.transformation = *transformation;
+    }
+
+    if (prc_write_global_array_grow(ctx, (void **)&tables->texture_definitions,
+            &tables->texture_definition_cap, tables->texture_definition_count,
+            sizeof(prc_graph_texture_definition)) != 0)
+        return 0;
+
+    tables->texture_definitions[tables->texture_definition_count] = entry;
+    tables->texture_definition_count++;
+    return tables->texture_definition_count;
+}
+
 uint32_t
 prc_write_picture_add(prc_context *ctx, prc_write_global_tables *tables, const prc_write_picture *picture)
 {
@@ -351,9 +543,44 @@ prc_write_picture_add(prc_context *ctx, prc_write_global_tables *tables, const p
         return 0;
     }
 
-    /* The globals section stores only Table 93's format/dimensions
-       metadata -- see the header comment on prc_write_picture_add. */
-    entry.biased_uncompressed_file_index = 0;
+    /* Table 93 stores only format and dimensions here; the bytes go into the
+       file-structure header's embedded-file table and are reached through
+       this index. A picture written with index 0 has no image behind it --
+       which is what this function did before, so every picture it produced
+       was metadata pointing at nothing. */
+    {
+        size_t blob_size;
+
+        switch (picture->format)
+        {
+        case PRC_WRITE_PIX_RGB:
+            blob_size = (size_t)width * height * 3;
+            break;
+        case PRC_WRITE_PIX_RGBA:
+            blob_size = (size_t)width * height * 4;
+            break;
+        default:
+            /* PNG/JPEG: the encoded file, verbatim. Dimensions were parsed
+               out of it above but the bytes are stored whole. */
+            blob_size = picture->data_size;
+            break;
+        }
+
+        /* The raw formats are validated above as data_size >= w*h*n, so a
+           caller may hand over a larger buffer; store only the pixels the
+           dimensions describe rather than whatever else is in it. */
+        if (blob_size == 0 || blob_size > 0xFFFFFFFFu)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_picture_add: image is empty or too large to address\n");
+            return 0;
+        }
+
+        entry.biased_uncompressed_file_index =
+            prc_write_embedded_file_add(ctx, tables, picture->data, (uint32_t)blob_size);
+        if (entry.biased_uncompressed_file_index == 0)
+            return 0;
+    }
     entry.pixel_width = width;
     entry.pixel_height = height;
 
@@ -437,8 +664,75 @@ prc_write_globals_to_stream(prc_context *ctx, prc_bit_write_state *s, const prc_
         if (prc_bitwrite_uint32(ctx, s, p->pixel_height) != 0) goto fail;
     }
 
-    /* texture_definition table: out of this session's scope -- always empty */
-    if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;
+    /* texture definitions (Table 96) */
+    if (prc_bitwrite_uint32(ctx, s, tables->texture_definition_count) != 0) goto fail;
+    for (i = 0; i < tables->texture_definition_count; i++)
+    {
+        const prc_graph_texture_definition *d = &tables->texture_definitions[i];
+
+        if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_GRAPH_TextureDefinition) != 0) goto fail;
+        if (prc_write_content_prc_ref_base(ctx, s, &d->base) != 0) goto fail;
+
+        if (prc_bitwrite_uint32(ctx, s, d->biased_picture_index) != 0) goto fail;
+        if (prc_bitwrite_uint8(ctx, s, d->texture_dimension) != 0) goto fail;
+        if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_mapping_type) != 0) goto fail;
+
+        /* The operator, and everything about placement, is only on the wire
+           for retrieve_UV -- prc_parse_graph_textures reads them inside that
+           branch. prc_write_texture_definition_add writes no other mapping
+           type, so this is always taken; the condition mirrors the reader
+           rather than assuming. */
+        if (d->texture_mapping_type == PRC_texture_mapping_retrieve_UV)
+        {
+            if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_mapping_operator) != 0) goto fail;
+            if (prc_bitwrite_bit(ctx, s, d->has_transformation ? 1 : 0) != 0) goto fail;
+            if (d->has_transformation)
+                if (prc_write_cart_trans(ctx, s, &d->transformation) != 0) goto fail;
+        }
+
+        if (prc_bitwrite_uint32(ctx, s, (uint32_t)d->texture_mapping_attributes) != 0) goto fail;
+
+        /* Both attribute arrays are empty by construction. A non-zero count
+           here would oblige the reader to read that many doubles or bytes. */
+        if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;   /* intensities */
+        if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;   /* components */
+
+        /* blend_src's four doubles follow only for texture_function blend,
+           which is refused on the way in. */
+        if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_function) != 0) goto fail;
+
+        /* Each destination is read only when its source is non-zero, so
+           writing 0 for both sources suppresses two fields. */
+        if (prc_bitwrite_int32(ctx, s, d->blend_src_rgb) != 0) goto fail;
+        if (d->blend_src_rgb != 0)
+            if (prc_bitwrite_int32(ctx, s, d->blend_des_rgb) != 0) goto fail;
+        if (prc_bitwrite_int32(ctx, s, d->blend_src_alpha) != 0) goto fail;
+        if (d->blend_src_alpha != 0)
+            if (prc_bitwrite_int32(ctx, s, d->blend_des_alpha) != 0) goto fail;
+
+        /* The alpha bit would add alpha_test and alpha_test_reference. */
+        if (prc_bitwrite_uint8(ctx, s, d->texture_application_mode) != 0) goto fail;
+        if (d->texture_application_mode & PRC_texture_application_alpha)
+        {
+            if (prc_bitwrite_int32(ctx, s, d->alpha_test) != 0) goto fail;
+            if (prc_bitwrite_double(ctx, s, d->alpha_test_reference) != 0) goto fail;
+        }
+
+        /* Wrapping modes, one per dimension, gated on texture_dimension --
+           which is why that field is not merely descriptive. The parser has a
+           commented-out `texture_wrapping_mode` read above these, noted there
+           as not existing despite the specification; the per-axis ones that
+           follow it are real and must be written. */
+        if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_wrapping_mode_s) != 0) goto fail;
+        if (d->texture_dimension > 1)
+            if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_wrapping_mode_t) != 0) goto fail;
+        if (d->texture_dimension > 2)
+            if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_wrapping_mode_r) != 0) goto fail;
+
+        /* A second, texture-space transformation, distinct from the
+           placement transformation written earlier. Not offered. */
+        if (prc_bitwrite_bit(ctx, s, 0) != 0) goto fail;   /* has_texture_transformation */
+    }
 
     /* materials */
     if (prc_bitwrite_uint32(ctx, s, tables->material_count) != 0) goto fail;

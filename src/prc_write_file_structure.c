@@ -423,7 +423,39 @@ prc_write_deflate(prc_context *ctx, const uint8_t *src, size_t src_len, uint8_t 
 void
 prc_write_file_struct_header_bytes(uint8_t *out, uint32_t min_vers_for_read, uint32_t auth_vers)
 {
+    prc_write_file_struct_header_bytes_ex(out, min_vers_for_read, auth_vers, NULL, 0);
+}
+
+size_t
+prc_write_file_struct_header_size_ex(const prc_write_embedded_file *files, uint32_t num_files)
+{
+    size_t total = PRC_WRITE_FILE_STRUCT_HEADER_SIZE;
+    uint32_t k;
+
+    if (num_files == 0)
+        return total;
+    if (files == NULL)
+        return 0;
+
+    for (k = 0; k < num_files; k++)
+    {
+        size_t add = (size_t)PRC_WRITE_U32_BYTES + files[k].size;
+
+        /* Offsets into the written file are uint32; a header that cannot be
+           addressed is worse than a refusal. */
+        if (add < files[k].size || total > (size_t)0xFFFFFFFFu - add)
+            return 0;
+        total += add;
+    }
+    return total;
+}
+
+void
+prc_write_file_struct_header_bytes_ex(uint8_t *out, uint32_t min_vers_for_read,
+    uint32_t auth_vers, const prc_write_embedded_file *files, uint32_t num_files)
+{
     uint8_t *p = out;
+    uint32_t k;
 
     p[0] = 'P'; p[1] = 'R'; p[2] = 'C';
     p += PRC_WRITE_SIGNATURE_BYTES;
@@ -434,5 +466,17 @@ prc_write_file_struct_header_bytes(uint8_t *out, uint32_t min_vers_for_read, uin
        PRC_WRITE_FILE_STRUCT_UID0's doc comment in prc_write_common.h. */
     p = prc_write_le_unique_id(p, PRC_WRITE_FILE_STRUCT_UID0);
     p = prc_write_le_unique_id(p, PRC_WRITE_APP_UID0);
-    p = prc_write_le_uint32(p, 0); /* file_count (embedded uncompressed files) */
+    p = prc_write_le_uint32(p, num_files); /* file_count (embedded uncompressed files) */
+
+    /* Each block: a uint32 byte count then the bytes, no type tag. The
+       reader's prc_parse_uncomp_file mirrors exactly this. */
+    for (k = 0; k < num_files; k++)
+    {
+        p = prc_write_le_uint32(p, files[k].size);
+        if (files[k].size > 0)
+        {
+            memcpy(p, files[k].data, files[k].size);
+            p += files[k].size;
+        }
+    }
 }

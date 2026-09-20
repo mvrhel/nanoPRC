@@ -1025,7 +1025,51 @@ typedef struct prc_api_write_rep_item_s
     double   material_alpha;
     /** Specular exponent in 0..1. 0 is legal and means a matte surface. */
     double   material_shininess;
+
+    /* --- optional diffuse texture ---
+       Set has_texture with has_material to map an image across the item.
+       The image multiplies the material colour rather than replacing it, so
+       material_color still matters: leave it at white to see the image
+       unaltered.
+
+       The item's tessellation must supply texture coordinates. Without them
+       the reader has no UVs to sample with and the surface renders
+       untextured, which is silent rather than an error.
+
+       Only a plain 2D diffuse texture is written. Blend functions, alpha
+       testing and generated (projected) coordinates all exist in the format
+       and are refused here rather than half-written. */
+    /** 1 to attach texture_image below. Requires has_material. */
+    uint8_t  has_texture;
+    /** Raw pixels, or an encoded PNG/JPEG file, per texture_format. */
+    const uint8_t *texture_image;
+    /** Bytes at texture_image. For the raw formats only
+        texture_width*texture_height*components are read. */
+    size_t   texture_image_size;
+    /** 0 = RGB bytes, 1 = RGBA bytes, 2 = PNG file, 3 = JPEG file, matching
+        prc_api_write_texture_format. */
+    uint32_t texture_format;
+    /** Required for the raw formats; parsed from the file for PNG/JPEG.
+
+        Measured reader constraint, not a format one: Adobe Acrobat shows an
+        empty model tree whenever BOTH dimensions are 256 or more, so the
+        smaller of the two should be kept at 255 or below for files intended
+        to open there. 512x128 renders and 256x256 does not, so the trigger
+        is the shorter axis, not the pixel count, the decoded size or the
+        file size. PDF-XChange Editor renders every size tested. Sizes up to
+        255 in one axis are unaffected; nanoPRC writes what it is given. */
+    uint32_t texture_width;
+    uint32_t texture_height;
 } prc_api_write_rep_item;
+
+/** @brief texture_format values for prc_api_write_rep_item. */
+typedef enum
+{
+    PRC_API_WRITE_TEXTURE_RGB = 0,
+    PRC_API_WRITE_TEXTURE_RGBA = 1,
+    PRC_API_WRITE_TEXTURE_PNG = 2,
+    PRC_API_WRITE_TEXTURE_JPEG = 3
+} prc_api_write_texture_format;
 
 /**
  * @brief One polyline or line segment for a WIRE tessellation entry.
