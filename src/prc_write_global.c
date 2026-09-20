@@ -581,8 +581,36 @@ prc_write_picture_add(prc_context *ctx, prc_write_global_tables *tables, const p
         if (entry.biased_uncompressed_file_index == 0)
             return 0;
     }
-    entry.pixel_width = width;
-    entry.pixel_height = height;
+    /* PNG and JPEG carry their own dimensions, and 7.5.5 says these fields
+       "are ignored" for those formats, so 0 is written rather than the parsed
+       size. The parse above still happens: it validates that the buffer really
+       is the format the caller claimed, which is worth doing whatever ends up
+       in the record.
+
+       Two reasons to write 0 rather than the true size. It is what a third of
+       real encoded pictures do -- 366 of 1159 PNG/JPEG pictures across a
+       310-file third-party corpus store 0 in both fields, and 0 of them store
+       anything that disagrees with the image -- so readers must handle it.
+       And it avoids an unexplained failure in our own output: Adobe Acrobat
+       shows an empty model tree for a file this writer produces whose picture
+       record declares 256 or more on BOTH axes, while the same image in the
+       same file renders when these fields are 0.
+
+       That failure is NOT understood. It is not the image, the encoder, the
+       blob size, the file size or the field encoding -- each eliminated by a
+       fixture -- and a real producer's file declaring the same 256x256
+       renders. Writing 0 is a legitimate encoding, not a disguise for the
+       bug, but the bug is still open. */
+    if (entry.format == KEPRCPicture_PNG || entry.format == KEPRCPicture_JPG)
+    {
+        entry.pixel_width = 0;
+        entry.pixel_height = 0;
+    }
+    else
+    {
+        entry.pixel_width = width;
+        entry.pixel_height = height;
+    }
 
     if (prc_write_global_array_grow(ctx, (void **)&tables->pictures, &tables->picture_cap,
             tables->picture_count, sizeof(prc_graph_picture)) != 0)
