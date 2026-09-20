@@ -296,7 +296,8 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
         else
         {
             if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D_Wire) != 0) goto fail;
-            if (prc_write_wire_tess(ctx, s, e->wire_elements, e->num_wire_elements) != 0) goto fail;
+            if (prc_write_wire_tess_ex(ctx, s, e->wire_elements, e->num_wire_elements,
+                    e->vertex_colors_per_segment) != 0) goto fail;
         }
     }
 
