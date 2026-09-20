@@ -143,8 +143,18 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
             "prc_write_tess_3d: must_calculate_normals is incompatible with supplied norm_indices\n");
         return PRC_ERROR_INTERNAL;
     }
-    has_texture = (tex_indices != NULL && tex_coords != NULL && num_tex_coords > 0);
-    if (has_texture && norm_indices == NULL && !must_calculate_normals)
+    /* The tessellation carries the UVs; each primitive kind carries its own
+       indices into them. A face drawn entirely as fans or strips therefore has
+       no triangle-level tex_indices, so those cannot be what makes a
+       tessellation textured. */
+    has_texture = (tex_coords != NULL && num_tex_coords > 0);
+    if (has_texture && num_triangles > 0 && tex_indices == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_tess_3d: textured tessellation has triangles but no tex_indices\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    if (has_texture && num_triangles > 0 && norm_indices == NULL && !must_calculate_normals)
     {
         /* Would need PRC_FACETESSDATA_TriangleOneNormalTextured, which this
            project's own reader rejects with PRC_ERROR_NOT_IMPLEMENTED, so
@@ -204,6 +214,20 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                     "which used_entities_flag cannot express\n", f);
                 return PRC_ERROR_INTERNAL;
             }
+            if (has_texture && grp->tex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u has texture coordinates, so its fans need "
+                    "tex_indices too -- an untextured fan beside textured triangles would drop the UVs\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            if (has_texture && grp->normal_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a textured fan needs normal_indices "
+                    "(PRC_FACETESSDATA_TriangleFanOneNormalTextured is not written)\n");
+                return PRC_ERROR_INTERNAL;
+            }
             total_fan_verts += grp->num_vertices;
         }
         for (g = 0; g < fg->num_strips; g++)
@@ -234,6 +258,20 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                     "which used_entities_flag cannot express\n", f);
                 return PRC_ERROR_INTERNAL;
             }
+            if (has_texture && grp->tex_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: face %u has texture coordinates, so its strips need "
+                    "tex_indices too -- an untextured strip beside textured triangles would drop the UVs\n", f);
+                return PRC_ERROR_INTERNAL;
+            }
+            if (has_texture && grp->normal_indices == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL,
+                    "prc_write_tess_3d_ex: a textured strip needs normal_indices "
+                    "(PRC_FACETESSDATA_TriangleStripeOneNormalTextured is not written)\n");
+                return PRC_ERROR_INTERNAL;
+            }
             total_strip_verts += grp->num_vertices;
         }
         total_fans += fg->num_fans;
@@ -242,18 +280,6 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
     has_fans = (total_fans > 0);
     has_strips = (total_strips > 0);
 
-    if ((has_fans || has_strips) && has_texture)
-    {
-        /* The textured fan and strip forms exist in the format
-           (PRC_FACETESSDATA_TriangleFanTextured and friends) but are not
-           written here yet, and emitting untextured groups beside textured
-           triangles inside one face would silently drop the UVs supplied for
-           them. Refusing is the honest option until the textured forms are
-           implemented. */
-        prc_error(ctx, PRC_ERROR_INTERNAL,
-            "prc_write_tess_3d_ex: texture coordinates with fans or strips are not supported yet\n");
-        return PRC_ERROR_INTERNAL;
-    }
     if ((has_fans || has_strips) && must_calculate_normals)
     {
         /* Same reasoning as the textured case above: this project's own reader
@@ -403,6 +429,15 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                             global_idx[global_count++] = grp->normal_indices[c] * 3;
                         else if (!must_calculate_normals && c == 0)
                             global_idx[global_count++] = f * 3;   /* one normal, on the first vertex only */
+                        /* Between the normal and the position, exactly where
+                           the triangle path puts it: the read side's
+                           prc_internal_api_get_normal_texture_position_index
+                           takes normal, then num_texture_coords indices, then
+                           the position. Validation above guarantees a textured
+                           group supplies normal_indices, so the one-normal
+                           branch above is never the textured one. */
+                        if (has_texture)
+                            global_idx[global_count++] = grp->tex_indices[c] * 2;
                         global_idx[global_count++] = grp->vertex_indices[c] * 3;
                     }
                 }
@@ -482,12 +517,17 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
                 flags |= has_texture ? PRC_FACETESSDATA_TriangleTextured
                        : (multi_norm ? PRC_FACETESSDATA_Triangle
                                      : PRC_FACETESSDATA_TriangleOneNormal);
+            /* has_texture implies fans_multi/strips_multi -- a textured
+               group without normal_indices is refused during validation --
+               so the textured one-normal bits are never reachable here. */
             if (nfans > 0)
-                flags |= fans_multi ? PRC_FACETESSDATA_TriangleFan
-                                    : PRC_FACETESSDATA_TriangleFanOneNormal;
+                flags |= has_texture ? PRC_FACETESSDATA_TriangleFanTextured
+                       : (fans_multi ? PRC_FACETESSDATA_TriangleFan
+                                     : PRC_FACETESSDATA_TriangleFanOneNormal);
             if (nstrips > 0)
-                flags |= strips_multi ? PRC_FACETESSDATA_TriangleStripe
-                                      : PRC_FACETESSDATA_TriangleStripeOneNormal;
+                flags |= has_texture ? PRC_FACETESSDATA_TriangleStripeTextured
+                       : (strips_multi ? PRC_FACETESSDATA_TriangleStripe
+                                       : PRC_FACETESSDATA_TriangleStripeOneNormal);
 
             /* One count word per group kind present, plus one length word per
                fan and per strip. A face with no triangles writes no triangle
