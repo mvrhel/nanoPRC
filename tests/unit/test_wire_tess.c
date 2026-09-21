@@ -244,7 +244,13 @@ test_per_vertex_colors(prc_context *ctx)
 static void
 test_per_segment_colors(prc_context *ctx)
 {
-    static const double p[6][3] = {
+    /* float, not double: prc_api_write_wire_element.positions is a
+       `const float *`. Declaring these as double made the writer read 18
+       floats out of a 48-byte array -- 24 bytes past the end -- and the
+       positions it encoded were reinterpreted double bit patterns. The case
+       still passed, because everything it asserts is a colour or a count,
+       which is exactly why the overread went unnoticed. */
+    static const float p[6][3] = {
         { 0,0,0 }, { 1,0,0 }, { 2,0,0 },        /* open, 3 points -> 2 segments */
         { 0,1,0 }, { 1,1,0 }, { 1,2,0 }         /* closed, 3 points -> 3 segments */
     };
@@ -289,6 +295,27 @@ test_per_segment_colors(prc_context *ctx)
        the closing element) = 7. The segment count it then uses is that minus
        one per element, so 5 -- which is 2 + 3, the two elements' segments. */
     PRC_ASSERT_EQ(parsed->vertex_color_count, 7);
+
+    /* The positions, which nothing here used to check. Every assertion in
+       this case is about colours or counts, so the array could be -- and was
+       -- the wrong type without any of them noticing. */
+    {
+        uint32_t e, v;
+
+        for (e = 0; e < 2; e++)
+        {
+            for (v = 0; v < 3; v++)
+            {
+                uint32_t pool_idx = parsed->wire_elements[e].wire_indexes[v] / 3;
+                const double *pos =
+                    &parsed->tessellation_coordinates.coordinates[(size_t)pool_idx * 3];
+
+                PRC_ASSERT(pos[0] == (double)p[e * 3 + v][0]);
+                PRC_ASSERT(pos[1] == (double)p[e * 3 + v][1]);
+                PRC_ASSERT(pos[2] == (double)p[e * 3 + v][2]);
+            }
+        }
+    }
 
     /* A clean parse proves nothing about the count. Writing too MANY entries
        leaves trailing bits the reader never reads, and it succeeds -- a first
