@@ -512,6 +512,34 @@ prc_write_prc_buffer(prc_context *ctx,
     if (prc_write_schema_and_globals_to_stream(ctx, &schema_s, tables) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &schema_s) != 0) goto cleanup;
 
+    /* WORKAROUND, empirical, cause unknown. Adobe Acrobat shows an empty model
+       tree for a file whose schema+globals section is exactly 108 bytes long
+       before compression. Measured over 32 fixtures: three built at 108 bytes
+       with different pictures, node names, section offsets and total file
+       sizes all fail, and files at 109 bytes render at the same offsets. The
+       section's CONTENT does not matter -- two files differing only in a
+       material colour, byte-identical elsewhere, both fail on 108. Neither
+       the compressed length nor the absolute offset is the trigger; each
+       correlated with 108 in earlier fixture sets and each was refuted by a
+       file that separated them.
+
+       104, 106, 107, 109, 110, 111, 227 and 364 were all tested and render,
+       so 108 is a single bad value rather than one of a family, and one
+       padding byte is enough to leave it. Only a very small file can reach
+       this length -- one material, one texture, one part -- which is why it
+       appears in minimal fixtures and not in production data.
+
+       A trailing byte is safe to add: the section is byte-aligned after the
+       flush above and a reader parses it by structure, stopping when the
+       tables are consumed. Nothing derives a count from the section length.
+
+       If the cause is ever found this should be replaced, not extended. */
+    if (schema_s.byte_pos == 108)
+    {
+        if (prc_bitwrite_uint8(ctx, &schema_s, 0) != 0) goto cleanup;
+        if (prc_bitwrite_flush(ctx, &schema_s) != 0) goto cleanup;
+    }
+
     if (prc_bitwrite_init(ctx, &tree_s, 1024) != 0) goto cleanup;
     if (prc_write_tree_to_stream(ctx, &tree_s, root, &root_biased_index, default_style_index,
             &item_styles) != 0) goto cleanup;
