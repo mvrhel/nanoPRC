@@ -639,6 +639,122 @@ test_textured_groups_roundtrip(prc_context *ctx)
 }
 
 static void
+test_schema_globals_never_108_bytes(prc_context *ctx)
+{
+    /* Adobe Acrobat shows an empty model tree for a file whose schema+globals
+       section is exactly 108 bytes before compression. The writer pads past
+       that length; this checks the pad is still there.
+
+       The test reads the written file's own section offsets and decompresses
+       the section, rather than trusting the writer's internal count, so it
+       measures what a reader would see. The material colour is the knob: it
+       is the field whose encoded width moves that section by single bytes,
+       and (1.0, 0.75, 0.875) is a triple that lands on 108 without the pad. */
+    static const double positions[3 * 3] = { 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
+    static const double normals[3] = { 0.0, 0.0, 1.0 };
+    static const uint32_t tris[3] = { 0, 1, 2 };
+    static const uint32_t norm_idx[3] = { 0, 0, 0 };
+    static const uint32_t face_tri_counts[1] = { 1 };
+    static const uint8_t texpixels[2 * 2 * 3] = {
+        0xFF, 0x00, 0x00,  0x00, 0xFF, 0x00,
+        0x00, 0x00, 0xFF,  0xFF, 0xFF, 0x00
+    };
+    static const double uvs[3 * 2] = { 0.0, 0.0,  1.0, 0.0,  0.0, 1.0 };
+    static const uint32_t uv_idx[3] = { 0, 1, 2 };
+    prc_write_global_tables tables;
+    prc_write_tess_entry tess_entry;
+    prc_write_rep_item ri;
+    prc_write_tree_node root;
+    FILE *f;
+    long fsize;
+    uint8_t *buf;
+    uint32_t section_count, off_globals, off_next;
+    size_t hdr;
+
+    printf("  sub-case: the schema+globals section is never 108 bytes\n");
+
+    memset(&ri, 0, sizeof(ri));
+    ri.kind = PRC_WRITE_RI_SURFACE;
+    ri.biased_tessellation_index = 1;
+    ri.has_material = 1;
+    ri.material_color[0] = 1.0;
+    ri.material_color[1] = 0.5;
+    ri.material_color[2] = 1.0;
+    ri.material_alpha = 1.0;
+    ri.material_shininess = 0.1;
+    /* A texture is required, not decoration: an untextured one-triangle file
+       produces a schema+globals section of 77 to 93 bytes and cannot reach
+       108 at all, so a test without one can never exercise the guard. With
+       this 2x2 picture the section spans 107 to 112, and this colour lands
+       on 108 exactly when the guard is removed. */
+    ri.has_texture = 1;
+    ri.texture_image = texpixels;
+    ri.texture_image_size = sizeof(texpixels);
+    ri.texture_format = PRC_API_WRITE_TEXTURE_RGB;
+    ri.texture_width = 2;
+    ri.texture_height = 2;
+
+    memset(&root, 0, sizeof(root));
+    root.name = "g";
+    root.rep_items = &ri;
+    root.num_rep_items = 1;
+    root.bbox_max[0] = 1.0; root.bbox_max[1] = 1.0;
+
+    memset(&tess_entry, 0, sizeof(tess_entry));
+    tess_entry.kind = PRC_WRITE_TESS_KIND_3D;
+    tess_entry.positions = positions;
+    tess_entry.num_positions = 3;
+    tess_entry.normals = normals;
+    tess_entry.num_normals = 1;
+    tess_entry.tri_indices = tris;
+    tess_entry.norm_indices = norm_idx;
+    tess_entry.num_triangles = 1;
+    tess_entry.face_tri_counts = face_tri_counts;
+    tess_entry.num_faces = 1;
+    tess_entry.tex_coords = uvs;
+    tess_entry.num_tex_coords = 3;
+    tess_entry.tex_indices = uv_idx;
+
+    PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, &tables), 0);
+    PRC_ASSERT_EQ(prc_write_prc_file(ctx, TEST_PRC_FILENAME, NULL, &tables,
+                                     &root, &tess_entry, 1), 0);
+
+    f = fopen(TEST_PRC_FILENAME, "rb");
+    PRC_ASSERT_NOT_NULL(f);
+    fseek(f, 0, SEEK_END); fsize = ftell(f); fseek(f, 0, SEEK_SET);
+    PRC_ASSERT(fsize > 0);
+    buf = (uint8_t *)malloc((size_t)fsize);
+    PRC_ASSERT_NOT_NULL(buf);
+    PRC_ASSERT_EQ(fread(buf, 1, (size_t)fsize, f), (size_t)fsize);
+    fclose(f);
+
+    /* "PRC" + min_vers + auth_vers + 2 unique ids + filestructure_count
+       + file_info uid + reserved + section_count, then the offset table. */
+    hdr = 3 + 4 + 4 + 16 + 16 + 4 + 16 + 4;
+    section_count = read_le_uint32(buf + hdr);
+    PRC_ASSERT(section_count >= 3);
+    off_globals = read_le_uint32(buf + hdr + 4 + 4);      /* section_offset[1] */
+    off_next    = read_le_uint32(buf + hdr + 4 + 8);      /* section_offset[2] */
+    PRC_ASSERT(off_next > off_globals);
+    PRC_ASSERT((long)off_next <= fsize);
+
+    {
+        /* Decompress and check the length a reader would see. Without the
+           pad this colour yields exactly 108. */
+        uint8_t out[4096];
+        uLongf out_len = (uLongf)sizeof(out);
+        int zr = uncompress(out, &out_len, buf + off_globals, (uLong)(off_next - off_globals));
+
+        PRC_ASSERT_EQ(zr, Z_OK);
+        PRC_ASSERT(out_len != 108);
+    }
+
+    free(buf);
+    prc_write_global_tables_free(ctx, &tables);
+    remove(TEST_PRC_FILENAME);
+}
+
+static void
 test_texture_misuse_is_refused(prc_context *ctx)
 {
     static const double positions[3 * 3] = { 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
@@ -860,6 +976,7 @@ main(void)
     test_one_triangle_roundtrip(ctx);
     test_textured_quad_roundtrip(ctx);
     test_texture_misuse_is_refused(ctx);
+    test_schema_globals_never_108_bytes(ctx);
     test_prc_signature(ctx);
     test_zlib_section_valid(ctx);
     test_embedded_files(ctx);
