@@ -1051,13 +1051,29 @@ typedef struct prc_api_write_rep_item_s
     uint32_t texture_format;
     /** Required for the raw formats; parsed from the file for PNG/JPEG.
 
-        Measured reader constraint, not a format one: Adobe Acrobat shows an
-        empty model tree whenever BOTH dimensions are 256 or more, so the
-        smaller of the two should be kept at 255 or below for files intended
-        to open there. 512x128 renders and 256x256 does not, so the trigger
-        is the shorter axis, not the pixel count, the decoded size or the
-        file size. PDF-XChange Editor renders every size tested. Sizes up to
-        255 in one axis are unaffected; nanoPRC writes what it is given. */
+        OPEN BUG, cause not found. A texture this writer emits whose picture
+        record declares 256 or more on BOTH axes gives an empty model tree in
+        Adobe Acrobat. 255x255 renders, and so do 256x255, 256x64, 64x256,
+        512x128 and 240x272 -- one long axis is fine, two are not.
+
+        It is ours, not Acrobat's, and not the image. The same PNG bytes
+        render inside a real producer's file and fail inside ours; a real
+        256x256 PNG picture exists in third-party files and displays; and the
+        corpus holds 293 pictures with both axes at 256 or more. Ruled out by
+        fixture: file size and section layout (a 255x255 file padded to the
+        failing file's exact byte count renders), the PNG encoder (two
+        unrelated encoders behave identically), the embedded blob size (from
+        1 KB to 200 KB, all fail), the field encoding (a real file spends the
+        same 19 bits on 256), and the texture chain (style, application,
+        definition and picture records compare equal to the working file's).
+
+        JPEG is unaffected at every size tested, including 256x256 and
+        512x512, so it is the workaround until this is understood.
+
+        Worth knowing when reading 7.5.5: the spec says pixel_width and
+        pixel_height "are ignored" when format is PNG or JPEG. Acrobat does
+        not ignore them -- given a PNG whose own header disagrees with these
+        fields, it follows these. */
     uint32_t texture_width;
     uint32_t texture_height;
 } prc_api_write_rep_item;
@@ -1154,6 +1170,13 @@ typedef struct prc_api_write_tri_group_s
         one-normal-per-group form. Must be NULL if `normals` is NULL, and is
         ignored when must_calculate_normals is set. */
     const uint32_t *normal_indices;
+    /** Texture-coordinate indices into `tex_coords` (in PAIRS, like
+        tri_indices' own tex_indices), num_vertices entries. Required when the
+        tessellation supplies texture coordinates and NULL otherwise. A
+        textured group must also supply normal_indices: the one-normal
+        textured forms are not written, matching the same restriction on
+        textured triangles. */
+    const uint32_t *tex_indices;
     /** Vertices in this group; must be >= 3. A fan or strip of n vertices
         draws n-2 triangles. */
     uint32_t num_vertices;

@@ -179,11 +179,22 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
            and wire tessellation is line geometry. A demoted COMPRESSED entry
            reaches the TRIANGLES branch below, but cannot be carrying UVs,
            because the same check rejected them on the way in. */
-        if ((e->tex_coords != NULL) != (e->tex_indices != NULL))
+        if (e->tex_indices != NULL && e->tex_coords == NULL)
         {
             prc_error(ctx, PRC_ERROR_INTERNAL,
-                "prc_write_file_structure: tessellation entry %u supplies only one of "
-                "tex_coords/tex_indices; both are required together\n", i);
+                "prc_write_file_structure: tessellation entry %u supplies tex_indices "
+                "with no tex_coords to index into\n", i);
+            goto fail;
+        }
+        /* tex_coords is the carrier and tex_indices is per primitive kind,
+           so a tessellation whose geometry is entirely fans or strips
+           supplies UVs on the groups and none here. Triangles still need
+           their own. */
+        if (e->tex_coords != NULL && e->tex_indices == NULL && e->num_triangles > 0)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL,
+                "prc_write_file_structure: tessellation entry %u has triangles and "
+                "texture coordinates but no tex_indices for them\n", i);
             goto fail;
         }
         if (e->tex_coords != NULL && e->kind != PRC_WRITE_TESS_KIND_3D)
