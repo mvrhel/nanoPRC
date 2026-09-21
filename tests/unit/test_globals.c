@@ -335,13 +335,35 @@ test_picture_roundtrip(prc_context *ctx)
     PRC_ASSERT_EQ(parsed.pictures[1].pixel_width, 8);
     PRC_ASSERT_EQ(parsed.pictures[1].pixel_height, 4);
 
+    /* The encoded formats declare 0: 7.5.5 says these fields are ignored when
+       format is PNG or JPEG, and the image carries its own dimensions. The
+       raw formats above must still declare theirs, because nothing else in
+       the file records them -- that contrast is the point of checking all
+       four here rather than just one. */
     PRC_ASSERT_EQ(parsed.pictures[2].format, KEPRCPicture_PNG);
-    PRC_ASSERT_EQ(parsed.pictures[2].pixel_width, 64);
-    PRC_ASSERT_EQ(parsed.pictures[2].pixel_height, 32);
+    PRC_ASSERT_EQ(parsed.pictures[2].pixel_width, 0);
+    PRC_ASSERT_EQ(parsed.pictures[2].pixel_height, 0);
 
     PRC_ASSERT_EQ(parsed.pictures[3].format, KEPRCPicture_JPG);
-    PRC_ASSERT_EQ(parsed.pictures[3].pixel_width, 96);
-    PRC_ASSERT_EQ(parsed.pictures[3].pixel_height, 48);
+    PRC_ASSERT_EQ(parsed.pictures[3].pixel_width, 0);
+    PRC_ASSERT_EQ(parsed.pictures[3].pixel_height, 0);
+
+    /* The dimensions are still PARSED, even though they are not stored: a
+       buffer that is not the format the caller claimed is rejected. Zeroing
+       the record must not turn that validation off. */
+    {
+        prc_write_global_tables t2;
+        prc_write_picture pic;
+        static const uint8_t not_a_png[16] = { 0 };
+
+        PRC_ASSERT_EQ(prc_write_global_tables_init(ctx, &t2), 0);
+        memset(&pic, 0, sizeof(pic));
+        pic.format = PRC_WRITE_PIX_PNG;
+        pic.data = not_a_png;
+        pic.data_size = sizeof(not_a_png);
+        PRC_ASSERT_EQ(prc_write_picture_add(ctx, &t2, &pic), 0);
+        prc_write_global_tables_free(ctx, &t2);
+    }
 
     free_parsed_globals(ctx, &parsed);
     prc_write_global_tables_free(ctx, &tables);
