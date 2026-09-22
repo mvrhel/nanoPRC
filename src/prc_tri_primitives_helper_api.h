@@ -20,7 +20,6 @@
 #define PRC_PRC_TRI_PRIMITIVES_HELPER_API_H
 
 void prc_api_helper_set_vertex_position(prc_context *ctx, prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos, prc_tess_3d_compressed *tess, uint32_t vertex_in_pos);
-void prc_api_helper_set_texture_coordinates(prc_context *ctx, prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos, prc_tess_3d_compressed *tess, prc_internal_api_position_normal_pair *position_normal_pair);
 void prc_api_helper_set_face_color(prc_context *ctx, prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos, float *face_color, prc_internal_api_position_normal_pair *position_normal_pair);
 void prc_api_helper_intialize_position_normal_pair(prc_context *ctx, prc_internal_api_position_normal_pair *position_normal_pair, uint32_t vertex_out_pos, prc_internal_api_color_state_t color_state, prc_internal_api_style_state_t style_state, int32_t face_style, int32_t face_style_file_index);
 void prc_api_helper_set_normal(prc_context *ctx, prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos, prc_tess_3d_compressed *tess, prc_internal_api_position_normal_pair *position_normal_pair, uint32_t normal_index);
