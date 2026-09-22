@@ -537,7 +537,7 @@ prc_parse_filestruct_header(prc_context *ctx, uint8_t* buff)
     uint32_t k;
     int code;
 
-    if (buff[0] != 'P' && buff[1] != 'R' && buff[2] != 'C')
+    if (buff[0] != 'P' || buff[1] != 'R' || buff[2] != 'C')
     {
         return NULL;
     }
@@ -578,14 +578,29 @@ prc_parse_filestruct_header(prc_context *ctx, uint8_t* buff)
     return header;
 }
 
+/* PRC_MAIN_HEADER_FIXED_BYTES is everything before filestructure_count:
+   the 3-byte signature, two uint32 versions and two 16-byte unique ids, then
+   the count itself. A file shorter than this cannot carry a header, and the
+   reads below would run off the end of the buffer. */
+#define PRC_MAIN_HEADER_FIXED_BYTES (3u + 4u + 4u + 16u + 16u + 4u)
+/* Per file-structure entry: a 16-byte unique id, 4 skipped bytes and a
+   section_count, then section_count uint32 offsets. */
+#define PRC_FILE_INFO_FIXED_BYTES   (16u + 4u + 4u)
+
 prc_header*
-prc_parse_main_header(prc_context *ctx, uint8_t *buff)
+prc_parse_main_header(prc_context *ctx, uint8_t *buff, size_t buff_size)
 {
     prc_header* header;
     size_t k, j;
     uint8_t* ptr;
 
-    if (buff[0] != 'P' && buff[1] != 'R' && buff[2] != 'C')
+    if (buff_size < PRC_MAIN_HEADER_FIXED_BYTES)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "File is too short to hold a PRC main header\n");
+        return NULL;
+    }
+    if (buff[0] != 'P' || buff[1] != 'R' || buff[2] != 'C')
     {
         return NULL;
     }
@@ -617,9 +632,31 @@ prc_parse_main_header(prc_context *ctx, uint8_t *buff)
 
         for (k = 0; k < header->filestructure_count; k++)
         {
+            /* Every read below is bounds-checked against the buffer the caller
+               actually has. Without this a truncated file, or one declaring
+               more file structures than it carries, walks off the end. */
+            if ((size_t)(ptr - buff) + PRC_FILE_INFO_FIXED_BYTES > buff_size)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE,
+                    "File structure %u runs past the end of the file\n", (unsigned)k);
+                prc_free(ctx, header->file_info);
+                prc_free(ctx, header);
+                return NULL;
+            }
             ptr = prc_read_uniqueid(ctx, ptr, &header->file_info[k].unique_id);
             ptr += 4;
             ptr = prc_read_32bits_unsigned(ctx, ptr, &header->file_info[k].section_count);
+
+            if (header->file_info[k].section_count > 0 &&
+                (size_t)(ptr - buff) + (size_t)header->file_info[k].section_count * 4u > buff_size)
+            {
+                prc_error(ctx, PRC_ERROR_PARSE,
+                    "File structure %u declares more section offsets than the file holds\n",
+                    (unsigned)k);
+                prc_free(ctx, header->file_info);
+                prc_free(ctx, header);
+                return NULL;
+            }
 
             if (header->file_info[k].section_count > 0)
             {
@@ -638,6 +675,14 @@ prc_parse_main_header(prc_context *ctx, uint8_t *buff)
                     ptr = prc_read_32bits_unsigned(ctx, ptr, &header->file_info[k].section_offset[j]);
                 }
             }
+        }
+        if ((size_t)(ptr - buff) + 12u > buff_size)
+        {
+            prc_error(ctx, PRC_ERROR_PARSE,
+                "File ends before the header's trailing offsets\n");
+            prc_free(ctx, header->file_info);
+            prc_free(ctx, header);
+            return NULL;
         }
         ptr = prc_read_32bits_unsigned(ctx, ptr, &header->start_offset);
         ptr = prc_read_32bits_unsigned(ctx, ptr, &header->end_offset);
@@ -738,11 +783,30 @@ prc_open_contents(prc_context *ctx, const char* infile)
     fclose(fid);
     buff[size] = '\0';
 
-    /* Determine if this is a PDF or a PRC file */
-    if (buff[0] != 'P' && buff[1] != 'R' && buff[2] != 'C')
+    /* A file shorter than the longest signature we test cannot be either
+       format, and the tests below index up to buff[3]. The buffer is
+       size + 1 bytes, so a 1-byte file makes buff[2] and buff[3] reads past
+       the allocation -- four truncated files in a test corpus (1, 2, 3 and 4
+       bytes, holding "P", "PR", "PRC" and "PRC1") segfaulted here rather
+       than being rejected. */
+    if (size < 4)
+    {
+        prc_free(ctx, buff);
+        prc_free(ctx, output);
+        prc_error(ctx, PRC_ERROR_PARSE, "File is too short to be a PRC or PDF file\n");
+        return NULL;
+    }
+
+    /* Determine if this is a PDF or a PRC file.
+
+       These are || and not &&. With &&, the signature is only rejected when
+       EVERY byte differs, so "PXX", "ZRC" and "PRZ" all pass as PRC. Real
+       files of both formats happen to behave correctly either way, which is
+       why it went unnoticed; malformed input does not. */
+    if (buff[0] != 'P' || buff[1] != 'R' || buff[2] != 'C')
     {
         /* Not a PRC file. Check if it is a PDF file */
-        if (buff[0] != 0x25 && buff[1] != 0x50 && buff[2] != 0x44 && buff[3] != 0x46)
+        if (buff[0] != 0x25 || buff[1] != 0x50 || buff[2] != 0x44 || buff[3] != 0x46)
         {
             prc_free(ctx, buff);
             prc_free(ctx, output);
@@ -788,7 +852,7 @@ prc_open_contents(prc_context *ctx, const char* infile)
 #endif
 
     /* The header */
-    header = prc_parse_main_header(ctx, buff);
+    header = prc_parse_main_header(ctx, buff, size);
     if (header == NULL)
     {
         prc_free(ctx, buff);
