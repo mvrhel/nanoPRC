@@ -613,6 +613,58 @@ test_fan_through_public_api(prc_context *ctx)
     remove(fname);
 }
 
+/* used_entities_flag is a bit field, so the read side must mask it rather than
+   order it. A magnitude test gets two classes wrong: PolyfaceTextured (0x100)
+   sorts below TriangleTextured (0x200) and reads as untextured, dropping the
+   face's texture; NORMAL_Single (0x40000000) sorts above every entity bit and
+   makes an untextured face read as textured. Both are asserted here because
+   neither is reachable from a file this project currently writes, so nothing
+   else in the suite would notice a regression to a comparison. */
+static void
+test_textured_entity_mask(void)
+{
+    unsigned int k;
+    const prc_unsigned_int textured[] = {
+        PRC_FACETESSDATA_PolyfaceTextured,
+        PRC_FACETESSDATA_TriangleTextured,
+        PRC_FACETESSDATA_TriangleFanTextured,
+        PRC_FACETESSDATA_TriangleStripeTextured,
+        PRC_FACETESSDATA_PolyfaceOneNormalTextured,
+        PRC_FACETESSDATA_TriangleOneNormalTextured,
+        PRC_FACETESSDATA_TriangleFanOneNormalTextured,
+        PRC_FACETESSDATA_TriangleStripeOneNormalTextured
+    };
+    const prc_unsigned_int untextured[] = {
+        PRC_FACETESSDATA_Polyface,
+        PRC_FACETESSDATA_Triangle,
+        PRC_FACETESSDATA_TriangleFan,
+        PRC_FACETESSDATA_TriangleStripe,
+        PRC_FACETESSDATA_PolyfaceOneNormal,
+        PRC_FACETESSDATA_TriangleOneNormal,
+        PRC_FACETESSDATA_TriangleFanOneNormal,
+        PRC_FACETESSDATA_TriangleStripeOneNormal
+    };
+
+    for (k = 0; k < sizeof(textured) / sizeof(textured[0]); k++)
+        PRC_ASSERT((textured[k] & PRC_FACETESSDATA_TEXTURED_MASK) != 0);
+
+    /* Neither alone nor combined with every untextured bit, nor alongside the
+       single-normal marker, may an untextured face register as textured. */
+    for (k = 0; k < sizeof(untextured) / sizeof(untextured[0]); k++)
+    {
+        PRC_ASSERT((untextured[k] & PRC_FACETESSDATA_TEXTURED_MASK) == 0);
+        PRC_ASSERT(((untextured[k] | PRC_FACETESSDATA_NORMAL_Single) &
+                    PRC_FACETESSDATA_TEXTURED_MASK) == 0);
+    }
+    PRC_ASSERT((PRC_FACETESSDATA_NORMAL_Single & PRC_FACETESSDATA_TEXTURED_MASK) == 0);
+
+    /* The case a magnitude test silently loses: a textured polyface carrying
+       untextured companions still sums to less than TriangleTextured. */
+    PRC_ASSERT(((PRC_FACETESSDATA_PolyfaceTextured | PRC_FACETESSDATA_Triangle |
+                 PRC_FACETESSDATA_TriangleStripeOneNormal) &
+                PRC_FACETESSDATA_TEXTURED_MASK) != 0);
+}
+
 int
 main(void)
 {
@@ -629,6 +681,7 @@ main(void)
     test_vertex_colors_rgba_with_fan(ctx);
     test_refusals(ctx);
     test_fan_through_public_api(ctx);
+    test_textured_entity_mask();
 
     prc_release_context(ctx);
 
