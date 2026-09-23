@@ -66,6 +66,8 @@ typedef struct prc_loop_samples_s
 {
     uint32_t num_samples;
     prc_vec3 *samples;
+    prc_vec2 *uv_samples;
+    uint8_t is_outer_loop;
 } prc_loop_samples;
 
 typedef struct prc_coedge_samples_s
@@ -4815,7 +4817,7 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         return PRC_ERROR_MEMORY;
     }
 
-    /* We have to sample each of the coedges and concatenate them together */
+    /* We have to sample each of the coedges and concatenate them together. */
     for (k = 0; k < num_coedges; k++)
     {
         code = prc_sample_coedge(ctx, brep_ref_data, &topo_loop->coedge[k], &coedge_samples[k]);
@@ -4837,17 +4839,23 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
     }
 
     /* Now we have to combine the coedges into one loop */
-    /* TODO: Do we need to replicate the last one? */
-    loop_samples->num_samples = total_samples;
-    loop_samples->samples = (prc_vec3 *)prc_calloc(ctx, total_samples, sizeof(prc_vec3));
+    /* Each coedge begins with the end point of the previous coedge so
+       we want to drop any of those points as we make our way around the loop.
+       This includes the last point of the last coedge being the first point
+       of the first coedge. We will maintain that point. */
+    /* Each coedge has one redundant point. */
+    loop_samples->num_samples = total_samples - num_coedges + 1;
+    loop_samples->samples = (prc_vec3 *)prc_calloc(ctx, loop_samples->num_samples, sizeof(prc_vec3));
     if (loop_samples->samples != NULL)
     {
         uint32_t pos = 0;
         for (j = 0; j < num_coedges; j++)
         {
-            memcpy(&loop_samples->samples[pos], coedge_samples[j].samples, sizeof(prc_vec3) * coedge_samples[j].num_samples);
-            pos += coedge_samples[j].num_samples;
+            memcpy(&loop_samples->samples[pos], coedge_samples[j].samples, sizeof(prc_vec3) * coedge_samples[j].num_samples - 1);
+            pos += (coedge_samples[j].num_samples - 1);
         }
+        /* Duplicate the first point to complete the loop */
+        loop_samples->samples[pos] = coedge_samples[0].samples[0];
     }
 
     /* Free up the coedge samples */
@@ -4859,6 +4867,99 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         }
     }
     prc_free(ctx, coedge_samples);
+
+    return 0;
+}
+
+/* TODO. Based upon surface type, map the 3D points to the UV surface storing
+   the values in loop_samples structure. Also flag the one that is the outer
+   edge. All others represent holes. At this point, the loops are samples of
+   the path in 3D space on the surface. We will move this to the uv parametric
+   space. The loops at this point have the same start and end point and are
+   sampled at a sufficient approximation with all the coedge samples placed in
+   a single loop */
+static int
+prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t orientation,
+    prc_type_surf surface, uint32_t num_loops, prc_loop_samples *loop_samples)
+{
+    int code;
+    uint32_t k;
+
+    for (k = 0; k < num_loops; k++)
+    {
+        switch (surface.surface_type)
+        {
+        case PRC_TYPE_SURF_FromCurves:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cone:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cylinder:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Sphere:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Torus:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cylindrical:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Extrusion:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Revolution:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Plane:
+        {
+            /* The UV plane in this space is simply the Z = 0 plane */
+            break;
+        }
+
+        case PRC_TYPE_SURF_Offset:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_NURBS:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend02:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend01:
+        {
+            break;
+        }
+
+        default:
+            return 0;
+        }
+
+    }
 
     return 0;
 }
@@ -4962,6 +5063,17 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                     prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_sample_loop\n");
                     return PRC_ERROR_INTERNAL;
                 }
+            }
+
+            /* Now lets get the loops onto the parametric surface so they can
+               be used as a edge boundary in the tessellation process */
+            code = prc_map_loops_to_surface(ctx, topo_face, orientation, surface,
+                                            num_loops, loop_samples);
+            if (code < 0)
+            {
+                prc_free(ctx, loop_samples);
+                prc_error(ctx, code, "Failed in prc_map_loops_to_surface\n");
+                return code;
             }
         }
         surf_params.loop_samples = loop_samples;
