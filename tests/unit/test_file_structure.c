@@ -755,6 +755,44 @@ test_schema_globals_never_108_bytes(prc_context *ctx)
 }
 
 static void
+test_truncated_files_are_refused(prc_context *ctx)
+{
+    /* Four files in a third-party corpus are a deliberate truncation series:
+       1, 2, 3 and 4 bytes holding "P", "PR", "PRC" and "PRC1". All four
+       segfaulted prc_api_open_contents. Two defects were behind it -- the
+       signature test used && where || belongs, so it only rejected a file
+       whose every signature byte differed, and the main header was parsed
+       with no reference to how many bytes the buffer actually held.
+
+       The prefixes below are exactly those four, plus a 0-byte file and one
+       that is long enough to pass a naive length check while still being far
+       short of a header. Each must fail cleanly rather than crash. */
+    static const char *const prefixes[] = { "", "P", "PR", "PRC", "PRC1",
+                                            "PRC\x01\x00\x00\x00" };
+    size_t i;
+
+    printf("  sub-case: truncated files are refused, not crashed on\n");
+
+    for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+    {
+        FILE *f = fopen(TEST_PRC_FILENAME, "wb");
+        size_t n = strlen(prefixes[i]);
+        prc_data *pd;
+
+        PRC_ASSERT_NOT_NULL(f);
+        if (n > 0)
+            PRC_ASSERT_EQ(fwrite(prefixes[i], 1, n, f), n);
+        fclose(f);
+
+        /* The contract is a NULL return. Reaching this line at all is most of
+           the test: before the fix the process died inside this call. */
+        pd = (prc_data *)prc_api_open_contents(ctx, TEST_PRC_FILENAME);
+        PRC_ASSERT(pd == NULL);
+        remove(TEST_PRC_FILENAME);
+    }
+}
+
+static void
 test_texture_misuse_is_refused(prc_context *ctx)
 {
     static const double positions[3 * 3] = { 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
@@ -976,6 +1014,7 @@ main(void)
     test_one_triangle_roundtrip(ctx);
     test_textured_quad_roundtrip(ctx);
     test_texture_misuse_is_refused(ctx);
+    test_truncated_files_are_refused(ctx);
     test_schema_globals_never_108_bytes(ctx);
     test_prc_signature(ctx);
     test_zlib_section_valid(ctx);
