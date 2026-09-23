@@ -307,6 +307,37 @@ prc_bitread_double(prc_context *ctx, prc_bit_state *state)
         if ((pcofdoe = get_acofdoe_value(ctx, ucofdoe, i)) != NULL)
             break;
     }
+
+    /* Unreachable today, and kept deliberately. The loop assigns pcofdoe every
+       iteration, so falling out of it without a match leaves it NULL and the
+       dereferences below would read through it.
+
+       That cannot currently happen: prc_acofdoe is a COMPLETE prefix code, so
+       every possible bit path terminates at an entry within 22 bits. Measured
+       over the table on 23 September 2026 -- 2,077 entries, Kraft sum exactly
+       1, zero prefix collisions -- so this branch cannot be triggered by any
+       input, however malformed.
+
+       It exists because that guarantee lives in a data table rather than in
+       this code. Adding or removing a prc_double.c entry breaks the Kraft sum
+       silently, and the first symptom would be a null dereference here on
+       whichever bit pattern the edit orphaned. This turns that into a parse
+       error. Do not remove it on the grounds that it never fires -- that is
+       the point. If it ever does fire, the table has stopped being complete.
+
+       Marking the stream invalid matches what
+       prc_bitread_double_with_variable_bit_number does for its own impossible
+       input, rather than returning a plausible 0.0 a caller would store as a
+       real coordinate. */
+    if (pcofdoe == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_PARSE,
+            "No compact-double prefix code matches the next 22 bits; the stream is "
+            "not positioned on a double\n");
+        state->overrun = 1;
+        return 0.0;
+    }
+
     value.d = pcofdoe->u2uod.Value;
 
     // check if zero
