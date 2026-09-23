@@ -31,7 +31,9 @@
  *   - "tessellations": one entry per tessellation, including its faces,
  *     vertex buffers (position/normal/color/uv), and graphics primitives
  *     (the index lists that assemble vertices into triangles/fans/strips
- *     or, for wire data, lines/line-strips/line-loops).
+ *     or, for wire data, lines/line-strips/line-loops). A textured face also
+ *     carries a "texture" object describing the picture's dimensions,
+ *     channel count and mapping transform -- its identity, not its pixels.
  *
  * The emphasis throughout is on bounded, predictable memory use and
  * streaming output, since production PRC files can contain millions of
@@ -518,6 +520,41 @@ static void write_material(json_writer *w, const prc_api_material *m)
     json_writer_end_object(w);
 }
 
+/** Write a face's texture identity: enough to tell two textures apart and to
+ *  reproduce the mapping, without the pixels. The image itself is deliberately
+ *  not emitted -- a single 256x256 RGB texture base64'd would outweigh the
+ *  geometry it belongs to, and obj_export already writes texture files.
+ *
+ *  width/height/num_channels are reported exactly as the library supplies
+ *  them, which for a PNG or JPEG picture means they may legitimately be 0: the
+ *  format carries its own dimensions in its header and the PRC fields are
+ *  declared unused for those types. A consumer that needs real dimensions for
+ *  a compressed picture has to read them out of the image data. */
+static void write_texture(json_writer *w, const prc_api_texture *t)
+{
+    json_writer_begin_object(w);
+
+    json_writer_kv_uint32(w, "width", t->width);
+    json_writer_kv_uint32(w, "height", t->height);
+    json_writer_kv_uint32(w, "num_channels", t->num_channels);
+    json_writer_kv_bool(w, "data_present", t->data != NULL);
+    json_writer_kv_bool(w, "has_transform", t->has_transform);
+
+    if (t->has_transform)
+    {
+        int i;
+
+        json_writer_begin_array_compact_key(w, "transform");
+        for (i = 0; i < 9; i++)
+        {
+            json_writer_double(w, t->transform[i]);
+        }
+        json_writer_end_array(w);
+    }
+
+    json_writer_end_object(w);
+}
+
 /**
  * @brief Write one face: metadata, optional material, optional standalone
  *        vertex buffer (PRC_API_TESS_3D case), and its graphics primitives.
@@ -536,6 +573,12 @@ static int write_face(prc_context *ctx, prc_api_data data, const prc_api_tess *t
     json_writer_kv_bool(w, "disabled", face->disable_face);
     json_writer_kv_bool(w, "has_transparency", face->has_transparency);
     json_writer_kv_bool(w, "is_texture", face->is_texture);
+
+    if (face->is_texture)
+    {
+        json_writer_key(w, "texture");
+        write_texture(w, &face->texture);
+    }
 
     if (face->is_material)
     {
