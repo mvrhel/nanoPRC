@@ -111,6 +111,12 @@ typedef struct census_s
 
     long surf[TYPE_SLOTS];
     long crv[TYPE_SLOTS];
+
+    /* Recursion guard, see WALK_MAX_DEPTH. depth is the live nesting level;
+       depth_exceeded counts how many times the cap stopped a descent, and is
+       reported so a truncated walk can never be mistaken for a complete one. */
+    unsigned int depth;
+    long depth_exceeded;
 } census;
 
 /* Table 246 -- surface types. */
@@ -282,6 +288,19 @@ walk_ptr_topo(census *c, prc_ptr_topology *ptr)
    cheapest read on a file's units and scale, which is the first thing anyone
    comparing two readers' renders wants, and printing it where it is found
    keeps it next to the context header it belongs to. */
+/* A well-formed topology nests body > connex > shell > face > loop > coedge >
+   edge > vertex, eight levels, so this cap is far above anything legitimate.
+   It exists because the walk below has no visited set: a file whose topology
+   refers back to itself would otherwise recurse until the stack is gone, and
+   this tool is pointed at malformed files by design.
+
+   A visited set would be the other way to do it, and is deliberately not used:
+   this is a census, and the same entity legitimately reached twice must be
+   counted twice, so suppressing repeat visits would change every figure the
+   tool reports. Bounding depth stops runaway recursion without touching the
+   counts for any file that terminates. */
+#define WALK_MAX_DEPTH 64u
+
 static void
 walk_topo(census *c, prc_topo *topo)
 {
@@ -289,6 +308,13 @@ walk_topo(census *c, prc_topo *topo)
 
     if (topo == NULL)
         return;
+
+    if (c->depth >= WALK_MAX_DEPTH)
+    {
+        c->depth_exceeded++;
+        return;
+    }
+    c->depth++;
 
     switch (topo->tag)
     {
@@ -418,6 +444,8 @@ walk_topo(census *c, prc_topo *topo)
         c->topo_other++;
         break;
     }
+
+    c->depth--;
 }
 
 static void
@@ -498,6 +526,12 @@ report_census(const census *c)
     printf("  unique vertices              : %ld\n", c->vertex_unique);
     printf("  multiple vertices            : %ld\n", c->vertex_multiple);
     printf("  other topology tags          : %ld\n", c->topo_other);
+    /* Loud, and only when it happened: a walk stopped by the depth cap has
+       undercounted everything below that point, and a silent truncation here
+       would read exactly like a file that genuinely has less in it. */
+    if (c->depth_exceeded > 0)
+        printf("  WALK TRUNCATED at depth %u, %ld time(s) -- counts below are incomplete\n",
+               WALK_MAX_DEPTH, c->depth_exceeded);
 
     printf("\n--- surface types on faces ---\n");
     if (c->face == 0)
