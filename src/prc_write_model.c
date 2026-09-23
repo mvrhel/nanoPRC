@@ -512,26 +512,49 @@ prc_write_prc_buffer(prc_context *ctx,
     if (prc_write_schema_and_globals_to_stream(ctx, &schema_s, tables) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &schema_s) != 0) goto cleanup;
 
-    /* WORKAROUND, empirical, cause unknown. Adobe Acrobat shows an empty model
-       tree for a file whose schema+globals section is exactly 108 bytes long
-       before compression. Measured over 32 fixtures: three built at 108 bytes
-       with different pictures, node names, section offsets and total file
-       sizes all fail, and files at 109 bytes render at the same offsets. The
-       section's CONTENT does not matter -- two files differing only in a
-       material colour, byte-identical elsewhere, both fail on 108. Neither
-       the compressed length nor the absolute offset is the trigger; each
-       correlated with 108 in earlier fixture sets and each was refuted by a
-       file that separated them.
+    /* WORKAROUND, empirical, cause unknown, and NARROWER than it looks.
 
-       104, 106, 107, 109, 110, 111, 227 and 364 were all tested and render,
-       so 108 is a single bad value rather than one of a family, and one
-       padding byte is enough to leave it. Only a very small file can reach
-       this length -- one material, one texture, one part -- which is why it
-       appears in minimal fixtures and not in production data.
+       Adobe Acrobat shows an empty model tree for a file this writer produces
+       whose schema+globals section is exactly 108 bytes before compression --
+       but only for some files. 108 bytes is NECESSARY AND NOT SUFFICIENT:
+
+         PNG-textured,     108-byte section    empty model tree
+         PNG-textured,     109-byte section    renders
+         raw-RGB-textured, 108-byte section    RENDERS
+
+       The picture format is the visible difference between the second and
+       third rows and may or may not be the operative one; what distinguishes
+       a failing 108 from a rendering 108 is NOT isolated. Do not read this
+       gate as "108 bytes is fatal".
+
+       What is established, on Acrobat 26.2.21931.0. Among PNG-textured files
+       the boundary is exact and reproducible: 104, 106, 107, 109, 110, 111,
+       227 and 364 all render, and only 108 fails, so one padding byte is
+       enough to leave it. It is not the compressed length, not the absolute
+       section offset, and not the total file size -- each correlated with 108
+       in an earlier fixture set and each was refuted by a file that separated
+       them. Among PNG-textured files at 108 the content does not matter: two
+       differing only in a material colour, byte-identical elsewhere, both fail.
+
+       Only a very small file can reach this length -- one material, one
+       texture, one part -- which is why it appears in minimal fixtures and not
+       in production data. A 519-byte reproduction exists; see the 22 September
+       correspondence.
+
+       The gate is deliberately unconditional on format. It moves any 108-byte
+       section off the value, which costs one byte on files that would not have
+       failed and avoids having to encode a rule we cannot yet state.
 
        A trailing byte is safe to add: the section is byte-aligned after the
-       flush above and a reader parses it by structure, stopping when the
-       tables are consumed. Nothing derives a count from the section length.
+       flush above, a reader parses it by structure and stops when the tables
+       are consumed, and nothing derives a count from the section length.
+
+       Two cautions for whoever revisits this. Every verdict behind it was
+       "model tree populated or not", which is blind to a file that renders the
+       WRONG SHAPE -- a real failure mode we have since seen elsewhere. And an
+       earlier minimal repro for this defect turned out not to fail at all,
+       because it was built on the raw-RGB path and only its section length was
+       checked, never its behaviour. Watch a fixture fail before trusting it.
 
        If the cause is ever found this should be replaced, not extended. */
     if (schema_s.byte_pos == 108)
