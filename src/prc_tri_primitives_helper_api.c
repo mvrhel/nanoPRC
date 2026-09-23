@@ -206,7 +206,23 @@ prc_api_helper_set_vertex_style_from_face_ref(prc_context *ctx,
     prc_internal_graph_style *style = &face_out_reserved->style[face_index];
     uint8_t is_material = style->is_material;
 
-    vertex_out->vertices[vertex_out_pos].uv_set = 0; /* We dont use the texture for this */
+    /* This face is styled by a material rather than a texture, so the vertex
+       has no texture coordinates. Clearing the flag alone used to leave the
+       coordinates behind, and they are not harmless leftovers: the compressed
+       path sets UVs on every vertex when the tessellation carries UV data,
+       deliberately "regardless of face_out->is_texture" (prc_tri_primitives_api.c),
+       and the V-flip at the end of prc_internal_api_set_vertex_texture_coords
+       turns a raw (0,0) into (0,1). So a vertex reaching here was left holding
+       a plausible-looking coordinate rather than an obvious zero.
+
+       Measured across the prc-db corpus before this: 9,258,766 compressed
+       vertices carried a non-zero uv[] with uv_set clear, and every sampled
+       one was exactly (0,1). A consumer that honours uv_set is unaffected --
+       the flag was always right -- but one that reads uv[] without checking
+       gets a coordinate that looks real. Clear both, so the two agree. */
+    vertex_out->vertices[vertex_out_pos].uv_set = 0;
+    vertex_out->vertices[vertex_out_pos].uv[0] = 0.0f;
+    vertex_out->vertices[vertex_out_pos].uv[1] = 0.0f;
 
     position_normal_pair->style_set = PRC_INTERNAL_API_STYLE_SET_FROM_REF_DATA;
     position_normal_pair->style_index = face_out_reserved->style[face_index].face_style_index;
