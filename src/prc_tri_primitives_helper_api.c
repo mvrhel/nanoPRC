@@ -90,6 +90,15 @@ prc_api_helper_set_normal(prc_context *ctx, prc_api_tess_vertex_buffer *vertex_o
         tess->normals_prc_compressed_3d[normal_index * 3 + 1];
     vertex_out->vertices[vertex_out_pos].normal[2] =
         tess->normals_prc_compressed_3d[normal_index * 3 + 2];
+
+    /* The PUBLIC flag, which is a different field from the internal
+       position_normal_pair tracker set above despite the shared name. Callers
+       are documented to treat normal[] as meaningless without it, so leaving
+       it clear published correct normals as absent: every consumer that
+       honours the contract (obj_export, stl_export, json_export) fell back to
+       a computed flat face normal and shaded every compressed tessellation
+       flat. */
+    vertex_out->vertices[vertex_out_pos].normal_set = 1;
 }
 
 void

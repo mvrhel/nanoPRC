@@ -3539,7 +3539,7 @@ prc_api_get_tessellation_vertices(prc_context *ctx, prc_api_data data_in,
 
             prc_tess_face face = tess3d->face_tessellation_data[face_index];
 
-            if (face.used_entities_flag < PRC_FACETESSDATA_TriangleTextured)
+            if ((face.used_entities_flag & PRC_FACETESSDATA_TEXTURED_MASK) == 0)
             {
                 /* This means we have no textured entities. */
                 is_uncompressed_with_no_texture_entities = true;
@@ -5424,6 +5424,9 @@ uncompressed_done:
                     vertex_out->vertices[vertex_index].normal[0] = tess->normals_prc_compressed_3d[prc_normal_index * 3];
                     vertex_out->vertices[vertex_index].normal[1] = tess->normals_prc_compressed_3d[prc_normal_index * 3 + 1];
                     vertex_out->vertices[vertex_index].normal[2] = tess->normals_prc_compressed_3d[prc_normal_index * 3 + 2];
+                    /* As in prc_api_helper_set_normal: a split vertex gets a real
+                       normal here, so the public flag has to say so. */
+                    vertex_out->vertices[vertex_index].normal_set = 1;
 
                     /* Either set the color for the vertex or use a texture or set a style */
                     if (face_out->is_texture)

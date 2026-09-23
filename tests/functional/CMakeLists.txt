@@ -27,3 +27,13 @@ target_compile_definitions(test_stl_roundtrip PRIVATE
 	EXAMPLE_CUBE_PDF="${CMAKE_SOURCE_DIR}/examples/cube.pdf"
 	ROUNDTRIP_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME test_stl_roundtrip COMMAND test_stl_roundtrip)
+
+add_executable(test_compressed_normals tests/functional/test_compressed_normals.c)
+target_link_libraries(test_compressed_normals nano_prc)
+if(NOT WIN32)
+	target_link_libraries(test_compressed_normals m)
+endif()
+target_include_directories(test_compressed_normals PRIVATE tests)
+target_compile_definitions(test_compressed_normals PRIVATE
+	EXAMPLE_CUBE_PDF="${CMAKE_SOURCE_DIR}/examples/cube.pdf")
+add_test(NAME test_compressed_normals COMMAND test_compressed_normals)

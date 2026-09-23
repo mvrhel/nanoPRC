@@ -205,6 +205,21 @@ typedef enum {
     PRC_FACETESSDATA_TriangleStripeOneNormalTextured = 0x8000
 } prc_face_attribute_t;
 
+/* Every entity kind in Table 139 that carries texture coordinates. This is a
+   bit field, so testing it by magnitude gets the wrong answer in both
+   directions: PolyfaceTextured (0x100) sorts BELOW TriangleTextured (0x200)
+   and would read as untextured, while NORMAL_Single (0x40000000) sorts above
+   everything and would make any face read as textured. Mask, don't compare. */
+#define PRC_FACETESSDATA_TEXTURED_MASK                    \
+    ((prc_unsigned_int)(PRC_FACETESSDATA_PolyfaceTextured |          \
+     PRC_FACETESSDATA_TriangleTextured |                  \
+     PRC_FACETESSDATA_TriangleFanTextured |               \
+     PRC_FACETESSDATA_TriangleStripeTextured |            \
+     PRC_FACETESSDATA_PolyfaceOneNormalTextured |         \
+     PRC_FACETESSDATA_TriangleOneNormalTextured |         \
+     PRC_FACETESSDATA_TriangleFanOneNormalTextured |      \
+     PRC_FACETESSDATA_TriangleStripeOneNormalTextured))
+
 typedef enum {
     PRC_ATTRIBUTE_TYPE_INT = 1,
     PRC_ATTRIBUTE_TYPE_DOUBLE,
