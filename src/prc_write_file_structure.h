@@ -46,9 +46,14 @@ typedef prc_api_write_tessellation prc_write_tess_entry;
 int prc_write_schema_and_globals_to_stream(prc_context *ctx, prc_bit_write_state *s,
     const prc_write_global_tables *tables);
 
-/* PRC_TYPE_ASM_FileStructureTessellation (Table 48) section content. */
+/* PRC_TYPE_ASM_FileStructureTessellation (Table 48) section content.
+
+   entry_styles is num_entries biased style indices, one per entry, naming the
+   style each entry's faces should carry, or NULL to leave every face styled by
+   its owner as before. See prc_write_resolve_face_styles. */
 int prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *s,
-    const prc_write_tess_entry *entries, uint32_t num_entries);
+    const prc_write_tess_entry *entries, uint32_t num_entries,
+    const uint32_t *entry_styles);
 
 /* PRC_TYPE_ASM_FileStructureGeometry (Table 49) section content, always
    empty (topo_context_count = 0 -- exact B-Rep geometry is out of scope

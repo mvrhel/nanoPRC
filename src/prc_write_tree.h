@@ -97,6 +97,16 @@ typedef struct
 int prc_write_collect_item_styles(prc_context *ctx, prc_write_global_tables *tables,
     const prc_write_tree_node *root, prc_write_style_map *map);
 
+/* Fills out_styles[num_entries] with the biased style index each tessellation
+   entry's faces should name, or 0 for "leave it to the owner".
+
+   A tessellation referenced by more than one representation item gets 0: one
+   face record cannot be right for two items with different materials. So does
+   one whose single item has no material of its own. Call after
+   prc_write_collect_item_styles, which supplies the map. */
+int prc_write_resolve_face_styles(prc_context *ctx, const prc_write_tree_node *root,
+    const prc_write_style_map *map, uint32_t num_entries, uint32_t *out_styles);
+
 void prc_write_style_map_release(prc_context *ctx, prc_write_style_map *map);
 
 int prc_write_tree_to_stream(prc_context *ctx, prc_bit_write_state *s,

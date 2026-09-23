@@ -340,6 +340,173 @@ test_default_still_applies(prc_context *ctx)
     remove(TEST_MATERIALS_FILENAME);
 }
 
+/* A face must name its item's style, and only when it can do so correctly.
+
+   Until this was added the writer emitted size_of_line_attributes = 0 on every
+   face -- "no graphics here, inherit from the owner of the TESS_3D" -- so any
+   reader resolving style per face found nothing. Our own public API reported
+   is_texture = 0 on files whose texture Acrobat displays, because Acrobat
+   resolves the part-level style instead and that masked it.
+
+   The negative half matters as much as the positive one: a tessellation shared
+   by two items cannot carry either one's style, because the single face record
+   would then be wrong for the other. That case must still write 0. */
+static void
+test_face_names_its_style(prc_context *ctx)
+{
+    prc_api_write_tessellation tess[1];
+    prc_api_write_rep_item items[1];
+    prc_api_write_node leaf, root;
+    prc_api_write_node *kids[1];
+    uint8_t *buf = NULL;
+    size_t buf_size = 0;
+    FILE *fid;
+    prc_data *data = NULL;
+    uint32_t num_parts = 0, num_products = 0, num_markups = 0;
+
+    printf("  sub-case: a face names the style of its one styled item\n");
+
+    fill_tess(&tess[0]);
+
+    memset(items, 0, sizeof(items));
+    items[0].kind = PRC_API_WRITE_RI_SURFACE;
+    items[0].biased_tessellation_index = 1;
+    items[0].has_material = 1;
+    items[0].material_color[0] = 1.0;
+    items[0].material_alpha = 1.0;
+    items[0].material_shininess = 0.5;
+
+    memset(&leaf, 0, sizeof(leaf));
+    leaf.rep_items = items;
+    leaf.num_rep_items = 1;
+    leaf.bbox_max[0] = leaf.bbox_max[1] = 1.0;
+
+    kids[0] = &leaf;
+    memset(&root, 0, sizeof(root));
+    root.children = kids;
+    root.num_children = 1;
+    root.bbox_max[0] = root.bbox_max[1] = 1.0;
+
+    PRC_ASSERT_EQ(prc_api_write_prc_buffer(ctx, "face_style_model", &root,
+        tess, 1, &buf, &buf_size), 0);
+    PRC_ASSERT_NOT_NULL(buf);
+
+    fid = fopen(TEST_MATERIALS_FILENAME, "wb");
+    PRC_ASSERT_NOT_NULL(fid);
+    PRC_ASSERT_EQ(fwrite(buf, 1, buf_size, fid), buf_size);
+    fclose(fid);
+    prc_api_write_prc_buffer_free(ctx, buf);
+
+    data = prc_api_open_contents(ctx, TEST_MATERIALS_FILENAME);
+    PRC_ASSERT_NOT_NULL(data);
+    PRC_ASSERT_EQ(prc_api_prep_model_tree(ctx, data, &num_parts, &num_products,
+        &num_markups), 0);
+
+    {
+        const prc_tess_3d *t3;
+        const prc_tess_face *fc;
+
+        PRC_ASSERT_NOT_NULL(data->file_struct[0].tessellation);
+        PRC_ASSERT(data->file_struct[0].tessellation->tess_count > 0);
+        t3 = data->file_struct[0].tessellation->tess[0].tess_3d;
+        PRC_ASSERT_NOT_NULL(t3);
+        PRC_ASSERT(t3->number_of_face_tessellation > 0);
+        fc = &t3->face_tessellation_data[0];
+
+        /* Table 140: 1 is "one graphic associated with the whole face
+           tessellation data", and the entry is (index_of_line_style + 1), so a
+           real style is >= 1 and 0 would mean none. */
+        PRC_ASSERT_EQ(fc->size_of_line_attributes, 1);
+        PRC_ASSERT_NOT_NULL(fc->line_attributes);
+        PRC_ASSERT(fc->line_attributes[0] > 0);
+        /* 7.8.6.1 points at behavior_bit_field (Table 34); PRC_GRAPHICS_Show
+           is what prc_write_tree.c writes for the owning entity. */
+        PRC_ASSERT_EQ(fc->behavior, (uint32_t)PRC_GRAPHICS_Show);
+    }
+
+    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
+    remove(TEST_MATERIALS_FILENAME);
+}
+
+/* Two items sharing one tessellation: neither style can be baked into the
+   single face record, so it must stay at 0 and both items keep resolving
+   through their own item style as before. */
+static void
+test_shared_tessellation_names_no_style(prc_context *ctx)
+{
+    prc_api_write_tessellation tess[1];
+    prc_api_write_rep_item items_a[1];
+    prc_api_write_rep_item items_b[1];
+    prc_api_write_node leaf_a, leaf_b, root;
+    prc_api_write_node *kids[2];
+    uint8_t *buf = NULL;
+    size_t buf_size = 0;
+    FILE *fid;
+    prc_data *data = NULL;
+    uint32_t num_parts = 0, num_products = 0, num_markups = 0;
+
+    printf("  sub-case: a tessellation shared by two items names no style\n");
+
+    fill_tess(&tess[0]);
+
+    memset(items_a, 0, sizeof(items_a));
+    items_a[0].kind = PRC_API_WRITE_RI_SURFACE;
+    items_a[0].biased_tessellation_index = 1;
+    items_a[0].has_material = 1;
+    items_a[0].material_color[0] = 1.0;
+    items_a[0].material_alpha = 1.0;
+
+    memset(items_b, 0, sizeof(items_b));
+    items_b[0].kind = PRC_API_WRITE_RI_SURFACE;
+    items_b[0].biased_tessellation_index = 1;   /* the SAME tessellation */
+    items_b[0].has_material = 1;
+    items_b[0].material_color[2] = 1.0;
+    items_b[0].material_alpha = 1.0;
+
+    memset(&leaf_a, 0, sizeof(leaf_a));
+    leaf_a.rep_items = items_a;
+    leaf_a.num_rep_items = 1;
+    leaf_a.bbox_max[0] = leaf_a.bbox_max[1] = 1.0;
+
+    memset(&leaf_b, 0, sizeof(leaf_b));
+    leaf_b.rep_items = items_b;
+    leaf_b.num_rep_items = 1;
+    leaf_b.bbox_max[0] = leaf_b.bbox_max[1] = 1.0;
+
+    kids[0] = &leaf_a;
+    kids[1] = &leaf_b;
+    memset(&root, 0, sizeof(root));
+    root.children = kids;
+    root.num_children = 2;
+    root.bbox_max[0] = root.bbox_max[1] = 1.0;
+
+    PRC_ASSERT_EQ(prc_api_write_prc_buffer(ctx, "shared_tess_model", &root,
+        tess, 1, &buf, &buf_size), 0);
+    PRC_ASSERT_NOT_NULL(buf);
+
+    fid = fopen(TEST_MATERIALS_FILENAME, "wb");
+    PRC_ASSERT_NOT_NULL(fid);
+    PRC_ASSERT_EQ(fwrite(buf, 1, buf_size, fid), buf_size);
+    fclose(fid);
+    prc_api_write_prc_buffer_free(ctx, buf);
+
+    data = prc_api_open_contents(ctx, TEST_MATERIALS_FILENAME);
+    PRC_ASSERT_NOT_NULL(data);
+    PRC_ASSERT_EQ(prc_api_prep_model_tree(ctx, data, &num_parts, &num_products,
+        &num_markups), 0);
+
+    {
+        const prc_tess_3d *t3 = data->file_struct[0].tessellation->tess[0].tess_3d;
+
+        PRC_ASSERT_NOT_NULL(t3);
+        PRC_ASSERT(t3->number_of_face_tessellation > 0);
+        PRC_ASSERT_EQ(t3->face_tessellation_data[0].size_of_line_attributes, 0);
+    }
+
+    prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, NULL);
+    remove(TEST_MATERIALS_FILENAME);
+}
+
 int
 main(void)
 {
@@ -352,6 +519,8 @@ main(void)
 
     test_two_materials(ctx);
     test_default_still_applies(ctx);
+    test_face_names_its_style(ctx);
+    test_shared_tessellation_names_no_style(ctx);
 
     prc_release_context(ctx);
 

@@ -150,6 +150,17 @@ typedef struct
     const uint8_t *vertex_colors;
     uint32_t num_vertex_colors;
     int vertex_colors_have_alpha;
+
+    /* Biased style index (index_of_line_style + 1) to name on every face of
+       this tessellation, or 0 to leave the faces styled by their owner as
+       before. Table 140's size_of_line_attributes is written as 1 with this
+       entry when it is non-zero, and the trailing behavior word with it.
+
+       Resolved by the caller, not here: a tessellation referenced by more than
+       one representation item cannot carry one item's style without being
+       wrong for the others, so only a tessellation with a single styled
+       referencing item gets a value. See prc_write_resolve_face_styles. */
+    uint32_t face_style_biased;
 } prc_write_tess_3d_params;
 
 int prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,

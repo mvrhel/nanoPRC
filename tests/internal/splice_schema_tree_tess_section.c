@@ -227,7 +227,7 @@ int main(int argc, char **argv)
 
     memset(&tess_s, 0, sizeof(tess_s));
     if (prc_bitwrite_init(ctx, &tess_s, 256) != 0) { printf("tess init failed\n"); return 1; }
-    if (prc_write_tessellation_section_to_stream(ctx, &tess_s, &tess, 1) != 0) { printf("tess write failed\n"); prc_api_print_error_stack(ctx); return 1; }
+    if (prc_write_tessellation_section_to_stream(ctx, &tess_s, &tess, 1, NULL) != 0) { printf("tess write failed\n"); prc_api_print_error_stack(ctx); return 1; }
     if (prc_bitwrite_flush(ctx, &tess_s) != 0) { printf("tess flush failed\n"); return 1; }
     if (prc_write_deflate(ctx, tess_s.buf, tess_s.byte_pos, &tess_comp, &tess_comp_len) != 0) { printf("tess deflate failed\n"); return 1; }
     printf("Generated tessellation section: %zu bytes compressed\n", tess_comp_len);
