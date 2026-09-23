@@ -32,21 +32,6 @@ prc_api_helper_set_vertex_position(prc_context *ctx,
 }
 
 void
-prc_api_helper_set_texture_coordinates(prc_context *ctx,
-    prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos,
-    prc_tess_3d_compressed *tess,
-    prc_internal_api_position_normal_pair *position_normal_pair)
-{
-    vertex_out->vertices[vertex_out_pos].uv[0] = tess->uv_coordinates_3d[2 * vertex_out_pos];
-    vertex_out->vertices[vertex_out_pos].uv[1] = 1 - tess->uv_coordinates_3d[2 * vertex_out_pos + 1];
-    vertex_out->vertices[vertex_out_pos].color[0] = 1.0;
-    vertex_out->vertices[vertex_out_pos].color[1] = 1.0;
-    vertex_out->vertices[vertex_out_pos].color[2] = 1.0;
-    vertex_out->vertices[vertex_out_pos].color[3] = 1.0;
-    position_normal_pair[vertex_out_pos].texture_set = PRC_INTERNAL_API_TEXTURE_SET;
-}
-
-void
 prc_api_helper_set_face_color(prc_context *ctx,
     prc_api_tess_vertex_buffer *vertex_out, uint32_t vertex_out_pos,
     float *face_color, prc_internal_api_position_normal_pair *position_normal_pair)
