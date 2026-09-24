@@ -265,6 +265,22 @@ prc_parse_model_file(prc_context *ctx, prc_filestructure *file_struct,
 #endif
     }
 
+    /* NOT CONVERTED, deliberately. prc_read_check_tag returns a schema index
+       here as it does everywhere, and the five section-level readers in this
+       file -- ModelFile, FileStructureTree, FileStructureTessellation,
+       FileStructureGeometry, FileStructureExtraGeometry -- all discard it.
+
+       Left alone because these differ from the entity readers in ways that
+       matter: they own a local bit_state over a separately decompressed
+       section, and "the end of the entity" is the end of that section rather
+       than a point inside a record. The one member of this family the corpus
+       actually declares an extension for is FileStructureGlobals, which is
+       handled correctly a few hundred lines above and executes its program
+       after the global data.
+
+       Converting these needs the section-end semantics settled first. Doing it
+       by analogy with the entity readers would be a guess, and an unverifiable
+       one -- see prc_consume_schema_extension. */
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_ModelFile, &type);
     if (code < 0)
     {
@@ -411,6 +427,22 @@ prc_parse_file_extra_geometry(prc_context *ctx, prc_filestructure *file_struct)
 
     prc_init_bit_state(ctx, &bit_state, file_struct->extra_geometry_unzipped, file_struct->extra_geometry_size);
 
+    /* NOT CONVERTED, deliberately. prc_read_check_tag returns a schema index
+       here as it does everywhere, and the five section-level readers in this
+       file -- ModelFile, FileStructureTree, FileStructureTessellation,
+       FileStructureGeometry, FileStructureExtraGeometry -- all discard it.
+
+       Left alone because these differ from the entity readers in ways that
+       matter: they own a local bit_state over a separately decompressed
+       section, and "the end of the entity" is the end of that section rather
+       than a point inside a record. The one member of this family the corpus
+       actually declares an extension for is FileStructureGlobals, which is
+       handled correctly a few hundred lines above and executes its program
+       after the global data.
+
+       Converting these needs the section-end semantics settled first. Doing it
+       by analogy with the entity readers would be a guess, and an unverifiable
+       one -- see prc_consume_schema_extension. */
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_FileStructureExtraGeometry, &type);
     if (code < 0)
     {
@@ -464,12 +496,13 @@ static int
 prc_parse_file_struct_internal_data(prc_context *ctx, prc_bit_state *bit_state, prc_type_asm_file_struct_internal_data *data)
 {
     int code;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_FileStructure, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_FileStructure, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_base(ctx, bit_state, &data->base);
@@ -482,7 +515,7 @@ prc_parse_file_struct_internal_data(prc_context *ctx, prc_bit_state *bit_state, 
     data->next_available_index = prc_bitread_uint32(ctx, bit_state);
     data->index_product_occurrence = prc_bitread_uint32(ctx, bit_state);
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 
@@ -498,6 +531,22 @@ prc_parse_file_tree(prc_context *ctx, prc_filestructure *file_struct)
 
     prc_init_bit_state(ctx, &bit_state, file_struct->tree_unzipped, file_struct->tree_size);
 
+    /* NOT CONVERTED, deliberately. prc_read_check_tag returns a schema index
+       here as it does everywhere, and the five section-level readers in this
+       file -- ModelFile, FileStructureTree, FileStructureTessellation,
+       FileStructureGeometry, FileStructureExtraGeometry -- all discard it.
+
+       Left alone because these differ from the entity readers in ways that
+       matter: they own a local bit_state over a separately decompressed
+       section, and "the end of the entity" is the end of that section rather
+       than a point inside a record. The one member of this family the corpus
+       actually declares an extension for is FileStructureGlobals, which is
+       handled correctly a few hundred lines above and executes its program
+       after the global data.
+
+       Converting these needs the section-end semantics settled first. Doing it
+       by analogy with the entity readers would be a guess, and an unverifiable
+       one -- see prc_consume_schema_extension. */
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_FileStructureTree, &type);
     if (code < 0)
     {
@@ -781,6 +830,22 @@ prc_parse_file_tessellation(prc_context *ctx, prc_filestructure *file_struct, ui
 
     prc_init_bit_state(ctx, &bit_state, file_struct->tessellation_unzipped, file_struct->tessellation_size);
 
+    /* NOT CONVERTED, deliberately. prc_read_check_tag returns a schema index
+       here as it does everywhere, and the five section-level readers in this
+       file -- ModelFile, FileStructureTree, FileStructureTessellation,
+       FileStructureGeometry, FileStructureExtraGeometry -- all discard it.
+
+       Left alone because these differ from the entity readers in ways that
+       matter: they own a local bit_state over a separately decompressed
+       section, and "the end of the entity" is the end of that section rather
+       than a point inside a record. The one member of this family the corpus
+       actually declares an extension for is FileStructureGlobals, which is
+       handled correctly a few hundred lines above and executes its program
+       after the global data.
+
+       Converting these needs the section-end semantics settled first. Doing it
+       by analogy with the entity readers would be a guess, and an unverifiable
+       one -- see prc_consume_schema_extension. */
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_FileStructureTessellation, &type);
     if (code < 0)
     {
@@ -864,6 +929,22 @@ prc_parse_file_geometry(prc_context *ctx, prc_filestructure *file_struct)
         fprintf(stderr, "[cet] --- geometry section begins, %u bytes ---\n",
             (unsigned)file_struct->geometry_size);
 
+    /* NOT CONVERTED, deliberately. prc_read_check_tag returns a schema index
+       here as it does everywhere, and the five section-level readers in this
+       file -- ModelFile, FileStructureTree, FileStructureTessellation,
+       FileStructureGeometry, FileStructureExtraGeometry -- all discard it.
+
+       Left alone because these differ from the entity readers in ways that
+       matter: they own a local bit_state over a separately decompressed
+       section, and "the end of the entity" is the end of that section rather
+       than a point inside a record. The one member of this family the corpus
+       actually declares an extension for is FileStructureGlobals, which is
+       handled correctly a few hundred lines above and executes its program
+       after the global data.
+
+       Converting these needs the section-end semantics settled first. Doing it
+       by analogy with the entity readers would be a guess, and an unverifiable
+       one -- see prc_consume_schema_extension. */
     code = prc_read_check_tag(ctx, &bit_state, PRC_TYPE_ASM_FileStructureGeometry, &type);
     if (code < 0)
     {

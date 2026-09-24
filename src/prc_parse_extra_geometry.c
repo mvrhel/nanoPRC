@@ -6553,16 +6553,17 @@ static int
 prc_parse_topo_contexts(prc_context *ctx, prc_bit_state *bit_state,
                         prc_topo_context *data, uint8_t read_tag)
 {
+    int schema_code;
     int code;
     size_t k;
 
     if (read_tag)
     {
-        code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TOPO_Context, &data->tag);
-        if (code < 0)
+        schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TOPO_Context, &data->tag);
+        if (schema_code < 0)
         {
             prc_error(ctx, code, "Error in prc_read_check_tag\n");
-            return code;
+            return schema_code;
         }
     }
     else
@@ -6619,7 +6620,7 @@ prc_parse_topo_contexts(prc_context *ctx, prc_bit_state *bit_state,
         }
     }
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 50 FileStructureExactGeometry */
