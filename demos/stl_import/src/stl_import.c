@@ -199,6 +199,66 @@ prc_md5_12bytes(const uint8_t in[12], uint8_t out[16])
  * setting in practice, so this define is not meant to be set to 0. */
 #define STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD 100
 
+/* Why a file is lumped, or isn't. Both the real decision (in
+   stl_import_build_parts) and the prediction of it made earlier by
+   stl_import_jitter_needs_per_triangle_scope go through this one function:
+   the jitter magnitude that predictor picks is only correct if it agreed
+   with what the builder actually did, and when the two were written out
+   separately they did not -- the predictor read the #define and its own
+   copy of the known-bad list, never the PRC_DIAG_LUMP_THRESHOLD override,
+   so setting that override made them disagree.
+
+   MITIGATION (2026-07-26, mixed_chains/UK_original.stl Acrobat blank-tree
+   investigation): a real, reproducible Acrobat defect blanks the model tree for specific
+   TOTAL tessellation-entry counts, independent of content -- confirmed on trivial synthetic
+   geometry at exactly these counts, with a dense sweep of ~25 other counts all working and
+   no formula found relating them. Root cause NOT identified -- see project notes. Since
+   there's no known way to predict other bad counts, this is a narrow, incomplete
+   empirical list of only the counts directly confirmed bad, not a general solution -- a
+   multi-part file whose count isn't in this list could still turn out to be bad; add to
+   this list if/when another one is found. Forcing every multi-part file through the
+   lumped-model path unconditionally (matching the existing 100+-part threshold's own
+   tree shape) would sidestep this class entirely, but a working file with real multi-part
+   semantics (separately selectable parts in a PDF3D viewer) would lose that structure --
+   deemed not worth the tradeoff for a bug this narrow (~3 of ~28 counts tested) until more
+   is known.
+
+   PRC_DIAG_LUMP_THRESHOLD replaces the threshold AND suppresses the
+   known-bad-count list, so that a manually-forced threshold isolates "does
+   lumping alone help" from "did the count mitigation also fire". That
+   coupling is deliberate for a diagnostic and is preserved here unchanged;
+   it is the wrong shape for a user-facing parameter, and is the first thing
+   to revisit if this threshold is ever promoted to one. */
+typedef enum
+{
+    STL_IMPORT_LUMP_NONE = 0,        /* one tessellation entry per component */
+    STL_IMPORT_LUMP_THRESHOLD,       /* more components than the threshold allows */
+    STL_IMPORT_LUMP_KNOWN_BAD_COUNT  /* the {3,7,14} Acrobat pure-count defect */
+} stl_import_lump_reason;
+
+static stl_import_lump_reason
+stl_import_lump_decision(uint32_t num_components)
+{
+    static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
+    uint32_t threshold = STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD;
+    const char *ov = prc_diag_getenv("PRC_DIAG_LUMP_THRESHOLD");
+
+    if (ov != NULL)
+        threshold = (uint32_t)atoi(ov);
+    else
+    {
+        size_t bi;
+        for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
+            if (num_components == known_bad_tess_counts[bi])
+                return STL_IMPORT_LUMP_KNOWN_BAD_COUNT;
+    }
+
+    if (num_components > threshold)
+        return STL_IMPORT_LUMP_THRESHOLD;
+
+    return STL_IMPORT_LUMP_NONE;
+}
+
 /* Default floor for the COMPRESSED entry's own quantization tolerance
    (--quant-tolerance), used when that flag is omitted -- see quant_
    tolerance_fraction's resolution in main() below. Value derived (2026-08-02)
@@ -1213,13 +1273,9 @@ done:
     }
     else
     {
-        uint8_t force_lump = 0;
-        static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
-        size_t bi;
-        for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
-            if (num_components == known_bad_tess_counts[bi]) { force_lump = 1; break; }
-
-        if (num_components > STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD || force_lump)
+        /* Whatever stl_import_build_parts will decide, decided here the same
+           way -- a lumped file has no sibling entry to mix kinds with. */
+        if (stl_import_lump_decision(num_components) != STL_IMPORT_LUMP_NONE)
         {
             result = 0; /* forced into a single lumped entry -- no sibling to mix with */
         }
@@ -1928,39 +1984,13 @@ stl_import_build_parts(const stl_mesh *mesh, const double *welded_positions, uin
     memset(parts, 0, sizeof(*parts));
 
     {
-        uint32_t lump_threshold = STL_IMPORT_SINGLE_MODEL_PART_THRESHOLD;
-        const char *ov = prc_diag_getenv("PRC_DIAG_LUMP_THRESHOLD");
-        uint8_t force_lump = 0;
-        /* MITIGATION (2026-07-26, mixed_chains/UK_original.stl Acrobat blank-tree
-           investigation): a real, reproducible Acrobat defect blanks the model tree for specific
-           TOTAL tessellation-entry counts, independent of content -- confirmed on trivial synthetic
-           geometry at exactly these counts, with a dense sweep of ~25 other counts all working and
-           no formula found relating them. Root cause NOT identified -- see project notes. Since
-           there's no known way to predict other bad counts, this is a narrow, incomplete
-           empirical list of only the counts directly confirmed bad, not a general solution -- a
-           multi-part file whose count isn't in this list could still turn out to be bad; add to
-           this list if/when another one is found. Forcing every multi-part file through the
-           lumped-model path unconditionally (matching the existing 100+-part threshold's own
-           tree shape) would sidestep this class entirely, but a working file with real multi-part
-           semantics (separately selectable parts in a PDF3D viewer) would lose that structure --
-           deemed not worth the tradeoff for a bug this narrow (~3 of ~28 counts tested) until more
-           is known. */
-        static const uint32_t known_bad_tess_counts[] = { 3, 7, 14 };
-        if (ov != NULL)
-            lump_threshold = (uint32_t)atoi(ov);
-        else
-        {
-            size_t bi;
-            for (bi = 0; bi < sizeof(known_bad_tess_counts) / sizeof(known_bad_tess_counts[0]); bi++)
-            {
-                if (num_components == known_bad_tess_counts[bi])
-                {
-                    force_lump = 1;
-                    break;
-                }
-            }
-        }
-        if (num_components > lump_threshold || force_lump)
+        /* The real lumping decision; stl_import_jitter_needs_per_triangle_scope
+           predicted it earlier through the same function. See
+           stl_import_lump_decision for the threshold, the {3,7,14} Acrobat
+           count mitigation, and how PRC_DIAG_LUMP_THRESHOLD interacts. */
+        stl_import_lump_reason lump = stl_import_lump_decision(num_components);
+        uint8_t force_lump = (uint8_t)(lump == STL_IMPORT_LUMP_KNOWN_BAD_COUNT);
+        if (lump != STL_IMPORT_LUMP_NONE)
         {
             /* DIAGNOSTIC (2026-07-28): allow forcing the non-manifold-fan
                check even when lumping was triggered by PRC_DIAG_LUMP_THRESHOLD
