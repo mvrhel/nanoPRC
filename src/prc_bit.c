@@ -636,6 +636,25 @@ prc_huffman_decode_core(prc_context *ctx, prc_bit_state *state, uint8_t num_bits
     num_leaves = prc_bitread_huff_data(ctx, &huff_state, num_bits + 1);
 
     max_code_length = prc_bitread_huff_data(ctx, &huff_state, 8);
+    /* The 32 is ours, not the format's, and it is load-bearing. Do not relax it.
+
+       The field is written on 8 bits, so the encoding admits values up to 255
+       (see the reference writer in the TWG working source,
+       iso-prc/code/huffman.cpp, which emits it with an 8-iteration loop). That
+       makes this look like an over-strict check rejecting a legal file, and a
+       real corpus file does declare 89 here, with num_leaves 421 and
+       num_bits 8.
+
+       It was tried, on 23 September 2026: raising the bound to 255 turns this
+       clean refusal into a crash -- exit 3, no output at all. The same
+       reference implementation stores each leaf's code value in an `unsigned`,
+       so a code longer than 32 bits cannot be represented by the format's own
+       writer either. A declared length above 32 therefore means the bitstream
+       has gone wrong, not that a deeper tree needs supporting.
+
+       If you are here because a file you believe to be valid is rejected:
+       measure what the parse does *before* this point rather than widening the
+       bound. */
     if (max_code_length == 0 || max_code_length > 32)
     {
         prc_error(ctx, PRC_ERROR_PARSE, "huffman_array max_code_length is invalid\n");

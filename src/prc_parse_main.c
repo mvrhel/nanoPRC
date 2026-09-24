@@ -587,6 +587,56 @@ prc_parse_filestruct_header(prc_context *ctx, uint8_t* buff)
    section_count, then section_count uint32 offsets. */
 #define PRC_FILE_INFO_FIXED_BYTES   (16u + 4u + 4u)
 
+/* Name the 3D format a file actually is, when it is not the one we read.
+
+   PDF can carry several 3D payload formats, and a reader for one of them
+   meets the others as honest mix-ups rather than as corruption: U3D
+   (ECMA-363), PRC (ISO 14739-1), STEP AP 242 (ISO 10303-242, embedded per
+   ISO/TS 24064) and glTF (ISO/IEC 12113, embedded per ISO/TS 32007). Saying
+   "not a PRC or PDF file" about any of them sends the caller looking for
+   damage that is not there.
+
+   Returns a description, or NULL when the content is not a 3D format we
+   recognise, in which case the caller keeps its generic message. size is the
+   real byte count, so each test states the length it needs rather than
+   trusting the NUL the caller appends. */
+static const char *
+prc_identify_foreign_3d_format(const uint8_t *buff, size_t size)
+{
+    /* U3D: the File Header Block type 0x00443355, little-endian on disk.
+       Found because a 1.07 MB U3D file sits misfiled in a PRC test corpus,
+       where the generic message had it looking like a damaged PRC. */
+    if (size >= 4 && buff[0] == 'U' && buff[1] == '3' && buff[2] == 'D' && buff[3] == 0x00)
+        return "a Universal 3D (U3D) file, per ECMA-363";
+
+    /* Binary glTF: the GLB container magic. The JSON serialisation has no
+       magic of its own and is handled below. */
+    if (size >= 4 && buff[0] == 'g' && buff[1] == 'l' && buff[2] == 'T' && buff[3] == 'F')
+        return "a binary glTF (GLB) file, per ISO/IEC 12113";
+
+    /* STEP: an ISO 10303-21 exchange file opens with this token. AP 242 is
+       the protocol ISO/TS 24064 embeds, but the Part 21 header is common to
+       every STEP protocol, so do not claim 242 specifically. */
+    if (size >= 13 && memcmp(buff, "ISO-10303-21;", 13) == 0)
+        return "a STEP file, per ISO 10303-21";
+
+    /* glTF JSON has no signature; it is ordinary JSON. Requiring the
+       mandatory "asset" property as well as a leading brace or BOM keeps this
+       from claiming every JSON file that arrives. Bounded to the head of the
+       file so a large document costs nothing. */
+    if (size >= 2 && (buff[0] == '{' || buff[0] == 0xEF))
+    {
+        size_t window = size < 4096 ? size : 4096;
+        size_t k;
+
+        for (k = 0; k + 7 <= window; k++)
+            if (memcmp(buff + k, "\"asset\"", 7) == 0)
+                return "a glTF JSON file, per ISO/IEC 12113";
+    }
+
+    return NULL;
+}
+
 prc_header*
 prc_parse_main_header(prc_context *ctx, uint8_t *buff, size_t buff_size)
 {
@@ -808,8 +858,18 @@ prc_open_contents(prc_context *ctx, const char* infile)
         /* Not a PRC file. Check if it is a PDF file */
         if (buff[0] != 0x25 || buff[1] != 0x50 || buff[2] != 0x44 || buff[3] != 0x46)
         {
-            prc_free(ctx, buff);
-            prc_free(ctx, output);
+            const char *other = prc_identify_foreign_3d_format(buff, size);
+
+            if (other != NULL)
+            {
+                prc_free(ctx, buff);
+                prc_free(ctx, output);
+                prc_error(ctx, PRC_ERROR_PARSE,
+                    "This is %s, not a PRC file. PDF can carry several 3D payload "
+                    "formats; this reader handles PRC only\n", other);
+                return NULL;
+            }
+
             prc_error(ctx, PRC_ERROR_PARSE, "Not a PRC or PDF file\n");
             return NULL;
         }
