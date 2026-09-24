@@ -3447,6 +3447,39 @@ prc_parse_crv_transform(prc_context *ctx, prc_bit_state *bit_state,
         return code;
     }
 
+    /* Unconditional, with no has_transform bit, because that is what the clause
+       says: PRC_TYPE_CRV_Transform lists transform as required and carries no
+       guarding Boolean, unlike PRC_TYPE_SURF_Transform which has one.
+
+       OPEN QUESTION -- do not "correct" this to match the surface form without
+       re-measuring. One third-party file reads as though its writer DOES emit a
+       has_transform bit here: taken that way its parameterization decodes to a
+       valid interval and a resolvable base-curve reference, and taken this way
+       both are impossible. Read the other way, our own writer's output stops
+       parsing. So the two writers disagree, and the clause agrees with ours.
+       That is the same shape as the ruled-surface defect, where the surface
+       table omitted a has_transform flag that real files carry, so the curve
+       table is the more likely to be wrong -- but one file is not enough to
+       change a reader on, and the file in question fails for further reasons
+       even when it is read the other way. */
+    prc_parse_3d_transform(ctx, bit_state, &data->transform);
+    memset(&data->exact_geom_transform, 0, sizeof(data->exact_geom_transform));
+    data->parameterization = prc_parse_parameterization(ctx, bit_state);
+
+    code = prc_parse_ptr_curve(ctx, bit_state, &data->base_curve);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_ptr_curve for base_curve\n");
+        return code;
+    }
+
+    code = prc_parse_math_fct_3d(ctx, bit_state, &data->math_transformation);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Parsing error in prc_parse_math_fct_3d for math_transformation\n");
+        return code;
+    }
+
     return 0;
 }
 
