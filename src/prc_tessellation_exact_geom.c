@@ -132,6 +132,72 @@ static int prc_get_surface_eval_func(prc_context *ctx, prc_type_surf *surface,
 static int prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle,
     prc_hcg_circle_information *info, prc_nano_brep_compressed_data *compressed_data);
 
+/* Invert the transform associated with the surface. This is applied to the loop
+   samples */
+static int
+prc_invert_exact_transform(prc_context *ctx, prc_exact_geom_transform *transform_in,
+    prc_exact_geom_transform *inverse_transform_out)
+{
+    const double *m = transform_in->matrix;
+    double *out;
+    double a, b, c, d, e, f, g, h, i;
+    double inv00, inv01, inv02, inv10, inv11, inv12, inv20, inv21, inv22;
+    double det, inv_det;
+    double tx, ty, tz;
+
+    if (transform_in->is_identity)
+    {
+        memset(inverse_transform_out->matrix, 0, sizeof(double) * 16);
+        inverse_transform_out->matrix[0] = 1.0;
+        inverse_transform_out->matrix[5] = 1.0;
+        inverse_transform_out->matrix[10] = 1.0;
+        inverse_transform_out->matrix[15] = 1.0;
+        inverse_transform_out->is_identity = 1;
+        return 0;
+    }
+
+    /* Column-major 4x4: column c, row r lives at m[c * 4 + r] (see
+       prc_api_transform_point). The upper-left 3x3 is the linear part. */
+    a = m[0]; d = m[1]; g = m[2];
+    b = m[4]; e = m[5]; h = m[6];
+    c = m[8]; f = m[9]; i = m[10];
+
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (det == 0.0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Singular matrix in prc_invert_exact_transform\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    inv_det = 1.0 / det;
+
+    inv00 = (e * i - f * h) * inv_det;
+    inv01 = (c * h - b * i) * inv_det;
+    inv02 = (b * f - c * e) * inv_det;
+    inv10 = (f * g - d * i) * inv_det;
+    inv11 = (a * i - c * g) * inv_det;
+    inv12 = (c * d - a * f) * inv_det;
+    inv20 = (d * h - e * g) * inv_det;
+    inv21 = (b * g - a * h) * inv_det;
+    inv22 = (a * e - b * d) * inv_det;
+
+    tx = m[12]; ty = m[13]; tz = m[14];
+
+    out = inverse_transform_out->matrix;
+    memset(out, 0, sizeof(double) * 16);
+    out[0] = inv00; out[1] = inv10; out[2] = inv20;
+    out[4] = inv01; out[5] = inv11; out[6] = inv21;
+    out[8] = inv02; out[9] = inv12; out[10] = inv22;
+    /* Inverted translation is -(Inverse linear part) * original translation */
+    out[12] = -(inv00 * tx + inv01 * ty + inv02 * tz);
+    out[13] = -(inv10 * tx + inv11 * ty + inv12 * tz);
+    out[14] = -(inv20 * tx + inv21 * ty + inv22 * tz);
+    out[15] = 1.0;
+
+    inverse_transform_out->is_identity = 0;
+
+    return 0;
+}
+
 /* A version of the 3D transform that we use for exact geometry. This one is limited
    to Identity, Translate, Rotate and Scale */
 static int
@@ -4883,82 +4949,118 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
     prc_type_surf surface, uint32_t num_loops, prc_loop_samples *loop_samples)
 {
     int code;
-    uint32_t k;
+    uint32_t k, j;
+    prc_exact_geom_transform *exact_transform;
+    prc_exact_geom_transform inverse_transform;
+    prc_loop_samples *curr_loop;
+    uint32_t num_samples;
 
+
+    /* Allocate space for the uv values */
     for (k = 0; k < num_loops; k++)
     {
-        switch (surface.surface_type)
+
+    }
+
+    switch (surface.surface_type)
+    {
+    case PRC_TYPE_SURF_FromCurves:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cone:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cylinder:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Sphere:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Torus:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cylindrical:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Extrusion:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Revolution:
+    {
+        break;
+    }
+
+    case PRC_TYPE_SURF_Plane:
+    {
+        /* The UV plane in this space is simply the Z = 0 plane */
+        /* First though we need to apply the inverse matrix transform to 
+            the loop samples to get the loop to the base uv plane */
+        prc_surf_plane *plane = surface.surf_plane;
+        exact_transform = &plane->exact_transform;
+        if (!exact_transform->is_identity)
         {
-        case PRC_TYPE_SURF_FromCurves:
-        {
-            break;
+            /* First compute the inverse matrix */
+            code = prc_invert_exact_transform(ctx, exact_transform, &inverse_transform);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_invert_exact_transform\n");
+                return code;
+            }
+
+            /* Lets map the loop values using the inverse transform */
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->samples[j] = prc_exact_geom_apply_transform(ctx,
+                                            &inverse_transform, curr_loop->samples[j]);
+                }
+            }
         }
 
-        case PRC_TYPE_SURF_Cone:
-        {
-            break;
-        }
+        /* Set the uv values (Z = 0) which should be already the case for the
+           loops */
+        break;
+    }
 
-        case PRC_TYPE_SURF_Cylinder:
-        {
-            break;
-        }
+    case PRC_TYPE_SURF_Offset:
+    {
+        break;
+    }
 
-        case PRC_TYPE_SURF_Sphere:
-        {
-            break;
-        }
+    case PRC_TYPE_SURF_NURBS:
+    {
+        break;
+    }
 
-        case PRC_TYPE_SURF_Torus:
-        {
-            break;
-        }
+    case PRC_TYPE_SURF_Blend02:
+    {
+        break;
+    }
 
-        case PRC_TYPE_SURF_Cylindrical:
-        {
-            break;
-        }
+    case PRC_TYPE_SURF_Blend01:
+    {
+        break;
+    }
 
-        case PRC_TYPE_SURF_Extrusion:
-        {
-            break;
-        }
-
-        case PRC_TYPE_SURF_Revolution:
-        {
-            break;
-        }
-
-        case PRC_TYPE_SURF_Plane:
-        {
-            /* The UV plane in this space is simply the Z = 0 plane */
-            break;
-        }
-
-        case PRC_TYPE_SURF_Offset:
-        {
-            break;
-        }
-
-        case PRC_TYPE_SURF_NURBS:
-        {
-            break;
-        }
-
-        case PRC_TYPE_SURF_Blend02:
-        {
-            break;
-        }
-
-        case PRC_TYPE_SURF_Blend01:
-        {
-            break;
-        }
-
-        default:
-            return 0;
-        }
-
+    default:
+        return 0;
     }
 
     return 0;
