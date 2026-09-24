@@ -827,11 +827,21 @@ prc_parse_tess_3d_wire(prc_context *ctx, prc_bit_state *bit_state, prc_tess_3d_w
             uint32_t size = prc_bitread_uint32(ctx, bit_state);
             data->wire_elements[num_wires].number_of_wire_indexes = size & 0x0FFFFFFF;
             data->wire_elements[num_wires].is_connected = size & 0x30000000;
-            data->wire_elements[num_wires].wire_indexes = (uint32_t *)prc_calloc(ctx, data->wire_elements[num_wires].number_of_wire_indexes, sizeof(uint32_t));
-            if (data->wire_elements[num_wires].wire_indexes == NULL)
+            /* Guarded, because a wire element may legitimately carry no
+               indices and prc_calloc returns NULL for a zero count. Without
+               the guard that empty element is reported as an out-of-memory
+               failure and the whole file is refused -- which is what happened
+               to one corpus file whose first element declares zero. The same
+               shape of guard is already used for the element array above, and
+               in prc_parse_shell for its face array. */
+            if (data->wire_elements[num_wires].number_of_wire_indexes > 0)
             {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_test_3d_wire\n");
-                return PRC_ERROR_MEMORY;
+                data->wire_elements[num_wires].wire_indexes = (uint32_t *)prc_calloc(ctx, data->wire_elements[num_wires].number_of_wire_indexes, sizeof(uint32_t));
+                if (data->wire_elements[num_wires].wire_indexes == NULL)
+                {
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_parse_test_3d_wire\n");
+                    return PRC_ERROR_MEMORY;
+                }
             }
             for (uint32_t j = 0; j < data->wire_elements[num_wires].number_of_wire_indexes; j++)
             {
