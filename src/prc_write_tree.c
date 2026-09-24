@@ -293,6 +293,71 @@ prc_write_collect_item_styles(prc_context *ctx, prc_write_global_tables *tables,
     return prc_write_collect_node_styles(ctx, tables, root, map);
 }
 
+/* Counts how many representation items reference each tessellation entry, and
+   remembers the style of the last one seen. Every item counts, not only the
+   styled ones: a mesh shared by a styled item and an unstyled one still cannot
+   carry a per-face style, because the face record would then be wrong for the
+   unstyled item. */
+static void
+prc_write_count_tess_refs(const prc_write_tree_node *node, const prc_write_style_map *map,
+    uint32_t *refs, uint32_t *styles, uint32_t num_entries)
+{
+    uint32_t k;
+
+    if (node == NULL)
+        return;
+
+    for (k = 0; k < node->num_rep_items; k++)
+    {
+        const prc_write_rep_item *ri = &node->rep_items[k];
+        uint32_t bt = ri->biased_tessellation_index;
+
+        if (bt == 0 || bt > num_entries)
+            continue;
+        refs[bt - 1]++;
+        styles[bt - 1] = prc_write_style_for_item(map, ri, 0);
+    }
+
+    for (k = 0; k < node->num_children; k++)
+        prc_write_count_tess_refs(node->children[k], map, refs, styles, num_entries);
+}
+
+int
+prc_write_resolve_face_styles(prc_context *ctx, const prc_write_tree_node *root,
+    const prc_write_style_map *map, uint32_t num_entries, uint32_t *out_styles)
+{
+    uint32_t *refs;
+    uint32_t i;
+
+    if (ctx == NULL || out_styles == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "prc_write_resolve_face_styles: invalid arguments\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    memset(out_styles, 0, num_entries * sizeof(uint32_t));
+    if (num_entries == 0)
+        return 0;
+
+    refs = (uint32_t *)prc_calloc(ctx, num_entries, sizeof(uint32_t));
+    if (refs == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation error in prc_write_resolve_face_styles\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    prc_write_count_tess_refs(root, map, refs, out_styles, num_entries);
+
+    /* Keep a style only where exactly one item references the tessellation.
+       Anything shared falls back to 0, which is the behaviour every file
+       written before this existed already had. */
+    for (i = 0; i < num_entries; i++)
+        if (refs[i] != 1)
+            out_styles[i] = 0;
+
+    prc_free(ctx, refs);
+    return 0;
+}
+
 void
 prc_write_style_map_release(prc_context *ctx, prc_write_style_map *map)
 {

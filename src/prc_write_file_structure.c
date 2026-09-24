@@ -51,7 +51,8 @@ fail:
 
 int
 prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *s,
-    const prc_write_tess_entry *entries, uint32_t num_entries)
+    const prc_write_tess_entry *entries, uint32_t num_entries,
+    const uint32_t *entry_styles)
 {
     uint32_t i;
     uint8_t *demote = NULL;
@@ -283,6 +284,7 @@ prc_write_tessellation_section_to_stream(prc_context *ctx, prc_bit_write_state *
                 tp.vertex_colors = e->vertex_colors;
                 tp.num_vertex_colors = e->num_vertex_colors;
                 tp.vertex_colors_have_alpha = e->vertex_colors_have_alpha;
+                tp.face_style_biased = (entry_styles != NULL) ? entry_styles[i] : 0u;
 
                 if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_3D) != 0) goto fail;
                 code = prc_write_tess_3d_ex(ctx, s, &tp);

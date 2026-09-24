@@ -495,7 +495,23 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
     for (f = 0; f < num_faces; f++)
     {
         if (prc_bitwrite_uint32(ctx, s, PRC_TYPE_TESS_Face) != 0) goto fail;  /* tag */
-        if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_line_attributes */
+        /* size_of_line_attributes: 0 means "no graphics here, inherit from the
+           owner of the TESS_3D data", which is what this writer emitted for
+           every face until now. A reader that resolves style per face then
+           finds nothing, which is why our own textured files read back as
+           untextured even though Acrobat draws them -- it resolves from the
+           part-level style instead. Table 140 defines 1 as "one graphic
+           associated with the whole face tessellation data", and the entry as
+           (index_of_line_style + 1). */
+        if (p->face_style_biased > 0)
+        {
+            if (prc_bitwrite_uint32(ctx, s, 1) != 0) goto fail;               /* size_of_line_attributes */
+            if (prc_bitwrite_uint32(ctx, s, p->face_style_biased) != 0) goto fail;
+        }
+        else
+        {
+            if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;               /* size_of_line_attributes */
+        }
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* start_of_wire_data */
         if (prc_bitwrite_uint32(ctx, s, 0) != 0) goto fail;                   /* size_of_sizes_wire */
         {
@@ -606,6 +622,18 @@ prc_write_tess_3d_ex(prc_context *ctx, prc_bit_write_state *s,
 
             color_cursor += refs;
         }
+
+        /* behavior closes the record, and the read side consults it if and
+           only if size_of_line_attributes was non-zero (Table 140, and
+           prc_parse_tess.c). Writing one without the other desyncs this face
+           and every face after it, so the two are emitted together or not at
+           all. 7.8.6.1 defines it as the graphics behaviour of the entity
+           owning the face, per behavior_bit_field in Table 34, where
+           PRC_GRAPHICS_Show is "the entity is shown" -- the same value
+           prc_write_tree.c already writes for the owning entity, having found
+           the hard way that leaving it clear renders nothing. */
+        if (p->face_style_biased > 0)
+            if (prc_bitwrite_uint32(ctx, s, (uint32_t)PRC_GRAPHICS_Show) != 0) goto fail;
     }
 
     /* Counted in DOUBLES, not coordinates -- see the header and #810. */

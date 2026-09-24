@@ -463,6 +463,7 @@ prc_write_prc_buffer(prc_context *ctx,
     uint32_t root_biased_index = 0;
     uint32_t default_style_index;
     prc_write_style_map item_styles;
+    uint32_t *face_styles = NULL;
     int ret = PRC_ERROR_INTERNAL;
     /* See PRC_WRITE_PRC_FILE_SECTION_COUNT's doc comment: file-struct-header
        (implicit) + schema_globals + tree + tessellation + geometry +
@@ -568,8 +569,20 @@ prc_write_prc_buffer(prc_context *ctx,
             &item_styles) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &tree_s) != 0) goto cleanup;
 
+    /* Which style, if any, each tessellation's faces should name. Resolved
+       after the tree walk because that is what populates item_styles, and
+       before the tessellation section because that is where it is consumed. */
+    if (num_tess_entries > 0)
+    {
+        face_styles = (uint32_t *)prc_calloc(ctx, num_tess_entries, sizeof(uint32_t));
+        if (face_styles == NULL) goto cleanup;
+        if (prc_write_resolve_face_styles(ctx, root, &item_styles,
+                num_tess_entries, face_styles) != 0) goto cleanup;
+    }
+
     if (prc_bitwrite_init(ctx, &tess_s, 1024) != 0) goto cleanup;
-    if (prc_write_tessellation_section_to_stream(ctx, &tess_s, tess_entries, num_tess_entries) != 0) goto cleanup;
+    if (prc_write_tessellation_section_to_stream(ctx, &tess_s, tess_entries, num_tess_entries,
+            face_styles) != 0) goto cleanup;
     if (prc_bitwrite_flush(ctx, &tess_s) != 0) goto cleanup;
 
     if (prc_bitwrite_init(ctx, &geom_s, 64) != 0) goto cleanup;
@@ -664,6 +677,7 @@ too_large:
     ret = PRC_ERROR_INTERNAL;
 
 cleanup:
+    if (face_styles != NULL) prc_free(ctx, face_styles);
     prc_write_style_map_release(ctx, &item_styles);
     if (file_struct_header != NULL) prc_free(ctx, file_struct_header);
     if (buf != NULL) prc_free(ctx, buf);

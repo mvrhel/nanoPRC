@@ -245,7 +245,7 @@ reencode_tess(prc_context *ctx, const uint8_t *buf, uint32_t tess_start, uint32_
 
         memset(&wrapper_s, 0, sizeof(wrapper_s));
         if (prc_bitwrite_init(ctx, &wrapper_s, 4096) != 0) { printf("tess: wrapper init failed\n"); goto cleanup; }
-        code = prc_write_tessellation_section_to_stream(ctx, &wrapper_s, &tess, 1);
+        code = prc_write_tessellation_section_to_stream(ctx, &wrapper_s, &tess, 1, NULL);
         if (code != 0)
         {
             printf("tess: prc_write_tessellation_section_to_stream failed (%d)\n", code);
