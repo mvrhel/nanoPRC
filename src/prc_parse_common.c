@@ -1057,6 +1057,12 @@ prc_parse_math_fct_3d(prc_context *ctx, prc_bit_state *bit_state, prc_math_fct_3
 
     switch (data->tag)
     {
+    case PRC_TYPE_ROOT:
+        /* PRC_TYPE_ROOT (0) means the entity is a NULL pointer and no further
+           data is stored -- the same convention prc_parse_surf and
+           prc_parse_crv already honour for their own null case. */
+        break;
+
     case PRC_TYPE_MATH_FCT_3D_Linear:
         data->linear = (prc_math_fct_3d_linear *)prc_calloc(ctx, 1, sizeof(prc_math_fct_3d_linear));
         if (data->linear == NULL)
@@ -1085,8 +1091,10 @@ prc_parse_math_fct_3d(prc_context *ctx, prc_bit_state *bit_state, prc_math_fct_3
             prc_error(ctx, code, "Error in prc_parse_math_fct_3d_nonlinear\n");
             return code;
         }
+        break;
+
     default:
-        prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_math_fct_3d\n");
+        prc_error(ctx, PRC_ERROR_PARSE, "Parsing error in prc_parse_math_fct_3d, tag=%u\n", (unsigned)data->tag);
         return PRC_ERROR_PARSE;
     };
 
