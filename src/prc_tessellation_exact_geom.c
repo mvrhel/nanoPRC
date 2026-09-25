@@ -2173,9 +2173,9 @@ prc_evaluate_surf_plane(prc_context *ctx, void *params, double u, double v)
     output.y = v * v_parameter_coeff_a + v_parameter_coeff_b;
     output.z = 0;
 
-    if (!plane->exact_transform.is_identity)
+    if (!plane->exact_geom_transform.is_identity)
     {
-        output = prc_exact_geom_apply_transform(ctx, &plane->exact_transform, output);
+        output = prc_exact_geom_apply_transform(ctx, &plane->exact_geom_transform, output);
     }
     return output;
 }
@@ -3316,7 +3316,7 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             domain = plane->domain;
             has_transform = 1; /* Always has a transform */
             prc_trans = &plane->transform;
-            exact_geom_trans = &plane->exact_transform;
+            exact_geom_trans = &plane->exact_geom_transform;
             sampling_info->num_samples_u = PLANE_MAX_SAMPLES;
             sampling_info->num_samples_v = PLANE_MAX_SAMPLES;
             sampling_info->u_periodic = 0;
@@ -4937,16 +4937,131 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
     return 0;
 }
 
-/* TODO. Based upon surface type, map the 3D points to the UV surface storing
-   the values in loop_samples structure. Also flag the one that is the outer
-   edge. All others represent holes. At this point, the loops are samples of
+static int
+prc_get_surface_transform_inverse(prc_context *ctx, prc_type_surf *surface,
+    prc_exact_geom_transform *inverse_transform)
+{
+    prc_exact_geom_transform *exact_transform;
+    int code;
+
+    inverse_transform->is_identity = 1;
+
+    switch (surface->surface_type)
+    {
+        case PRC_TYPE_SURF_FromCurves:
+        {
+            exact_transform = &surface->surf_fromcurves->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cone:
+        {
+            exact_transform = &surface->surf_cone->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cylinder:
+        {
+            exact_transform = &surface->surf_cylinder->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Sphere:
+        {
+            exact_transform = &surface->surf_sphere->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Torus:
+        {
+            exact_transform = &surface->surf_torus->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cylindrical:
+        {
+            exact_transform = &surface->surf_cylindrical->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Extrusion:
+        {
+            exact_transform = &surface->surf_extrusion->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Revolution:
+        {
+            exact_transform = &surface->surf_revolution->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Plane:
+        {
+            exact_transform = &surface->surf_plane->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Offset:
+        {
+            exact_transform = &surface->surf_offset->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_NURBS:
+        {
+            exact_transform = NULL;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend02:
+        {
+            exact_transform = &surface->surf_blend02->exact_geom_transform;
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend01:
+        {
+            exact_transform = &surface->surf_blend01->exact_geom_transform;
+            break;
+        }
+
+        default:
+            return 0;
+    }
+
+    if (exact_transform != NULL && !exact_transform->is_identity)
+    {
+        /* First compute the inverse matrix */
+        code = prc_invert_exact_transform(ctx, exact_transform, inverse_transform);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed in prc_invert_exact_transform\n");
+            return code;
+        }
+    }
+    return 0;
+}
+
+/* Here if we have multiple loops we may need to assign them as inner or outer
+   loops. This seems very messy in the specification so this may need some work
+   here */
+static void
+prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t orientation,
+    prc_type_surf *surface, uint32_t num_loops, prc_loop_samples *loop_samples)
+{
+
+}
+
+/* Based upon surface type, map the 3D points to the UV surface storing
+   the values in loop_samples structure. At this point, the loops are samples of
    the path in 3D space on the surface. We will move this to the uv parametric
    space. The loops at this point have the same start and end point and are
    sampled at a sufficient approximation with all the coedge samples placed in
    a single loop */
 static int
 prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t orientation,
-    prc_type_surf surface, uint32_t num_loops, prc_loop_samples *loop_samples)
+    prc_type_surf *surface, uint32_t num_loops, prc_loop_samples *loop_samples)
 {
     int code;
     uint32_t k, j;
@@ -4955,14 +5070,48 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
     prc_loop_samples *curr_loop;
     uint32_t num_samples;
 
-
-    /* Allocate space for the uv values */
-    for (k = 0; k < num_loops; k++)
+    code = prc_get_surface_transform_inverse(ctx, surface, &inverse_transform);
+    if (code < 0)
     {
-
+        prc_error(ctx, code, "Failed in prc_get_surface_transform_inverse\n");
+        return code;
     }
 
-    switch (surface.surface_type)
+    /* Lets map the loop values using the inverse transform if needed */
+    if (!inverse_transform.is_identity)
+    {
+        for (k = 0; k < num_loops; k++)
+        {
+            curr_loop = &loop_samples[k];
+            num_samples = curr_loop->num_samples;
+            for (j = 0; j < num_samples; j++)
+            {
+                curr_loop->samples[j] = prc_exact_geom_apply_transform(ctx,
+                    &inverse_transform, curr_loop->samples[j]);
+            }
+        }
+    }
+
+    /* At this point all the loops should be in the uv base space for the surface */
+
+    /* Allocate space for the uv values of the loops */
+    for (k = 0; k < num_loops; k++)
+    {
+        loop_samples[k].uv_samples = (prc_vec2*) prc_calloc(ctx, loop_samples[k].num_samples, sizeof(prc_vec2));
+        if (loop_samples[k].uv_samples == NULL)
+        {
+            for (j = 0; j < (k - 1); j++)
+            {
+                prc_free(ctx, loop_samples[j].uv_samples);
+                loop_samples[j].uv_samples = NULL;
+            }
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed in prc_map_loops_to_surface\n");
+            return PRC_ERROR_MEMORY;
+        }
+    }
+
+    /* Now actually map from the 3D base space to the uv surface space */
+    switch (surface->surface_type)
     {
     case PRC_TYPE_SURF_FromCurves:
     {
@@ -5006,36 +5155,18 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
     case PRC_TYPE_SURF_Plane:
     {
-        /* The UV plane in this space is simply the Z = 0 plane */
-        /* First though we need to apply the inverse matrix transform to 
-            the loop samples to get the loop to the base uv plane */
-        prc_surf_plane *plane = surface.surf_plane;
-        exact_transform = &plane->exact_transform;
-        if (!exact_transform->is_identity)
+        /* The UV plane in this space is simply the Z = 0 plane which these
+           samples should already be mapped to with the inverse transform */
+        for (k = 0; k < num_loops; k++)
         {
-            /* First compute the inverse matrix */
-            code = prc_invert_exact_transform(ctx, exact_transform, &inverse_transform);
-            if (code < 0)
+            curr_loop = &loop_samples[k];
+            num_samples = curr_loop->num_samples;
+            for (j = 0; j < num_samples; j++)
             {
-                prc_error(ctx, code, "Failed in prc_invert_exact_transform\n");
-                return code;
-            }
-
-            /* Lets map the loop values using the inverse transform */
-            for (k = 0; k < num_loops; k++)
-            {
-                curr_loop = &loop_samples[k];
-                num_samples = curr_loop->num_samples;
-                for (j = 0; j < num_samples; j++)
-                {
-                    curr_loop->samples[j] = prc_exact_geom_apply_transform(ctx,
-                                            &inverse_transform, curr_loop->samples[j]);
-                }
+                curr_loop->uv_samples[j].x = curr_loop->samples[j].x;
+                curr_loop->uv_samples[j].y = curr_loop->samples[j].y;
             }
         }
-
-        /* Set the uv values (Z = 0) which should be already the case for the
-           loops */
         break;
     }
 
@@ -5169,7 +5300,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
 
             /* Now lets get the loops onto the parametric surface so they can
                be used as a edge boundary in the tessellation process */
-            code = prc_map_loops_to_surface(ctx, topo_face, orientation, surface,
+            code = prc_map_loops_to_surface(ctx, topo_face, orientation, &surface,
                                             num_loops, loop_samples);
             if (code < 0)
             {

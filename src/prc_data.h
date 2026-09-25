@@ -1906,7 +1906,7 @@ struct prc_surf_plane_s
     prc_unsigned_int tag;
     prc_content_surface curve_data;
     prc_trans_3d transform; /* Does not have a has_transform bit */
-    prc_exact_geom_transform exact_transform; /* Does not have a has_transform bit */
+    prc_exact_geom_transform exact_geom_transform; /* Does not have a has_transform bit */
     prc_domain domain;
     double u_parameter_coeff_a;
     double v_parameter_coeff_a;
