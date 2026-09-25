@@ -476,13 +476,14 @@ prc_parse_ri(prc_context *ctx, prc_bit_state *bit_state, prc_ri *data, int depth
 static int
 prc_parse_reference_unique_identifier(prc_context *ctx, prc_bit_state *bit_state, prc_misc_reference_on_prcbase *data)
 {
+    int schema_code;
     int code = 0;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_ReferenceOnPRCBase, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_ReferenceOnPRCBase, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     data->type_of_entity = prc_bitread_uint32(ctx, bit_state);
@@ -495,7 +496,9 @@ prc_parse_reference_unique_identifier(prc_context *ctx, prc_bit_state *bit_state
 
     data->unique_id = prc_bitread_uint32(ctx, bit_state);
 
-    return code;
+    if (code < 0)
+        return code;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 132 */
@@ -715,12 +718,13 @@ static int
 prc_parse_misc_markup_linked_item(prc_context *ctx, prc_bit_state *bit_state, prc_misc_markup_linked_item *data)
 {
     int code = 0;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_MarkupLinkedItem, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_MarkupLinkedItem, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_extended_entity_reference(ctx, bit_state, &data->content_entity_ref);
@@ -734,6 +738,10 @@ prc_parse_misc_markup_linked_item(prc_context *ctx, prc_bit_state *bit_state, pr
     data->delete_markup = prc_bitread_bit(ctx, bit_state);
     data->show_leader = prc_bitread_bit(ctx, bit_state);
     data->delete_leader = prc_bitread_bit(ctx, bit_state);
+
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
 
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
 
@@ -900,13 +908,14 @@ static int
 prc_parse_mkp_markups(prc_context *ctx, prc_bit_state *bit_state, prc_mkp_markup *data)
 {
     int code;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MKP_Markup, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MKP_Markup, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_base_with_graphics(ctx, bit_state, false, NULL, &data->base);
@@ -960,6 +969,10 @@ prc_parse_mkp_markups(prc_context *ctx, prc_bit_state *bit_state, prc_mkp_markup
         }
     }
     data->biased_index_tessellation = prc_bitread_uint32(ctx, bit_state);
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
+
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
     if (code < 0)
     {
@@ -1132,12 +1145,13 @@ static int
 prc_parse_graph_camera(prc_context *ctx, prc_bit_state *bit_state, prc_graph_camera *data)
 {
     int code = 0;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Camera, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Camera, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -1159,7 +1173,7 @@ prc_parse_graph_camera(prc_context *ctx, prc_bit_state *bit_state, prc_graph_cam
     data->clip_far = prc_bitread_double(ctx, bit_state);
     data->zoom = prc_bitread_double(ctx, bit_state);
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Tables 109 - 112 light object abstract type */
@@ -1238,13 +1252,14 @@ static int
 prc_parse_scene_display_parameters(prc_context *ctx, prc_bit_state *bit_state, prc_scene_display_parameters *data)
 {
     int code = 0;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_SceneDisplayParameters, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_SceneDisplayParameters, &data->tag);
+    if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -1333,7 +1348,7 @@ prc_parse_scene_display_parameters(prc_context *ctx, prc_bit_state *bit_state, p
 
     data->is_absolute = prc_bitread_bit(ctx, bit_state);
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 68 ContentLayerFilterItems */
@@ -1366,12 +1381,13 @@ static int
 prc_parse_misc_entity_reference(prc_context *ctx, prc_bit_state *bit_state, prc_misc_entity_reference *data)
 {
     int code;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_EntityReference, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_EntityReference, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_entity_reference(ctx, bit_state, &data->content_entity_ref);
@@ -1380,6 +1396,10 @@ prc_parse_misc_entity_reference(prc_context *ctx, prc_bit_state *bit_state, prc_
         prc_error(ctx, code, "Error in prc_parse_content_entity_reference\n");
         return code;
     }
+
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
 
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
     if (code < 0)
@@ -1428,12 +1448,13 @@ static int
 prc_parse_asm_filter(prc_context *ctx, prc_bit_state *bit_state, prc_asm_filter *data)
 {
     int code = 0;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_Filter, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_Filter, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -1458,6 +1479,10 @@ prc_parse_asm_filter(prc_context *ctx, prc_bit_state *bit_state, prc_asm_filter 
         prc_error(ctx, code, "Error in prc_parse_content_layer_filter_items\n");
         return code;
     }
+
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
 
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
     if (code < 0)
@@ -1593,6 +1618,14 @@ prc_parse_mkp_view(prc_context *ctx, prc_bit_state *bit_state, prc_mkp_view *dat
     }
 
     /* Need to check if PRC_TYPE_MKP_View is in the schema */
+    /* NOTE, unresolved: this executes the extension AFTER the user data, while
+       prc_check_for_schema documents it as belonging before, and that is what
+       prc_consume_schema_extension does at every other site. One of the two is
+       wrong. No file we hold decides it -- the extensions these types declare
+       all measure zero bits -- so this is deliberately left as it has always
+       behaved rather than changed to match. Do not make them consistent without
+       a file that exercises a non-empty extension, or an answer from another
+       implementation. */
     code = prc_check_for_schema(ctx, PRC_TYPE_MKP_View);
     if (code > 0)
     {
@@ -1697,13 +1730,14 @@ int
 prc_parse_product_occurrence(prc_context *ctx, prc_bit_state *bit_state, prc_asm_product_occurrence *data)
 {
     int code;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_ProductOccurrence, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_ProductOccurrence, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_base_with_graphics(ctx, bit_state, false, NULL, &data->base);
@@ -1844,6 +1878,10 @@ prc_parse_product_occurrence(prc_context *ctx, prc_bit_state *bit_state, prc_asm
         }
     }
 
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
+
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
     if (code < 0)
     {
@@ -1895,13 +1933,14 @@ int
 prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_definition *data)
 {
     int code;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_PartDefinition, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_PartDefinition, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_base_with_graphics(ctx, bit_state, false, NULL, &data->base);
@@ -2009,6 +2048,10 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
             }
         }
     }
+
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
 
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
     if (code < 0)

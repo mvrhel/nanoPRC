@@ -315,15 +315,16 @@ static int
 prc_parse_tess_face(prc_context *ctx, prc_bit_state *bit_state, uint8_t must_calculate_normals,
                     uint32_t face_number, prc_tess_face *data)
 {
+    int schema_code;
     uint32_t k;
     int code;
     uint32_t normal_single = 0;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TESS_Face, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TESS_Face, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     data->size_of_line_attributes = prc_bitread_uint32(ctx, bit_state);
@@ -421,7 +422,7 @@ prc_parse_tess_face(prc_context *ctx, prc_bit_state *bit_state, uint8_t must_cal
     if (data->size_of_line_attributes > 0)
         data->behavior = prc_bitread_uint32(ctx, bit_state);
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* This is only called if normals must be calculated. In that case, the

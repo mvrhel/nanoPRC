@@ -61,12 +61,13 @@ static int
 prc_parse_type_ri_coordinatesystem(prc_context *ctx, prc_bit_state *bit_state, prc_ri_coordinate_system *data)
 {
     int code = 0;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_RI_CoordinateSystem, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_RI_CoordinateSystem, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_representation_item_content(ctx, bit_state, &data->item_content);
@@ -82,6 +83,10 @@ prc_parse_type_ri_coordinatesystem(prc_context *ctx, prc_bit_state *bit_state, p
         prc_error(ctx, code, "Failed in prc_parse_transformation\n");
         return code;
     }
+
+    code = prc_consume_schema_extension(ctx, bit_state, schema_code);
+    if (code < 0)
+        return code;
 
     code = prc_parse_user_data(ctx, bit_state, &data->user_data);
 
@@ -157,13 +162,14 @@ static int
 prc_parse_tess_markup(prc_context *ctx, prc_bit_state *bit_state, prc_tess_markup *data)
 {
     int code;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TESS_MarkUp, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TESS_MarkUp, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_base_tess_data(ctx, bit_state, &data->tessellation_coordinates);
@@ -219,7 +225,7 @@ prc_parse_tess_markup(prc_context *ctx, prc_bit_state *bit_state, prc_tess_marku
 
     data->behavior = prc_bitread_uint8(ctx, bit_state);
 
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* 8.5.10 prc_graph_fill_pattern*/
@@ -379,12 +385,13 @@ static int
 prc_parse_styles(prc_context *ctx, prc_bit_state *bit_state, prc_graph_style *data)
 {
     int code;
+    int schema_code;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Style, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Style, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -411,7 +418,7 @@ prc_parse_styles(prc_context *ctx, prc_bit_state *bit_state, prc_graph_style *da
     data->is_rendering_parameters3 = prc_bitread_bit(ctx, bit_state);
     if (data->is_rendering_parameters3)
         data->rendering_parameters3 = prc_bitread_uint8(ctx, bit_state);
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 104 prc_graph_line_pattern */
@@ -419,13 +426,14 @@ static int
 prc_parse_line_patterns(prc_context *ctx, prc_bit_state *bit_state, prc_graph_line_pattern *data)
 {
     int code;
+    int schema_code;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_LinePattern, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_LinePattern, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -452,7 +460,7 @@ prc_parse_line_patterns(prc_context *ctx, prc_bit_state *bit_state, prc_graph_li
     }
     data->start_offset = prc_bitread_double(ctx, bit_state);
     data->scale = prc_bitread_bit(ctx, bit_state);
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* prc_graph_material.  This apparently can be different types as defined in Table 89 */
@@ -542,13 +550,14 @@ static int
 prc_parse_texture_trans(prc_context *ctx, prc_bit_state *bit_state, prc_graph_texture_transformation *data)
 {
     int code;
+    int schema_code;
     uint32_t tag;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_TextureTransformation, &tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_TextureTransformation, &tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     data->tag = tag;
@@ -560,21 +569,22 @@ prc_parse_texture_trans(prc_context *ctx, prc_bit_state *bit_state, prc_graph_te
     data->transform_2d = prc_bitread_bit(ctx, bit_state);
 
     data->transform = prc_parse_cartesian_transformation_2d(ctx, bit_state);
-    return 0;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 96 prc_graph_texture_definition */
 static int
 prc_parse_graph_textures(prc_context *ctx, prc_bit_state *bit_state, prc_graph_texture_definition *data)
 {
+    int schema_code;
     int code = 0;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_TextureDefinition, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_TextureDefinition, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_ref_base(ctx, bit_state, false, NULL, &data->base);
@@ -680,22 +690,25 @@ prc_parse_graph_textures(prc_context *ctx, prc_bit_state *bit_state, prc_graph_t
     {
         code = prc_parse_texture_trans(ctx, bit_state, &data->texture_transformation);
     }
-    return code;
+    if (code < 0)
+        return code;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 /* Table 93 parsing */
 static int
 prc_parse_graph_picture(prc_context *ctx, prc_bit_state *bit_state, prc_graph_picture *data, prc_file_structure_header *header)
 {
+    int schema_code;
     int code = 0;
     unsigned char *stb_output;
     uint32_t k;
 
-    code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Picture, &data->tag);
-    if (code < 0)
+    schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Picture, &data->tag);
+    if (schema_code < 0)
     {
         prc_error(ctx, code, "Error in prc_read_check_tag\n");
-        return code;
+        return schema_code;
     }
 
     code = prc_parse_content_prc_base(ctx, bit_state, &data->base);
@@ -763,7 +776,9 @@ prc_parse_graph_picture(prc_context *ctx, prc_bit_state *bit_state, prc_graph_pi
             return PRC_ERROR_MEMORY;
         }
     }
-    return code;
+    if (code < 0)
+        return code;
+    return prc_consume_schema_extension(ctx, bit_state, schema_code);
 }
 
 static prc_font_key

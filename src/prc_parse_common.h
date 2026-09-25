@@ -45,6 +45,8 @@ int prc_parse_base_with_graphics(prc_context *ctx, prc_bit_state *bit_state, uin
 prc_unique_id prc_get_compressed_unique_id(prc_context *ctx, prc_bit_state *bit_state);
 int prc_parse_representation_item_content(prc_context *ctx, prc_bit_state *bit_state, prc_representation_item_content *data);
 int prc_read_check_tag(prc_context *ctx, prc_bit_state *bit_state, prc_unsigned_int expected_tag, prc_unsigned_int *read_tag);
+int prc_consume_schema_extension(prc_context *ctx, prc_bit_state *bit_state,
+    int schema_code);
 int prc_check_for_schema(prc_context *ctx, prc_unsigned_int expected_tag);
 prc_domain prc_parse_domain(prc_context *ctx, prc_bit_state *bit_state);
 prc_parameterization prc_parse_parameterization(prc_context *ctx, prc_bit_state *bit_state);

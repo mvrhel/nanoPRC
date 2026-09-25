@@ -703,6 +703,55 @@ prc_read_check_tag(prc_context *ctx, prc_bit_state *bit_state, prc_unsigned_int 
     return 0;
 }
 
+/* Consume the Section-8 extension data for an entity whose type declares a
+   schema. schema_code is what prc_read_check_tag returned for this entity: 0
+   when the type declares no extension, or the 1-based index of its entity
+   schema.
+
+   Call this at the END of the entity's own fields, and before any user data.
+   The extension is stored there rather than after the tag -- the one site that
+   already did this by hand, prc_parse_file_globals, executes it after the
+   global data and says so, and prc_check_for_schema's own comment says the
+   same.
+
+   Returns 0 when there is nothing to do, so a caller can invoke it
+   unconditionally.
+
+   UNVERIFIED -- the placement of this call within an entity is not confirmed by
+   any file available to us, and two things in this codebase disagree about it.
+   The rule followed here is the one prc_check_for_schema documents, extension
+   before user data; prc_parse_mkp_view executes after its user data instead and
+   has been left alone rather than changed on a guess. Measured across 694 files:
+   every extension program that executes for these types consumes ZERO bits, so
+   no corpus file can distinguish a correct placement from a wrong one. The
+   control that makes that a real measurement rather than a dead instrument is
+   prc_parse_file_globals, whose extension does consume data -- 1, 80 and 186
+   bits on three different files -- so the evaluator itself works.
+
+   The consequence: this is right by the clause and inert in practice. The first
+   file that carries a non-empty extension for one of these types is the test,
+   and if it desyncs, placement relative to user data is the first thing to
+   suspect. */
+int
+prc_consume_schema_extension(prc_context *ctx, prc_bit_state *bit_state,
+    int schema_code)
+{
+    int recursion = 0;
+    int code;
+
+    if (schema_code <= 0)
+        return 0;
+
+    code = prc_execute_schema(ctx, bit_state,
+        prc_get_schema(ctx, (uint32_t)(schema_code - 1)), &recursion);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Error in prc_execute_schema\n");
+        return code;
+    }
+    return 0;
+}
+
 /* Some types dont have tags but can have schemas. The data for these types is stored at the end and must be read (prior to the user data) */
 int
 prc_check_for_schema(prc_context *ctx, prc_unsigned_int expected_tag)
