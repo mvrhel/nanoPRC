@@ -944,6 +944,33 @@ prc_open_contents(prc_context *ctx, const char* infile)
             if (header->file_info[k].section_count > 0)
             {
                 /* First the header which is not deflated (required) */
+
+                /* Every offset used below is read from the file, and each one
+                   indexes buff[] directly. An offset past the end of the buffer
+                   forms an out-of-bounds pointer before anything is read from
+                   it, and where a length is computed by subtracting the offset
+                   from the size, the subtraction wraps to an enormous value
+                   rather than going negative.
+
+                   That is not theoretical. A file in a private corpus declares
+                   a section offset of 16,056,388 against a 720,650-byte buffer.
+                   Today it is caught only because the wrapped length makes the
+                   allocation fail, which is luck and not a check: a smaller
+                   overshoot allocates successfully and then reads past the end. */
+                if ((size_t)header->file_info[k].section_offset[0] >= size)
+                {
+                    prc_error(ctx, PRC_ERROR_PARSE,
+                        "File structure %u header offset %llu is past the end of the "
+                        "%llu-byte file\n", (unsigned)k,
+                        (unsigned long long)header->file_info[k].section_offset[0],
+                        (unsigned long long)size);
+                    prc_free(ctx, buff);
+                    output->header = header;
+                    output->file_struct = file_struct;
+                    output->file_structure_count = k + 1;
+                    prc_release_data(ctx, output);
+                    return NULL;
+                }
                 ptr = &buff[header->file_info[k].section_offset[0]];
                 file_struct[k].header = prc_parse_filestruct_header(ctx, ptr);
 
@@ -958,7 +985,25 @@ prc_open_contents(prc_context *ctx, const char* infile)
                     return NULL;
                 }
 
-                /* The model file is defined special */
+                /* The model file is defined special. Checked in both directions:
+                   end before start would wrap the length just as an over-large
+                   offset would. */
+                if ((size_t)header->start_offset >= size ||
+                    (size_t)header->end_offset > size ||
+                    header->end_offset < header->start_offset)
+                {
+                    prc_error(ctx, PRC_ERROR_PARSE,
+                        "Model file span %llu..%llu is not within the %llu-byte file\n",
+                        (unsigned long long)header->start_offset,
+                        (unsigned long long)header->end_offset,
+                        (unsigned long long)size);
+                    prc_free(ctx, buff);
+                    output->header = header;
+                    output->file_struct = file_struct;
+                    output->file_structure_count = k + 1;
+                    prc_release_data(ctx, output);
+                    return NULL;
+                }
                 ptr = &buff[header->start_offset];
                 code = prc_uncompress(ctx, ptr, header->end_offset - header->start_offset, &ptr_raw);
                 if (code < 0)
@@ -1021,6 +1066,20 @@ prc_open_contents(prc_context *ctx, const char* infile)
                 /* All other sections are deflated but can be independently read from the offset */
                 for (j = 1; j < header->file_info[k].section_count; j++)
                 {
+                    if ((size_t)header->file_info[k].section_offset[j] >= size)
+                    {
+                        prc_error(ctx, PRC_ERROR_PARSE,
+                            "File structure %u section %u offset %llu is past the end "
+                            "of the %llu-byte file\n", (unsigned)k, (unsigned)j,
+                            (unsigned long long)header->file_info[k].section_offset[j],
+                            (unsigned long long)size);
+                        prc_free(ctx, buff);
+                        output->header = header;
+                        output->file_struct = file_struct;
+                        output->file_structure_count = k + 1;
+                        prc_release_data(ctx, output);
+                        return NULL;
+                    }
                     ptr = &buff[header->file_info[k].section_offset[j]];
                     code = prc_uncompress(ctx, ptr, size - header->file_info[k].section_offset[j], &ptr_raw);
                     if (code < 0)
