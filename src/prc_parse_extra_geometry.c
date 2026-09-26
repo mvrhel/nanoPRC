@@ -150,7 +150,23 @@ prc_parse_compressed_point(prc_context *ctx, prc_bit_state *bit_state,
         /* Spec seems to be wrong about this. At least if we are coming from
            isonurbs and the uNbBits is 31 we just do 3 double reads it seems */
 
-        if (data->uNbBits == 31)
+        /* 31 was the only value handled here; 32 belongs with it. uNbBits is a
+           per-coordinate bit count, so 31 and 32 are full width and the point is
+           written as three plain doubles rather than packed.
+
+           Bounded deliberately at 32 rather than "greater than 30". The values
+           actually seen on this branch across the corpus are 31, 32, 35, 36, 50
+           and 58, and only 31 and 32 are plausible widths for a coordinate. Two
+           files carrying 35/36/50/58 parse correctly through the tagged
+           UniqueVertex path and stop parsing if they are sent to the doubles
+           path, so the wider test was measured and rejected.
+
+           The file that needs 32 carries nine points here, five at 31 and four
+           at 32, and the four at 32 decode to two mirrored pairs -- x agreeing
+           within 0.004, y symmetric about zero to four significant figures, z
+           constant at 0.827. Read as a tagged vertex instead, the first reads
+           topology tag 157 where 144 is required. */
+        if (data->uNbBits == 31 || data->uNbBits == 32)
         {
             data->point.x = prc_bitread_double(ctx, bit_state);
             data->point.y = prc_bitread_double(ctx, bit_state);

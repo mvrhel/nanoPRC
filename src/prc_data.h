@@ -221,6 +221,9 @@ typedef enum {
      PRC_FACETESSDATA_TriangleStripeOneNormalTextured))
 
 typedef enum {
+    /* Not in the clause, which starts at 1. An attribute of this type carries a
+       title and no value; see prc_parse_attribute_key_values. */
+    PRC_ATTRIBUTE_TYPE_NONE = 0,
     PRC_ATTRIBUTE_TYPE_INT = 1,
     PRC_ATTRIBUTE_TYPE_DOUBLE,
     PRC_ATTRIBUTE_TYPE_TIME32,

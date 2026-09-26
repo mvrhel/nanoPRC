@@ -513,6 +513,23 @@ prc_parse_attribute_key_values(prc_context *ctx, prc_bit_state *bit_state, prc_a
 
     switch (data->type)
     {
+    case PRC_ATTRIBUTE_TYPE_NONE:
+        /* An attribute that carries a title and no value. No value bits follow.
+
+           The clause does not describe this: it lists types 1 to 5 and offers a
+           value field for each, and the prose at
+           iso-prc/definitions/base-entities/misc_data.yaml:57 says the key
+           "determines what of 4 legal types of attributes is to follow" -- which
+           does not cover 0, and does not cover 5 either.
+
+           Measured rather than assumed, on an IFC-derived file that this parser
+           refused until now: 118,527 attributes decode, of which 3,105 are this
+           type, and the file walks to completion. A desynced read would not
+           survive the first one, let alone three thousand. The values that do
+           carry data around them are legible IFC property-set strings, and the
+           zeros fall exactly where a property set has no value. */
+        break;
+
     case PRC_ATTRIBUTE_TYPE_INT:
         data->value_integer = prc_bitread_uint32(ctx, bit_state);
         break;
