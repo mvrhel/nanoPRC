@@ -51,7 +51,8 @@
 
 static int prc_tessellate_surface(prc_context *ctx, prc_data *data,
     uint32_t shell_index, uint32_t face_index, prc_topo_face *topo_face,
-    uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data);
+    uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data,
+    prc_topo_context *topo_context);
 
 /* A standard type for curve sampling */
 typedef prc_vec3 (*curve_func)(prc_context *ctx, void *params, double input);
@@ -4535,7 +4536,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             synthetic_face.surface_geometry.surface = synthetic_surface;
 
             code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
-                face->orientation_surface_with_shell, NULL);
+                face->orientation_surface_with_shell, NULL, NULL);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO cylinder\n");
@@ -4723,7 +4724,7 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
             synthetic_face.surface_geometry.surface = synthetic_surface;
 
             code = prc_tessellate_surface(ctx, data, shell_index, face_index, &synthetic_face,
-                face->orientation_surface_with_shell, NULL);
+                face->orientation_surface_with_shell, NULL, NULL);
             if (code < 0)
             {
                 prc_error(ctx, code, "Failed in prc_tessellate_surface for compressed ISO torus\n");
@@ -5043,14 +5044,178 @@ prc_get_surface_transform_inverse(prc_context *ctx, prc_type_surf *surface,
     return 0;
 }
 
+/* Point-in-polygon test (even-odd / ray casting rule), used to determine
+   which loop of a planar face encloses the others in uv space */
+static int
+prc_uv_point_in_polygon(prc_vec2 point, uint32_t num_verts, const prc_vec2 *verts)
+{
+    uint32_t i, j;
+    int inside = 0;
+
+    for (i = 0, j = num_verts - 1; i < num_verts; j = i++)
+    {
+        double xi = verts[i].x, yi = verts[i].y;
+        double xj = verts[j].x, yj = verts[j].y;
+
+        if (((yi > point.y) != (yj > point.y)) &&
+            (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi))
+        {
+            inside = !inside;
+        }
+    }
+
+    return inside;
+}
+
 /* Here if we have multiple loops we may need to assign them as inner or outer
    loops. This seems very messy in the specification so this may need some work
    here */
-static void
+static int
 prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t orientation,
-    prc_type_surf *surface, uint32_t num_loops, prc_loop_samples *loop_samples)
+    uint8_t topo_context_behavior, uint32_t num_loops, prc_loop_samples *loop_samples,
+    uint32_t surface_type)
 {
+    uint8_t first_loop_is_outer = topo_context_behavior & PRC_CONTEXT_OuterLoopsFirst;
 
+    if (num_loops == 0)
+        return 0;
+
+    /* If number of loops is one then that is the outer loop and there
+       are no inner loops or if first_loop_is_outer is true */
+    if (num_loops == 1 || first_loop_is_outer == 1)
+    {
+        loop_samples->is_outer_loop = 1;
+        return 0;
+    }
+
+    /* The spec is a little funny with respect to index_of_output_loop description
+       for the face. In one spot it says . If PRC_CONTEXT_OuterLoopsFirst
+       is set to TRUE in the topological context the face is contained in,
+       the index of the outer loop shall be defined. But if PRC_CONTEXT_OuterLoopsFirst
+       then I would think 0 would be the index as that one is first.... */
+    if (topo_face->index_of_outer_loop != -1 && topo_face->index_of_outer_loop < num_loops)
+    {
+        loop_samples[topo_face->index_of_outer_loop].is_outer_loop = 1;
+    }
+    else
+    {
+        /* Now we have to figure out the outer loop by brute force. This is 
+           going to depend upon the surface type.  For some surfaces, the loop
+           may actually be a straight line on the surface. Think of a loop going
+           around the circumference of a cylinder. In this case, this loop is
+           really just a boundary edge. If you have two of these you have two edges */
+        switch (surface_type)
+        {
+            case PRC_TYPE_SURF_FromCurves:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Cone:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Cylinder:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Sphere:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Torus:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Cylindrical:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Extrusion:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Revolution:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Plane:
+            {
+                /* In the case of a plane, there is definitely one loop that
+                   is the outer boundary and all the others are holes. Find the
+                   loop whose uv polygon contains a sample point from every
+                   other loop. */
+                uint32_t candidate, other;
+                int outer_found = 0;
+
+                for (candidate = 0; candidate < num_loops && !outer_found; candidate++)
+                {
+                    int contains_all = 1;
+
+                    for (other = 0; other < num_loops; other++)
+                    {
+                        if (other == candidate)
+                            continue;
+
+                        if (loop_samples[other].num_samples == 0 ||
+                            !prc_uv_point_in_polygon(loop_samples[other].uv_samples[0],
+                                loop_samples[candidate].num_samples, loop_samples[candidate].uv_samples))
+                        {
+                            contains_all = 0;
+                            break;
+                        }
+                    }
+
+                    if (contains_all)
+                    {
+                        loop_samples[candidate].is_outer_loop = 1;
+                        outer_found = 1;
+                    }
+                }
+
+                if (!outer_found)
+                {
+                    prc_error(ctx, PRC_ERROR_INTERNAL,
+                        "Could not determine outer loop for planar face in prc_assign_loop_inner_outer\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+
+                break;
+            }
+
+            case PRC_TYPE_SURF_Offset:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_NURBS:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Blend02:
+            {
+                break;
+            }
+
+            case PRC_TYPE_SURF_Blend01:
+            {
+                break;
+            }
+
+            default:
+                return 0;
+        }
+    }
+
+    return 0;
 }
 
 /* Based upon surface type, map the 3D points to the UV surface storing
@@ -5113,85 +5278,85 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
     /* Now actually map from the 3D base space to the uv surface space */
     switch (surface->surface_type)
     {
-    case PRC_TYPE_SURF_FromCurves:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Cone:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Cylinder:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Sphere:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Torus:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Cylindrical:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Extrusion:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Revolution:
-    {
-        break;
-    }
-
-    case PRC_TYPE_SURF_Plane:
-    {
-        /* The UV plane in this space is simply the Z = 0 plane which these
-           samples should already be mapped to with the inverse transform */
-        for (k = 0; k < num_loops; k++)
+        case PRC_TYPE_SURF_FromCurves:
         {
-            curr_loop = &loop_samples[k];
-            num_samples = curr_loop->num_samples;
-            for (j = 0; j < num_samples; j++)
-            {
-                curr_loop->uv_samples[j].x = curr_loop->samples[j].x;
-                curr_loop->uv_samples[j].y = curr_loop->samples[j].y;
-            }
+            break;
         }
-        break;
-    }
 
-    case PRC_TYPE_SURF_Offset:
-    {
-        break;
-    }
+        case PRC_TYPE_SURF_Cone:
+        {
+            break;
+        }
 
-    case PRC_TYPE_SURF_NURBS:
-    {
-        break;
-    }
+        case PRC_TYPE_SURF_Cylinder:
+        {
+            break;
+        }
 
-    case PRC_TYPE_SURF_Blend02:
-    {
-        break;
-    }
+        case PRC_TYPE_SURF_Sphere:
+        {
+            break;
+        }
 
-    case PRC_TYPE_SURF_Blend01:
-    {
-        break;
-    }
+        case PRC_TYPE_SURF_Torus:
+        {
+            break;
+        }
 
-    default:
-        return 0;
+        case PRC_TYPE_SURF_Cylindrical:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Extrusion:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Revolution:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Plane:
+        {
+            /* The UV plane in this space is simply the Z = 0 plane which these
+               samples should already be mapped to with the inverse transform */
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->uv_samples[j].x = curr_loop->samples[j].x;
+                    curr_loop->uv_samples[j].y = curr_loop->samples[j].y;
+                }
+            }
+            break;
+        }
+
+        case PRC_TYPE_SURF_Offset:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_NURBS:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend02:
+        {
+            break;
+        }
+
+        case PRC_TYPE_SURF_Blend01:
+        {
+            break;
+        }
+
+        default:
+            return 0;
     }
 
     return 0;
@@ -5200,7 +5365,8 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 static int
 prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                        uint32_t face_index, prc_topo_face *topo_face,
-                       uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data)
+                       uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data,
+                       prc_topo_context *topo_context)
 {
     int code;
     uint32_t k;
@@ -5230,6 +5396,12 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t num_loops = topo_face->number_of_loops;
     prc_ptr_topology *loops = topo_face->loops;
     prc_loop_samples *loop_samples = NULL;
+    uint8_t topo_context_behavior = 0;
+
+    if (topo_context != NULL)
+    {
+        topo_context_behavior = topo_context->behavior;
+    }
 
     /* Orientation is either 0 (opposite direction), 1 (same direction), or 2 (unknown.
        If unknown it is needed to do geometric tests to determine the correct orientation.
@@ -5308,6 +5480,18 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                 prc_error(ctx, code, "Failed in prc_map_loops_to_surface\n");
                 return code;
             }
+
+            /* Now lets see if we can figure out which of these is an outer
+               and which is an inner loop */
+            code = prc_assign_loop_inner_outer(ctx, topo_face, orientation,
+                topo_context_behavior, num_loops, loop_samples, surface.surface_type);
+            if (code < 0)
+            {
+                prc_free(ctx, loop_samples);
+                prc_error(ctx, code, "Failed in prc_assign_loop_inner_outer\n");
+                return code;
+            }
+
         }
         surf_params.loop_samples = loop_samples;
         surf_params.num_loops = num_loops;
@@ -5953,7 +6137,8 @@ prc_approximate_objects_exact_geom(prc_context *ctx, prc_api_data data_in, uint3
                 orientation = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].orientation;
                 data->exact_geom_tess_part[geom_count].shells[i].faces[j].orientation = orientation;
                 prc_topo_face *topo_face = brep_data->connex[0].topo->topo_connex->shells[i].topo->topo_shell->faces[j].face.topo->topo_face;
-                code = prc_tessellate_surface(ctx, data, i, j, topo_face, orientation, topo->brep_ref_data);
+                prc_topo_context *topo_context = brep_data->connex[0].topo->topo_context; /* Not sure which topo context I should use for loop information */
+                code = prc_tessellate_surface(ctx, data, i, j, topo_face, orientation, topo->brep_ref_data, topo_context);
                 if (code < 0)
                 {
                     prc_error(ctx, code, "Failed in prc_sample_curve\n");
