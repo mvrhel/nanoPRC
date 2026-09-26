@@ -23,6 +23,8 @@
 #include <math.h>
 #include <string.h>
 
+//#define PRC_DEBUG_EARCLIP 1
+
 #define CURVE_SAMPLES 256
 #define SURFACE_SAMPLES 32
 #define CURVE_PRECISION 1e-3
@@ -5320,16 +5322,23 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Plane:
         {
-            /* The UV plane in this space is simply the Z = 0 plane which these
-               samples should already be mapped to with the inverse transform */
+            /* The Z = 0 plane which these samples should already be mapped to
+               with the inverse transform is local (x, y) space, not (u, v):
+               prc_evaluate_surf_plane maps x = u * coeff_a + coeff_b (same for
+               v/y), so that affine map has to be inverted here to recover the
+               true surface parameters the tessellator evaluates against */
+            prc_surf_plane *plane = surface->surf_plane;
+            double u_coeff_a = (plane->u_parameter_coeff_a != 0.0) ? plane->u_parameter_coeff_a : 1.0;
+            double v_coeff_a = (plane->v_parameter_coeff_a != 0.0) ? plane->v_parameter_coeff_a : 1.0;
+
             for (k = 0; k < num_loops; k++)
             {
                 curr_loop = &loop_samples[k];
                 num_samples = curr_loop->num_samples;
                 for (j = 0; j < num_samples; j++)
                 {
-                    curr_loop->uv_samples[j].x = curr_loop->samples[j].x;
-                    curr_loop->uv_samples[j].y = curr_loop->samples[j].y;
+                    curr_loop->uv_samples[j].x = (curr_loop->samples[j].x - plane->u_parameter_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->samples[j].y - plane->v_parameter_coeff_b) / v_coeff_a;
                 }
             }
             break;
@@ -5358,6 +5367,625 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
         default:
             return 0;
     }
+
+    return 0;
+}
+
+/* One node of the circular doubly-linked-list polygon used for ear clipping.
+   uv is a plain surface parameter (u, v), not a screen coordinate */
+typedef struct prc_tri_vertex_s
+{
+    prc_vec2 uv;
+    uint32_t next;
+    uint32_t prev;
+    uint8_t removed;
+} prc_tri_vertex;
+
+/* Twice the signed area (shoelace formula): positive for CCW, negative for CW */
+static double
+prc_uv_polygon_signed_area(uint32_t count, const prc_vec2 *pts)
+{
+    double area = 0.0;
+    uint32_t i;
+
+    for (i = 0; i < count; i++)
+    {
+        uint32_t next = (i + 1 == count) ? 0 : (i + 1);
+
+        area += pts[i].x * pts[next].y - pts[next].x * pts[i].y;
+    }
+
+    return area;
+}
+
+static double
+prc_uv_loop_max_x(const prc_loop_samples *loop)
+{
+    uint32_t count = (loop->num_samples > 0) ? (loop->num_samples - 1) : 0;
+    double max_x;
+    uint32_t i;
+
+    if (count == 0)
+        return 0.0;
+
+    max_x = loop->uv_samples[0].x;
+    for (i = 1; i < count; i++)
+    {
+        if (loop->uv_samples[i].x > max_x)
+            max_x = loop->uv_samples[i].x;
+    }
+
+    return max_x;
+}
+
+/* Stores count points (dropping any closing duplicate is the caller's job)
+   into a circular ring starting at slot base, forcing the winding direction
+   given by reverse */
+static void
+prc_tri_build_ring(prc_tri_vertex *verts, uint32_t base, uint32_t count,
+    const prc_vec2 *pts, int reverse)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++)
+    {
+        uint32_t idx = base + i;
+
+        verts[idx].uv = reverse ? pts[count - 1 - i] : pts[i];
+        verts[idx].next = base + ((i + 1) % count);
+        verts[idx].prev = base + ((i + count - 1) % count);
+        verts[idx].removed = 0;
+    }
+}
+
+static double
+prc_tri_cross(prc_vec2 o, prc_vec2 a, prc_vec2 b)
+{
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+
+static int
+prc_tri_point_in_triangle(prc_vec2 p, prc_vec2 a, prc_vec2 b, prc_vec2 c)
+{
+    double d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+    double d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
+    double d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
+    int has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    int has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+
+    return !(has_neg && has_pos);
+}
+
+/* idx is an ear of a CCW ring if it turns convex and no other remaining
+   vertex of the ring falls inside the candidate triangle */
+static int
+prc_tri_is_ear(const prc_tri_vertex *verts, uint32_t idx)
+{
+    uint32_t prev = verts[idx].prev;
+    uint32_t next = verts[idx].next;
+    prc_vec2 a = verts[prev].uv;
+    prc_vec2 b = verts[idx].uv;
+    prc_vec2 c = verts[next].uv;
+    uint32_t k;
+
+    if (prc_tri_cross(a, b, c) <= 0.0)
+        return 0;
+
+    for (k = verts[next].next; k != prev; k = verts[k].next)
+    {
+        prc_vec2 p = verts[k].uv;
+
+        /* A bridged hole duplicates its entry/exit vertices elsewhere in the
+           ring (see prc_tri_eliminate_hole); finding that duplicate here just
+           means it coincides with one of this triangle's own corners, which
+           is not a real obstruction */
+        if ((p.x == a.x && p.y == a.y) || (p.x == b.x && p.y == b.y) || (p.x == c.x && p.y == c.y))
+            continue;
+
+        if (prc_tri_point_in_triangle(p, a, b, c))
+            return 0;
+    }
+
+    return 1;
+}
+
+/* Define PRC_DEBUG_EARCLIP to dump the ring state (each vertex's uv, whether
+   it is reflex, and whichever other vertex is blocking it as an ear) when
+   ear clipping cannot make progress */
+#ifdef PRC_DEBUG_EARCLIP
+static void
+prc_tri_debug_dump_ring(prc_context *ctx, const prc_tri_vertex *verts, uint32_t head, uint32_t ring_count)
+{
+    uint32_t cur = head;
+    uint32_t i;
+
+    (void)ctx;
+    fprintf(stderr, "prc_tri_earclip: ring_count=%u\n", ring_count);
+    for (i = 0; i < ring_count; i++)
+    {
+        uint32_t prev = verts[cur].prev;
+        uint32_t next = verts[cur].next;
+        double cross = prc_tri_cross(verts[prev].uv, verts[cur].uv, verts[next].uv);
+        uint32_t blocker = (uint32_t)-1;
+        uint32_t k;
+
+        if (cross > 0.0)
+        {
+            for (k = verts[next].next; k != prev; k = verts[k].next)
+            {
+                if (prc_tri_point_in_triangle(verts[k].uv, verts[prev].uv, verts[cur].uv, verts[next].uv))
+                {
+                    blocker = k;
+                    break;
+                }
+            }
+        }
+
+        fprintf(stderr, "  [%u] uv=(%.9f,%.9f) prev=%u next=%u cross=%.9g %s\n",
+            cur, verts[cur].uv.x, verts[cur].uv.y, prev, next, cross,
+            (cross <= 0.0) ? "REFLEX" : (blocker != (uint32_t)-1) ? "BLOCKED" : "EAR");
+
+        if (cross > 0.0 && blocker != (uint32_t)-1)
+        {
+            fprintf(stderr, "      blocked by [%u] uv=(%.9f,%.9f)\n",
+                blocker, verts[blocker].uv.x, verts[blocker].uv.y);
+        }
+
+        cur = next;
+    }
+}
+#endif /* PRC_DEBUG_EARCLIP */
+
+/* Standard ear-clipping triangulation of the ring starting at head, which
+   must be CCW (prc_tri_eliminate_hole guarantees this even with holes
+   bridged in). Allocates and returns the triangle index array */
+static int
+prc_tri_earclip(prc_context *ctx, prc_tri_vertex *verts, uint32_t head,
+    uint32_t ring_count, uint32_t **triangles_out, uint32_t *num_triangles_out)
+{
+    uint32_t remaining = ring_count;
+    uint32_t *triangles;
+    uint32_t tri_index = 0;
+    uint32_t cur = head;
+    uint32_t since_last_clip = 0;
+
+    if (ring_count < 3)
+    {
+        *triangles_out = NULL;
+        *num_triangles_out = 0;
+        return 0;
+    }
+
+    triangles = (uint32_t *)prc_calloc(ctx, (ring_count - 2) * 3, sizeof(uint32_t));
+    if (triangles == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate triangles in prc_tri_earclip\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    while (remaining > 3)
+    {
+        uint32_t next = verts[cur].next;
+
+        if (prc_tri_is_ear(verts, cur))
+        {
+            uint32_t prev = verts[cur].prev;
+
+            triangles[tri_index++] = prev;
+            triangles[tri_index++] = cur;
+            triangles[tri_index++] = next;
+
+            verts[prev].next = next;
+            verts[next].prev = prev;
+            verts[cur].removed = 1;
+            remaining--;
+            since_last_clip = 0;
+            cur = next;
+        }
+        else
+        {
+            cur = next;
+            since_last_clip++;
+            if (since_last_clip > remaining)
+            {
+#ifdef PRC_DEBUG_EARCLIP
+                prc_tri_debug_dump_ring(ctx, verts, cur, remaining);
+#endif
+                /* A full pass with no ear found means the ring is degenerate
+                   or self-intersecting */
+                prc_free(ctx, triangles);
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to triangulate planar loop boundary\n");
+                return PRC_ERROR_INTERNAL;
+            }
+        }
+    }
+
+    triangles[tri_index++] = verts[cur].prev;
+    triangles[tri_index++] = cur;
+    triangles[tri_index++] = verts[cur].next;
+
+    *triangles_out = triangles;
+    *num_triangles_out = ring_count - 2;
+
+    return 0;
+}
+
+/* Finds the outer-ring vertex mutually visible with hole_start's uv, so a
+   hole can be bridged into the outer ring without crossing it. Classic
+   hole-elimination technique: cast a rightward ray from hole_start, take
+   the rightmost endpoint of the outer edge it crosses first, then fall back
+   to whichever reflex vertex inside that candidate triangle is most aligned
+   with the ray, since that one is guaranteed visible */
+static int
+prc_tri_find_hole_bridge(const prc_tri_vertex *verts, uint32_t outer_head,
+    uint32_t hole_start, uint32_t *bridge_out)
+{
+    prc_vec2 h = verts[hole_start].uv;
+    double best_x = 0.0;
+    uint8_t have_bridge = 0;
+    uint32_t bridge = outer_head;
+    uint32_t cur = outer_head;
+    prc_vec2 intersect;
+
+    do
+    {
+        uint32_t nxt = verts[cur].next;
+        prc_vec2 a = verts[cur].uv;
+        prc_vec2 b = verts[nxt].uv;
+
+        if ((a.y > h.y) != (b.y > h.y))
+        {
+            double x = a.x + (h.y - a.y) * (b.x - a.x) / (b.y - a.y);
+
+            if (x >= h.x && (!have_bridge || x < best_x))
+            {
+                best_x = x;
+                bridge = (a.x > b.x) ? cur : nxt;
+                have_bridge = 1;
+            }
+        }
+
+        cur = nxt;
+    } while (cur != outer_head);
+
+    if (!have_bridge)
+        return -1;
+
+    intersect.x = best_x;
+    intersect.y = h.y;
+
+    {
+        prc_vec2 m_point = verts[bridge].uv;
+        uint32_t best_vertex = bridge;
+        double best_angle = atan2(fabs(m_point.y - h.y), fabs(m_point.x - h.x));
+
+        cur = outer_head;
+        do
+        {
+            prc_vec2 p = verts[cur].uv;
+
+            if (p.x >= h.x && prc_tri_point_in_triangle(p, h, intersect, m_point))
+            {
+                double angle = atan2(fabs(p.y - h.y), fabs(p.x - h.x));
+
+                if (angle < best_angle)
+                {
+                    best_angle = angle;
+                    best_vertex = cur;
+                }
+            }
+
+            cur = verts[cur].next;
+        } while (cur != outer_head);
+
+        bridge = best_vertex;
+    }
+
+    *bridge_out = bridge;
+
+    return 0;
+}
+
+/* Splices a hole ring (hole_head, hole_count vertices, CW) into the outer
+   ring by duplicating the bridge vertex and the hole's own entry vertex,
+   producing a single simple (if zero-width-slit) CCW ring */
+static int
+prc_tri_eliminate_hole(prc_context *ctx, prc_tri_vertex *verts, uint32_t *next_free_slot,
+    uint32_t outer_head, uint32_t hole_head, uint32_t hole_count)
+{
+    uint32_t hole_start = hole_head;
+    uint32_t cur = verts[hole_head].next;
+    uint32_t k;
+    uint32_t bridge;
+    uint32_t h_dup, m_dup;
+    uint32_t hole_last;
+    uint32_t old_after_bridge;
+    int code;
+
+    /* The rightmost hole vertex is the conventional bridge entry point */
+    for (k = 1; k < hole_count; k++)
+    {
+        if (verts[cur].uv.x > verts[hole_start].uv.x)
+            hole_start = cur;
+        cur = verts[cur].next;
+    }
+
+    code = prc_tri_find_hole_bridge(verts, outer_head, hole_start, &bridge);
+    if (code < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "No visible bridge to outer loop in prc_tri_eliminate_hole\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    h_dup = (*next_free_slot)++;
+    m_dup = (*next_free_slot)++;
+    verts[h_dup].uv = verts[hole_start].uv;
+    verts[m_dup].uv = verts[bridge].uv;
+    verts[h_dup].removed = 0;
+    verts[m_dup].removed = 0;
+
+    old_after_bridge = verts[bridge].next;
+    hole_last = verts[hole_start].prev;
+
+    verts[bridge].next = hole_start;
+    verts[hole_start].prev = bridge;
+
+    verts[hole_last].next = h_dup;
+    verts[h_dup].prev = hole_last;
+    verts[h_dup].next = m_dup;
+    verts[m_dup].prev = h_dup;
+
+    verts[m_dup].next = old_after_bridge;
+    verts[old_after_bridge].prev = m_dup;
+
+    return 0;
+}
+
+/* Builds one ear-clippable ring from the outer loop with every hole loop
+   bridged in, triangulates it, and hands back the (u, v) vertex positions
+   the triangle indices refer to. Caller owns and must free *verts_out and
+   *triangles_out */
+static int
+prc_triangulate_planar_loops(prc_context *ctx, uint32_t num_loops, prc_loop_samples *loop_samples,
+    prc_vec2 **verts_out, uint32_t *num_verts_out,
+    uint32_t **triangles_out, uint32_t *num_triangles_out)
+{
+    uint32_t outer_index = num_loops;
+    uint32_t outer_count = 0;
+    uint32_t total_capacity = 0;
+    uint32_t num_holes = 0;
+    uint32_t k;
+    prc_tri_vertex *verts;
+    uint32_t next_free;
+    uint32_t outer_head;
+    uint32_t *hole_order = NULL;
+    int code;
+
+    for (k = 0; k < num_loops; k++)
+    {
+        uint32_t count = (loop_samples[k].num_samples > 0) ? (loop_samples[k].num_samples - 1) : 0;
+
+        total_capacity += count;
+        if (loop_samples[k].is_outer_loop)
+        {
+            outer_index = k;
+            outer_count = count;
+        }
+        else
+        {
+            num_holes++;
+        }
+    }
+
+    if (outer_index == num_loops || outer_count < 3)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "No usable outer loop in prc_triangulate_planar_loops\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    total_capacity += num_holes * 2;   /* two duplicate vertices per bridged hole */
+
+    verts = (prc_tri_vertex *)prc_calloc(ctx, total_capacity, sizeof(prc_tri_vertex));
+    if (verts == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate loop vertices in prc_triangulate_planar_loops\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    prc_tri_build_ring(verts, 0, outer_count, loop_samples[outer_index].uv_samples,
+        prc_uv_polygon_signed_area(outer_count, loop_samples[outer_index].uv_samples) < 0.0);
+    outer_head = 0;
+    next_free = outer_count;
+
+    if (num_holes > 0)
+    {
+        uint32_t idx = 0;
+
+        hole_order = (uint32_t *)prc_calloc(ctx, num_holes, sizeof(uint32_t));
+        if (hole_order == NULL)
+        {
+            prc_free(ctx, verts);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate hole order in prc_triangulate_planar_loops\n");
+            return PRC_ERROR_MEMORY;
+        }
+
+        for (k = 0; k < num_loops; k++)
+        {
+            if (k != outer_index && !loop_samples[k].is_outer_loop)
+                hole_order[idx++] = k;
+        }
+
+        /* Merge farthest-right holes first so bridge segments cannot cross */
+        for (k = 1; k < num_holes; k++)
+        {
+            uint32_t cand = hole_order[k];
+            double cand_max_x = prc_uv_loop_max_x(&loop_samples[cand]);
+            int m = (int)k - 1;
+
+            while (m >= 0 && prc_uv_loop_max_x(&loop_samples[hole_order[m]]) < cand_max_x)
+            {
+                hole_order[m + 1] = hole_order[m];
+                m--;
+            }
+            hole_order[m + 1] = cand;
+        }
+
+        for (k = 0; k < num_holes; k++)
+        {
+            uint32_t li = hole_order[k];
+            uint32_t count = (loop_samples[li].num_samples > 0) ? (loop_samples[li].num_samples - 1) : 0;
+            uint32_t hole_head = next_free;
+
+            if (count < 3)
+                continue;   /* degenerate hole loop; skip rather than fail the whole face */
+
+            prc_tri_build_ring(verts, hole_head, count, loop_samples[li].uv_samples,
+                prc_uv_polygon_signed_area(count, loop_samples[li].uv_samples) > 0.0);
+            next_free += count;
+
+            code = prc_tri_eliminate_hole(ctx, verts, &next_free, outer_head, hole_head, count);
+            if (code < 0)
+            {
+                prc_free(ctx, hole_order);
+                prc_free(ctx, verts);
+                return code;
+            }
+        }
+
+        prc_free(ctx, hole_order);
+    }
+
+    code = prc_tri_earclip(ctx, verts, outer_head, next_free, triangles_out, num_triangles_out);
+    if (code < 0)
+    {
+        prc_free(ctx, verts);
+        return code;
+    }
+
+    *verts_out = (prc_vec2 *)prc_calloc(ctx, next_free, sizeof(prc_vec2));
+    if (*verts_out == NULL)
+    {
+        prc_free(ctx, verts);
+        prc_free(ctx, *triangles_out);
+        *triangles_out = NULL;
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate output vertices in prc_triangulate_planar_loops\n");
+        return PRC_ERROR_MEMORY;
+    }
+    for (k = 0; k < next_free; k++)
+        (*verts_out)[k] = verts[k].uv;
+    *num_verts_out = next_free;
+
+    prc_free(ctx, verts);
+
+    return 0;
+}
+
+/* Tessellates a planar face directly from its loop boundaries instead of the
+   regular parametric grid: the plane's own domain need not match the face at
+   all, only the loops define its real outer edge and holes */
+static int
+prc_tessellate_planar_face_from_loops(prc_context *ctx, prc_data *data, uint32_t shell_index,
+    uint32_t face_index, uint32_t geom_count, uint8_t orientation,
+    surface_func surface_eval_func, prc_surface_params *surf_params,
+    const prc_surface_sampling_info *sampling_info,
+    uint32_t num_loops, prc_loop_samples *loop_samples)
+{
+    prc_vec2 *poly_verts = NULL;
+    uint32_t poly_num_verts = 0;
+    uint32_t *poly_triangles = NULL;
+    uint32_t poly_num_triangles = 0;
+    prc_exact_geom_tess_data *tess_data;
+    prc_vec3 normal;
+    uint32_t v, t;
+    int code;
+
+    code = prc_triangulate_planar_loops(ctx, num_loops, loop_samples,
+        &poly_verts, &poly_num_verts, &poly_triangles, &poly_num_triangles);
+    if (code < 0)
+    {
+        prc_error(ctx, code, "Failed in prc_triangulate_planar_loops\n");
+        return code;
+    }
+
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
+        (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
+    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
+    {
+        prc_free(ctx, poly_verts);
+        prc_free(ctx, poly_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_surface\n");
+        return PRC_ERROR_MEMORY;
+    }
+    tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
+
+    tess_data->number_of_vertices = poly_num_verts;
+    tess_data->vertices = (prc_exact_geom_vertex *)prc_calloc(ctx, poly_num_verts, sizeof(prc_exact_geom_vertex));
+    if (tess_data->vertices == NULL)
+    {
+        prc_free(ctx, poly_verts);
+        prc_free(ctx, poly_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data vertices in prc_tessellate_surface\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    /* The face is flat, so one evaluation gives the normal for every vertex */
+    code = prc_compute_surface_normal(ctx, surface_eval_func, surf_params,
+        poly_verts[0].x, poly_verts[0].y, PLANE_SURFACE_PRECISION, PLANE_SURFACE_PRECISION,
+        poly_verts[0].x - 1.0, poly_verts[0].x + 1.0,
+        poly_verts[0].y - 1.0, poly_verts[0].y + 1.0,
+        sampling_info, orientation, &normal);
+    if (code < 0)
+    {
+        prc_free(ctx, poly_verts);
+        prc_free(ctx, poly_triangles);
+        return code;
+    }
+
+    for (v = 0; v < poly_num_verts; v++)
+    {
+        prc_vec3 position = surface_eval_func(ctx, surf_params, poly_verts[v].x, poly_verts[v].y);
+
+        tess_data->vertices[v].position[0] = (float)position.x;
+        tess_data->vertices[v].position[1] = (float)position.y;
+        tess_data->vertices[v].position[2] = (float)position.z;
+        tess_data->vertices[v].normal[0] = (float)normal.x;
+        tess_data->vertices[v].normal[1] = (float)normal.y;
+        tess_data->vertices[v].normal[2] = (float)normal.z;
+    }
+
+    tess_data->number_of_triangles = poly_num_triangles;
+    tess_data->triangles = (uint32_t *)prc_calloc(ctx, poly_num_triangles * 3, sizeof(uint32_t));
+    if (tess_data->triangles == NULL)
+    {
+        prc_free(ctx, poly_verts);
+        prc_free(ctx, poly_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data triangles in prc_tessellate_surface\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    /* Ear clipping walked the CCW ring, which is the winding orientation == 1 expects */
+    for (t = 0; t < poly_num_triangles; t++)
+    {
+        uint32_t i0 = poly_triangles[t * 3 + 0];
+        uint32_t i1 = poly_triangles[t * 3 + 1];
+        uint32_t i2 = poly_triangles[t * 3 + 2];
+
+        if (orientation == 0)
+        {
+            tess_data->triangles[t * 3 + 0] = i0;
+            tess_data->triangles[t * 3 + 1] = i2;
+            tess_data->triangles[t * 3 + 2] = i1;
+        }
+        else
+        {
+            tess_data->triangles[t * 3 + 0] = i0;
+            tess_data->triangles[t * 3 + 1] = i1;
+            tess_data->triangles[t * 3 + 2] = i2;
+        }
+    }
+
+    prc_free(ctx, poly_verts);
+    prc_free(ctx, poly_triangles);
 
     return 0;
 }
@@ -5634,6 +6262,19 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
     {
         prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid surface evaluation function in prc_tessellate_surface\n");
         return PRC_ERROR_INTERNAL;
+    }
+
+    /* A planar face bounded by loops is tessellated straight from those loop
+       boundaries (ear-clipped, holes bridged in) instead of the regular grid
+       below: the plane's own schema domain need not match the face at all,
+       only the loops define its real outer edge and holes. Curved surfaces
+       where a loop degenerates to a straight line (e.g. a circle loop around
+       a cylinder) are not handled this way yet and still use the grid path */
+    if (surface.surface_type == PRC_TYPE_SURF_Plane && num_loops > 0 && loop_samples != NULL)
+    {
+        return prc_tessellate_planar_face_from_loops(ctx, data, shell_index, face_index,
+            geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
+            num_loops, loop_samples);
     }
 
     wrap_u = prc_surface_axis_wraps(start_u, end_u, sampling_info.u_periodic,
