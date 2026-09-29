@@ -914,7 +914,7 @@ prc_parse_mkp_markups(prc_context *ctx, prc_bit_state *bit_state, prc_mkp_markup
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MKP_Markup, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -1386,7 +1386,7 @@ prc_parse_misc_entity_reference(prc_context *ctx, prc_bit_state *bit_state, prc_
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_MISC_EntityReference, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -1736,7 +1736,7 @@ prc_parse_product_occurrence(prc_context *ctx, prc_bit_state *bit_state, prc_asm
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_ProductOccurrence, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -1939,7 +1939,7 @@ prc_parse_parts(prc_context *ctx, prc_bit_state *bit_state, prc_asm_parts_defini
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_PartDefinition, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 

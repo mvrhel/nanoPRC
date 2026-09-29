@@ -501,7 +501,7 @@ prc_parse_file_struct_internal_data(prc_context *ctx, prc_bit_state *bit_state, 
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_ASM_FileStructure, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
