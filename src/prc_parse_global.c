@@ -168,7 +168,7 @@ prc_parse_tess_markup(prc_context *ctx, prc_bit_state *bit_state, prc_tess_marku
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_TESS_MarkUp, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -390,7 +390,7 @@ prc_parse_styles(prc_context *ctx, prc_bit_state *bit_state, prc_graph_style *da
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_Style, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -432,7 +432,7 @@ prc_parse_line_patterns(prc_context *ctx, prc_bit_state *bit_state, prc_graph_li
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_LinePattern, &data->tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 
@@ -556,7 +556,7 @@ prc_parse_texture_trans(prc_context *ctx, prc_bit_state *bit_state, prc_graph_te
     schema_code = prc_read_check_tag(ctx, bit_state, PRC_TYPE_GRAPH_TextureTransformation, &tag);
     if (schema_code < 0)
     {
-        prc_error(ctx, code, "Error in prc_read_check_tag\n");
+        prc_error(ctx, schema_code, "Error in prc_read_check_tag\n");
         return schema_code;
     }
 

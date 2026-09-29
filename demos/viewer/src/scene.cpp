@@ -925,6 +925,7 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
                 {
                     code = prc_api_get_exact_geometry_tessellation_vertices(ctx,
                                 data, model_tree, k, j, i, tess_count, tesses_exact);
+                    tess_count++;
                     if (code < 0)
                     {
                         printf("Scene::load: prc_api_get_exact_geometry_tessallation_vertices failed\n");
