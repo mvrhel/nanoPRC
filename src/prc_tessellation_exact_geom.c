@@ -25,9 +25,12 @@
 
 //#define PRC_DEBUG_EARCLIP 1
 
-#define CURVE_SAMPLES 256
+#define CURVE_SAMPLES 32
 #define SURFACE_SAMPLES 32
-#define CURVE_PRECISION 1e-3
+/* Temporarily loosened for debugging (was 1e-3) to get a coarser boundary
+   loop mesh while diagnosing the periodic-loop trim work -- restore before
+   shipping */
+#define CURVE_PRECISION 1e-1
 #define SURFACE_PRECISION 1e-4
 #define SURFACE_MAX_SAMPLES 1024
 #define CYLINDER_SURFACE_PRECISION 1e-2
@@ -50,6 +53,10 @@
 #define NURBS_MAX_SAMPLES 1024
 /* Largest B-spline degree the fixed-size basis function buffers below can hold */
 #define PRC_BSPLINE_MAX_DEGREE 15
+/* Safety cap on prc_subdivide_curved_triangle's recursion (3^depth leaf
+   triangles worst case per boundary ear-clip triangle). Kept low for now
+   while debugging -- raise once the trim shape itself is confirmed correct */
+#define PRC_CURVED_LOOP_SUBDIVIDE_MAX_DEPTH 3
 
 static int prc_tessellate_surface(prc_context *ctx, prc_data *data,
     uint32_t shell_index, uint32_t face_index, prc_topo_face *topo_face,
@@ -71,6 +78,13 @@ typedef struct prc_loop_samples_s
     prc_vec3 *samples;
     prc_vec2 *uv_samples;
     uint8_t is_outer_loop;
+    /* Full 2*pi turns this loop winds around each periodic uv axis before
+       closing back up (0 if it is a genuine simple polygon within one tile).
+       Set by prc_map_loops_to_surface, consulted by prc_tessellate_surface
+       to pick between the closed-loop and seam-cut periodic tessellation
+       paths */
+    int32_t wind_u;
+    int32_t wind_v;
 } prc_loop_samples;
 
 typedef struct prc_coedge_samples_s
@@ -4829,8 +4843,8 @@ prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         else
         {
             /* Now we finally get to the curve */
-            prc_topo_wire_edge *wire_edge =
-                topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo->topo_wire_edge;
+            prc_topo_coedge *actual_coedge = topo_coedge->next_coedge.topo->topo_coedge;
+            prc_topo_wire_edge *wire_edge = actual_coedge->ptr_topology.topo->topo_wire_edge;
             prc_exact_geom_wire_data wire_samples = { 0 };
             code = prc_sample_curve(ctx, &wire_edge->curve, &wire_samples);
             if (code < 0)
@@ -4842,6 +4856,28 @@ prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
                 prc_error(ctx, code, "Error in prc_sample_curve\n");
                 return code;
             }
+
+            /* coedge_orientation == 0 means this coedge is traversed opposite
+               to its underlying edge curve's own direction; prc_sample_curve
+               always samples in the curve's native direction, so reverse here
+               to match the loop's actual boundary traversal (confirmed by a
+               real file: without this, consecutive coedges' samples don't
+               connect end-to-start, producing bogus discontinuities) */
+            if (!actual_coedge->coedge_orientation && wire_samples.number_of_points > 1)
+            {
+                uint32_t lo = 0, hi = wire_samples.number_of_points - 1;
+
+                while (lo < hi)
+                {
+                    prc_vec3 tmp = wire_samples.points[lo];
+
+                    wire_samples.points[lo] = wire_samples.points[hi];
+                    wire_samples.points[hi] = tmp;
+                    lo++;
+                    hi--;
+                }
+            }
+
             /* Transfer the samples to the coedge structure */
             coedge_samples->num_samples = wire_samples.number_of_points;
             coedge_samples->samples = wire_samples.points;
@@ -4907,6 +4943,19 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         total_samples += coedge_samples[k].num_samples;
     }
 
+#ifdef PRC_DEBUG_EARCLIP
+    fprintf(stderr, "prc_sample_loop: num_coedges=%u\n", num_coedges);
+    for (k = 0; k < num_coedges; k++)
+    {
+        prc_vec3 first = coedge_samples[k].samples[0];
+        prc_vec3 last = coedge_samples[k].samples[coedge_samples[k].num_samples - 1];
+
+        fprintf(stderr, "  coedge[%u]: num_samples=%u first=(%.9f,%.9f,%.9f) last=(%.9f,%.9f,%.9f)\n",
+            k, coedge_samples[k].num_samples,
+            first.x, first.y, first.z, last.x, last.y, last.z);
+    }
+#endif
+
     /* Now we have to combine the coedges into one loop */
     /* Each coedge begins with the end point of the previous coedge so
        we want to drop any of those points as we make our way around the loop.
@@ -4920,7 +4969,9 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         uint32_t pos = 0;
         for (j = 0; j < num_coedges; j++)
         {
-            memcpy(&loop_samples->samples[pos], coedge_samples[j].samples, sizeof(prc_vec3) * coedge_samples[j].num_samples - 1);
+            /* Parens matter: this drops exactly the coedge's last (redundant)
+               point, not one byte of it */
+            memcpy(&loop_samples->samples[pos], coedge_samples[j].samples, sizeof(prc_vec3) * (coedge_samples[j].num_samples - 1));
             pos += (coedge_samples[j].num_samples - 1);
         }
         /* Duplicate the first point to complete the loop */
@@ -5069,6 +5120,51 @@ prc_uv_point_in_polygon(prc_vec2 point, uint32_t num_verts, const prc_vec2 *vert
     return inside;
 }
 
+/* Finds the loop whose uv polygon contains a sample point from every other
+   loop and marks it as the outer one (the rest are holes). Only meaningful
+   when every loop is a genuine simple closed polygon in uv space (i.e. none
+   of them wind around a periodic axis -- see wind_u/wind_v) */
+static int
+prc_assign_outer_loop_by_nesting(prc_context *ctx, uint32_t num_loops, prc_loop_samples *loop_samples)
+{
+    uint32_t candidate, other;
+    int outer_found = 0;
+
+    for (candidate = 0; candidate < num_loops && !outer_found; candidate++)
+    {
+        int contains_all = 1;
+
+        for (other = 0; other < num_loops; other++)
+        {
+            if (other == candidate)
+                continue;
+
+            if (loop_samples[other].num_samples == 0 ||
+                !prc_uv_point_in_polygon(loop_samples[other].uv_samples[0],
+                    loop_samples[candidate].num_samples, loop_samples[candidate].uv_samples))
+            {
+                contains_all = 0;
+                break;
+            }
+        }
+
+        if (contains_all)
+        {
+            loop_samples[candidate].is_outer_loop = 1;
+            outer_found = 1;
+        }
+    }
+
+    if (!outer_found)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "Could not determine outer loop in prc_assign_outer_loop_by_nesting\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    return 0;
+}
+
 /* Here if we have multiple loops we may need to assign them as inner or outer
    loops. This seems very messy in the specification so this may need some work
    here */
@@ -5101,11 +5197,23 @@ prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t 
     }
     else
     {
+        uint32_t k;
+        uint8_t any_wraps = 0;
+
         /* Now we have to figure out the outer loop by brute force. This is 
            going to depend upon the surface type.  For some surfaces, the loop
            may actually be a straight line on the surface. Think of a loop going
            around the circumference of a cylinder. In this case, this loop is
            really just a boundary edge. If you have two of these you have two edges */
+        for (k = 0; k < num_loops; k++)
+        {
+            if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0)
+            {
+                any_wraps = 1;
+                break;
+            }
+        }
+
         switch (surface_type)
         {
             case PRC_TYPE_SURF_FromCurves:
@@ -5113,24 +5221,20 @@ prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t 
                 break;
             }
 
+            /* A wrapping loop divides the surface along a periodic axis
+               rather than nesting inside another loop's polygon, so the
+               nesting test below does not apply to it -- that case is
+               instead handled directly by prc_tessellate_surface via each
+               loop's wind_u/wind_v (see prc_tessellate_periodic_face_from_loops) */
             case PRC_TYPE_SURF_Cone:
-            {
-                break;
-            }
-
             case PRC_TYPE_SURF_Cylinder:
-            {
-                break;
-            }
-
             case PRC_TYPE_SURF_Sphere:
-            {
-                break;
-            }
-
             case PRC_TYPE_SURF_Torus:
             {
-                break;
+                if (any_wraps)
+                    break;
+
+                return prc_assign_outer_loop_by_nesting(ctx, num_loops, loop_samples);
             }
 
             case PRC_TYPE_SURF_Cylindrical:
@@ -5151,45 +5255,8 @@ prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t 
             case PRC_TYPE_SURF_Plane:
             {
                 /* In the case of a plane, there is definitely one loop that
-                   is the outer boundary and all the others are holes. Find the
-                   loop whose uv polygon contains a sample point from every
-                   other loop. */
-                uint32_t candidate, other;
-                int outer_found = 0;
-
-                for (candidate = 0; candidate < num_loops && !outer_found; candidate++)
-                {
-                    int contains_all = 1;
-
-                    for (other = 0; other < num_loops; other++)
-                    {
-                        if (other == candidate)
-                            continue;
-
-                        if (loop_samples[other].num_samples == 0 ||
-                            !prc_uv_point_in_polygon(loop_samples[other].uv_samples[0],
-                                loop_samples[candidate].num_samples, loop_samples[candidate].uv_samples))
-                        {
-                            contains_all = 0;
-                            break;
-                        }
-                    }
-
-                    if (contains_all)
-                    {
-                        loop_samples[candidate].is_outer_loop = 1;
-                        outer_found = 1;
-                    }
-                }
-
-                if (!outer_found)
-                {
-                    prc_error(ctx, PRC_ERROR_INTERNAL,
-                        "Could not determine outer loop for planar face in prc_assign_loop_inner_outer\n");
-                    return PRC_ERROR_INTERNAL;
-                }
-
-                break;
+                   is the outer boundary and all the others are holes. */
+                return prc_assign_outer_loop_by_nesting(ctx, num_loops, loop_samples);
             }
 
             case PRC_TYPE_SURF_Offset:
@@ -5218,6 +5285,49 @@ prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t 
     }
 
     return 0;
+}
+
+static double
+prc_map_to_two_pi(double angle)
+{
+    if (angle < 0.0)
+    {
+        angle += 2.0 * PRC_PI;
+    }
+    return angle;
+}
+
+/* Rewrites one coordinate (x if use_y_component is 0, else y) of a closed
+   loop's uv samples into a continuous unwrapped polyline, undoing the 2*pi
+   branch cuts atan2 introduces between consecutive samples, and reports how
+   many full turns the loop winds around that axis before closing back up (0
+   if it does not wrap, i.e. it is a genuine simple polygon on this axis) */
+static int32_t
+prc_unwrap_angular_component(prc_vec2 *pts, uint32_t count, uint8_t use_y_component)
+{
+    uint32_t j;
+    double total;
+
+    if (count < 2)
+        return 0;
+
+    for (j = 1; j < count; j++)
+    {
+        double prev = use_y_component ? pts[j - 1].y : pts[j - 1].x;
+        double curr = use_y_component ? pts[j].y : pts[j].x;
+        double delta = curr - prev;
+
+        delta -= (2.0 * PRC_PI) * floor((delta + PRC_PI) / (2.0 * PRC_PI));
+        if (use_y_component)
+            pts[j].y = prev + delta;
+        else
+            pts[j].x = prev + delta;
+    }
+
+    total = (use_y_component ? pts[count - 1].y : pts[count - 1].x) -
+            (use_y_component ? pts[0].y : pts[0].x);
+
+    return (int32_t)lround(total / (2.0 * PRC_PI));
 }
 
 /* Based upon surface type, map the 3D points to the UV surface storing
@@ -5287,21 +5397,148 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Cone:
         {
+            prc_surf_cone *cone = surface->surf_cone;
+            double u_coeff_a = (cone->parameterization.u_param_coeff_a != 0.0) ? cone->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (cone->parameterization.v_param_coeff_a != 0.0) ? cone->parameterization.v_param_coeff_a : 1.0;
+            double u, v;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    u = atan2(curr_loop->samples[j].y, curr_loop->samples[j].x);
+                    u = prc_map_to_two_pi(u);
+                    v = curr_loop->samples[j].z;
+
+                    /* Store the raw angle/height for now; unwrap before the
+                       affine parameterization map so the 2*pi period used to
+                       detect wraparound isn't distorted by u_coeff_a */
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                }
+
+                curr_loop->wind_u = prc_unwrap_angular_component(curr_loop->uv_samples, num_samples, 0);
+                curr_loop->wind_v = 0;
+
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - cone->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - cone->parameterization.v_param_coeff_b) / v_coeff_a;
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Cylinder:
         {
+            prc_surf_cylinder *cylinder = surface->surf_cylinder;
+            double u_coeff_a = (cylinder->parameterization.u_param_coeff_a != 0.0) ? cylinder->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (cylinder->parameterization.v_param_coeff_a != 0.0) ? cylinder->parameterization.v_param_coeff_a : 1.0;
+            double u, v;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    u = atan2(curr_loop->samples[j].y, curr_loop->samples[j].x);
+                    u = prc_map_to_two_pi(u);
+                    v = curr_loop->samples[j].z;
+
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                }
+
+                curr_loop->wind_u = prc_unwrap_angular_component(curr_loop->uv_samples, num_samples, 0);
+                curr_loop->wind_v = 0;
+
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - cylinder->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - cylinder->parameterization.v_param_coeff_b) / v_coeff_a;
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Sphere:
         {
+            prc_surf_sphere *sphere = surface->surf_sphere;
+            double u_coeff_a = (sphere->parameterization.u_param_coeff_a != 0.0) ? sphere->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (sphere->parameterization.v_param_coeff_a != 0.0) ? sphere->parameterization.v_param_coeff_a : 1.0;
+            double u, v;
+            double horizontal_radius;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    u = atan2(curr_loop->samples[j].y, curr_loop->samples[j].x);
+                    u = prc_map_to_two_pi(u);
+                    horizontal_radius = sqrt(curr_loop->samples[j].y * curr_loop->samples[j].y + curr_loop->samples[j].x * curr_loop->samples[j].x);
+                    v = atan2(curr_loop->samples[j].z, horizontal_radius);
+
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                }
+
+                /* v is latitude and does not wrap a full 2*pi (it runs pole
+                   to pole), so only u (longitude) is ever unwrapped here */
+                curr_loop->wind_u = prc_unwrap_angular_component(curr_loop->uv_samples, num_samples, 0);
+                curr_loop->wind_v = 0;
+
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - sphere->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - sphere->parameterization.v_param_coeff_b) / v_coeff_a;
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Torus:
         {
+            prc_surf_torus *torus = surface->surf_torus;
+            double u_coeff_a = (torus->parameterization.u_param_coeff_a != 0.0) ? torus->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (torus->parameterization.v_param_coeff_a != 0.0) ? torus->parameterization.v_param_coeff_a : 1.0;
+            double minor_radius = torus->minor_radius;
+            double major_radius = torus->major_radius;
+            double u, v, current_radius;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    u = atan2(curr_loop->samples[j].y, curr_loop->samples[j].x);
+                    u = prc_map_to_two_pi(u);
+                    current_radius =
+                        sqrt(curr_loop->samples[j].y * curr_loop->samples[j].y + curr_loop->samples[j].x * curr_loop->samples[j].x);
+                    v = atan2(curr_loop->samples[j].z, current_radius - major_radius);
+                    v = prc_map_to_two_pi(v);
+
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                }
+
+                /* Both axes are angular on a torus, so a loop can wind
+                   around either (or, in principle, both -- not yet handled
+                   by the tessellation dispatch below) */
+                curr_loop->wind_u = prc_unwrap_angular_component(curr_loop->uv_samples, num_samples, 0);
+                curr_loop->wind_v = prc_unwrap_angular_component(curr_loop->uv_samples, num_samples, 1);
+
+                for (j = 0; j < num_samples; j++)
+                {
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - torus->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - torus->parameterization.v_param_coeff_b) / v_coeff_a;
+                }
+            }
             break;
         }
 
@@ -5547,7 +5784,6 @@ prc_tri_earclip(prc_context *ctx, prc_tri_vertex *verts, uint32_t head,
     uint32_t *triangles;
     uint32_t tri_index = 0;
     uint32_t cur = head;
-    uint32_t since_last_clip = 0;
 
     if (ring_count < 3)
     {
@@ -5565,38 +5801,68 @@ prc_tri_earclip(prc_context *ctx, prc_tri_vertex *verts, uint32_t head,
 
     while (remaining > 3)
     {
-        uint32_t next = verts[cur].next;
+        /* Scan every remaining vertex for a valid ear and take whichever
+           produces the "roundest" triangle (smallest longest-edge length),
+           rather than just the first one found by a linear scan: a long run
+           of exactly-collinear boundary samples (e.g. many points along one
+           straight edge of a trimmed loop, or a curve's own dense sampling)
+           otherwise lets ear clipping degenerate into one long fan from a
+           single vertex -- harmless on a flat plane, but a bad
+           approximation on a curved surface, and even on a thin fringe
+           strip it still shows up as visible "spoke" triangles */
+        uint32_t best = (uint32_t)-1;
+        double best_score = 0.0;
+        uint32_t start = cur;
+        uint32_t scan = cur;
 
-        if (prc_tri_is_ear(verts, cur))
+        do
         {
-            uint32_t prev = verts[cur].prev;
+            if (prc_tri_is_ear(verts, scan))
+            {
+                uint32_t prev = verts[scan].prev;
+                uint32_t next = verts[scan].next;
+                prc_vec2 a = verts[prev].uv, b = verts[scan].uv, c = verts[next].uv;
+                double e0 = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+                double e1 = (b.x - c.x) * (b.x - c.x) + (b.y - c.y) * (b.y - c.y);
+                double e2 = (c.x - a.x) * (c.x - a.x) + (c.y - a.y) * (c.y - a.y);
+                double score = e0 > e1 ? e0 : e1;
+
+                score = score > e2 ? score : e2;
+
+                if (best == (uint32_t)-1 || score < best_score)
+                {
+                    best = scan;
+                    best_score = score;
+                }
+            }
+            scan = verts[scan].next;
+        } while (scan != start);
+
+        if (best == (uint32_t)-1)
+        {
+#ifdef PRC_DEBUG_EARCLIP
+            prc_tri_debug_dump_ring(ctx, verts, cur, remaining);
+#endif
+            /* No ear anywhere in a full pass means the ring is degenerate
+               or self-intersecting */
+            prc_free(ctx, triangles);
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to triangulate planar loop boundary\n");
+            return PRC_ERROR_INTERNAL;
+        }
+
+        {
+            uint32_t prev = verts[best].prev;
+            uint32_t next = verts[best].next;
 
             triangles[tri_index++] = prev;
-            triangles[tri_index++] = cur;
+            triangles[tri_index++] = best;
             triangles[tri_index++] = next;
 
             verts[prev].next = next;
             verts[next].prev = prev;
-            verts[cur].removed = 1;
+            verts[best].removed = 1;
             remaining--;
-            since_last_clip = 0;
             cur = next;
-        }
-        else
-        {
-            cur = next;
-            since_last_clip++;
-            if (since_last_clip > remaining)
-            {
-#ifdef PRC_DEBUG_EARCLIP
-                prc_tri_debug_dump_ring(ctx, verts, cur, remaining);
-#endif
-                /* A full pass with no ear found means the ring is degenerate
-                   or self-intersecting */
-                prc_free(ctx, triangles);
-                prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to triangulate planar loop boundary\n");
-                return PRC_ERROR_INTERNAL;
-            }
         }
     }
 
@@ -5990,309 +6256,170 @@ prc_tessellate_planar_face_from_loops(prc_context *ctx, prc_data *data, uint32_t
     return 0;
 }
 
+/* Computes a per-vertex surface normal for a point produced by loop-based
+   (rather than regular-grid) tessellation, where u/v may legitimately fall
+   outside the surface's nominal [start_u,end_u]x[start_v,end_v] domain (loop
+   samples are unwrapped, so a periodic axis can run past one period tile).
+   Sidesteps prc_compute_surface_normal's domain clamping/wrapping by feeding
+   it a synthetic wide range that never clips the finite-difference step,
+   the same trick prc_tessellate_planar_face_from_loops uses */
 static int
-prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
-                       uint32_t face_index, prc_topo_face *topo_face,
-                       uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data,
-                       prc_topo_context *topo_context)
+prc_compute_loop_vertex_normal(prc_context *ctx, surface_func surface_eval_func,
+    void *surf_params, double u, double v, double precision_u, double precision_v,
+    const prc_surface_sampling_info *sampling_info, uint8_t orientation, prc_vec3 *normal)
 {
+    prc_surface_sampling_info local_info = *sampling_info;
+
+    local_info.u_periodic = 0;
+    local_info.v_periodic = 0;
+
+    return prc_compute_surface_normal(ctx, surface_eval_func, surf_params,
+        u, v, precision_u, precision_v,
+        u - 1.0, u + 1.0, v - 1.0, v + 1.0,
+        &local_info, orientation, normal);
+}
+
+/* Recursively centroid-splits a curved triangle (given as 3 uv corners)
+   until the true surface point at its centroid is within tolerance of the
+   flat (linearly-interpolated) centroid, or max_depth is reached. A split
+   only ever adds a new interior point private to that one triangle -- it
+   never touches a shared edge -- so, unlike edge-midpoint subdivision,
+   neighboring triangles independently refined to different depths can never
+   open a crack between them. Leaf triangles are appended as a flat,
+   non-indexed triangle soup (3 fresh vertices each) to the growable output
+   arrays, doubling capacity via prc_realloc as needed. Caller owns and must
+   free *out_verts/*out_tris */
+static int
+prc_subdivide_curved_triangle(prc_context *ctx, surface_func surface_eval_func, void *surf_params,
+    prc_vec2 uv0, prc_vec2 uv1, prc_vec2 uv2, double tolerance, uint32_t depth, uint32_t max_depth,
+    prc_vec2 **out_verts, uint32_t *out_num_verts, uint32_t *out_verts_cap,
+    uint32_t **out_tris, uint32_t *out_num_triangles, uint32_t *out_tris_cap)
+{
+    prc_vec3 p0, p1, p2, centroid_linear, centroid_true;
+    prc_vec2 uvc;
     int code;
-    uint32_t k;
-    prc_surface_params surf_params = { 0 };
-    surface_func surface_eval_func = NULL;
-    uint32_t num_samples_u = 0;
-    uint32_t num_samples_v = 0;
-    uint32_t geom_count = data->exact_geom_tess_part_count;
-    uint8_t surface_approx_good = 0;
-    prc_surface_sampling_info sampling_info = {0};
-    double start_u = 0.0;
-    double start_v = 0.0;
-    double end_u = 0.0;
-    double end_v = 0.0;
-    double precision_u = SURFACE_PRECISION;
-    double precision_v = SURFACE_PRECISION;
-    uint32_t max_samples_u = SURFACE_MAX_SAMPLES;
-    uint32_t max_samples_v = SURFACE_MAX_SAMPLES;
-    uint8_t wrap_u;
-    uint8_t wrap_v;
-    uint32_t vertex_samples_u;
-    uint32_t vertex_samples_v;
-    uint32_t cell_count_u;
-    uint32_t cell_count_v;
-    prc_exact_geom_transform exact_geom_trans;
-    prc_type_surf surface = topo_face->surface_geometry.surface;
-    uint32_t num_loops = topo_face->number_of_loops;
-    prc_ptr_topology *loops = topo_face->loops;
-    prc_loop_samples *loop_samples = NULL;
-    uint8_t topo_context_behavior = 0;
 
-    if (topo_context != NULL)
-    {
-        topo_context_behavior = topo_context->behavior;
-    }
+    p0 = surface_eval_func(ctx, surf_params, uv0.x, uv0.y);
+    p1 = surface_eval_func(ctx, surf_params, uv1.x, uv1.y);
+    p2 = surface_eval_func(ctx, surf_params, uv2.x, uv2.y);
 
-    /* Orientation is either 0 (opposite direction), 1 (same direction), or 2 (unknown.
-       If unknown it is needed to do geometric tests to determine the correct orientation.
-       The normal should point outside the material of the shell if the shell is closed
-       This also sets the transformation */
-    code = prc_get_surface_data(ctx, &surface, &sampling_info);
-    if (code < 0)
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to get surface data in prc_tessellate_surface\n");
-        return code;
-    }
-    num_samples_u = sampling_info.num_samples_u;
-    num_samples_v = sampling_info.num_samples_v;
-    precision_u = sampling_info.precision_u;
-    precision_v = sampling_info.precision_v;
-    max_samples_u = sampling_info.max_samples_u;
-    max_samples_v = sampling_info.max_samples_v;
-    start_u = sampling_info.start_u;
-    start_v = sampling_info.start_v;
-    end_u = sampling_info.end_u;
-    end_v = sampling_info.end_v;
+    uvc.x = (uv0.x + uv1.x + uv2.x) / 3.0;
+    uvc.y = (uv0.y + uv1.y + uv2.y) / 3.0;
+    centroid_true = surface_eval_func(ctx, surf_params, uvc.x, uvc.y);
+    centroid_linear.x = (p0.x + p1.x + p2.x) / 3.0;
+    centroid_linear.y = (p0.y + p1.y + p2.y) / 3.0;
+    centroid_linear.z = (p0.z + p1.z + p2.z) / 3.0;
 
-    /* Lets get any loops that may be associated with the surface. Loops
-       are curves (or vertices -- e.g. the tip of a cone) that make cuts
-       on the parametric surface. I would expect to see them primarily used
-       with planar surfaces to cut things like a washer for example. These have
-       to be PRC_TYPE_TOPO_Loop a vertex type is supposed to be a line with
-       the same starting and ending position */
-    /* Lets to a sanity check that indeed they are PRC_TYPE_TOPO_Loop. We will
-       not check the is stored values as we should have already tested those */
-    /* The check for brep_ref_data not NULL is due to the fact that this 
-       method is sometimes called from the compressed surface code */
-    if (brep_ref_data != NULL)
+    if (depth >= max_depth || prc_vec_dist_between_two_points(centroid_true, centroid_linear) <= tolerance)
     {
-        for (k = 0; k < num_loops; k++)
+        if (*out_num_verts + 3 > *out_verts_cap)
         {
-            if (!loops[k].is_stored)
-            {
-                if (loops[k].topo->tag != PRC_TYPE_TOPO_Loop)
-                {
-                    prc_error(ctx, PRC_ERROR_INTERNAL, "Surface loop is of wrong type\n");
-                    return PRC_ERROR_INTERNAL;
-                }
-            }
-        }
+            uint32_t new_cap = (*out_verts_cap == 0) ? 64 : (*out_verts_cap * 2);
+            prc_vec2 *new_verts;
 
-        /* For each of these loops we will need to get a set of samples that
-           are sufficient for us to approximate them before we can make use of them.
-           Lets do that first and store the loops in a sampled form */
-        if (num_loops > 0)
-        {
-            loop_samples = (prc_loop_samples *)prc_calloc(ctx, num_loops, sizeof(prc_loop_samples));
-            if (loop_samples == NULL)
+            while (new_cap < *out_num_verts + 3)
+                new_cap *= 2;
+            new_verts = (prc_vec2 *)prc_realloc(ctx, *out_verts, new_cap * sizeof(prc_vec2));
+            if (new_verts == NULL)
             {
-                prc_error(ctx, PRC_ERROR_MEMORY, "Failed in allocation prc_tessellate_surface\n");
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow vertices in prc_subdivide_curved_triangle\n");
                 return PRC_ERROR_MEMORY;
             }
-            for (k = 0; k < num_loops; k++)
+            *out_verts = new_verts;
+            *out_verts_cap = new_cap;
+        }
+        if (*out_num_triangles + 1 > *out_tris_cap)
+        {
+            uint32_t new_cap = (*out_tris_cap == 0) ? 32 : (*out_tris_cap * 2);
+            uint32_t *new_tris = (uint32_t *)prc_realloc(ctx, *out_tris, new_cap * 3 * sizeof(uint32_t));
+
+            if (new_tris == NULL)
             {
-                code = prc_sample_loop(ctx, brep_ref_data, topo_face, &loops[k], &loop_samples[k]);
-                if (code < 0)
-                {
-                    prc_free(ctx, loop_samples);
-                    prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_sample_loop\n");
-                    return PRC_ERROR_INTERNAL;
-                }
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow triangles in prc_subdivide_curved_triangle\n");
+                return PRC_ERROR_MEMORY;
             }
-
-            /* Now lets get the loops onto the parametric surface so they can
-               be used as a edge boundary in the tessellation process */
-            code = prc_map_loops_to_surface(ctx, topo_face, orientation, &surface,
-                                            num_loops, loop_samples);
-            if (code < 0)
-            {
-                prc_free(ctx, loop_samples);
-                prc_error(ctx, code, "Failed in prc_map_loops_to_surface\n");
-                return code;
-            }
-
-            /* Now lets see if we can figure out which of these is an outer
-               and which is an inner loop */
-            code = prc_assign_loop_inner_outer(ctx, topo_face, orientation,
-                topo_context_behavior, num_loops, loop_samples, surface.surface_type);
-            if (code < 0)
-            {
-                prc_free(ctx, loop_samples);
-                prc_error(ctx, code, "Failed in prc_assign_loop_inner_outer\n");
-                return code;
-            }
-
+            *out_tris = new_tris;
+            *out_tris_cap = new_cap;
         }
-        surf_params.loop_samples = loop_samples;
-        surf_params.num_loops = num_loops;
+
+        (*out_verts)[*out_num_verts + 0] = uv0;
+        (*out_verts)[*out_num_verts + 1] = uv1;
+        (*out_verts)[*out_num_verts + 2] = uv2;
+        (*out_tris)[*out_num_triangles * 3 + 0] = *out_num_verts + 0;
+        (*out_tris)[*out_num_triangles * 3 + 1] = *out_num_verts + 1;
+        (*out_tris)[*out_num_triangles * 3 + 2] = *out_num_verts + 2;
+        *out_num_verts += 3;
+        *out_num_triangles += 1;
+        return 0;
     }
 
-    switch (surface.surface_type)
-    {
-        case PRC_TYPE_SURF_FromCurves:
-        {
-            prc_surf_fromcurves *from_curves = surface.surf_fromcurves;
-            prc_uv_parameterization params = from_curves->parameterization;
+    code = prc_subdivide_curved_triangle(ctx, surface_eval_func, surf_params, uv0, uv1, uvc, tolerance, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
+    code = prc_subdivide_curved_triangle(ctx, surface_eval_func, surf_params, uv1, uv2, uvc, tolerance, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
+    code = prc_subdivide_curved_triangle(ctx, surface_eval_func, surf_params, uv2, uv0, uvc, tolerance, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
 
-            surf_params.surface_params = (void *)from_curves;
-            surface_eval_func = prc_evaluate_surf_fromcurves;
-            break;
-        }
+    return 0;
+}
 
-        case PRC_TYPE_SURF_Cone:
-        {
-            prc_surf_cone *cone = surface.surf_cone;
-            prc_uv_parameterization params = cone->parameterization;
+/* One tessellation of a surface's full natural uv domain on a regular,
+   curvature-adaptive grid (same refinement prc_tessellate_surface's
+   untrimmed path already used) -- shared by the untrimmed path and by
+   prc_tessellate_trimmed_face, which keeps whichever cells fall inside a
+   face's trim loop(s) and only needs to ear-clip-fill the thin leftover
+   fringe. Caller owns and must free grid->uv and grid->verts */
+typedef struct prc_regular_grid_s
+{
+    prc_vec2 *uv;
+    prc_exact_geom_vertex *verts;
+    uint32_t vertex_samples_u;
+    uint32_t vertex_samples_v;
+    uint8_t wrap_u;
+    uint8_t wrap_v;
+} prc_regular_grid;
 
-            surf_params.surface_params = (void *)cone;
-            surface_eval_func = prc_evaluate_surf_cone;
-            break;
-        }
+/* An undirected pair of grid vertex indices, used to represent one boundary
+   edge while tracing the outline of a classified grid's kept cells */
+typedef struct prc_uint32_pair_s
+{
+    uint32_t a;
+    uint32_t b;
+} prc_uint32_pair;
 
-        case PRC_TYPE_SURF_Cylinder:
-        {
-            prc_surf_cylinder *cylinder = surface.surf_cylinder;
-            prc_uv_parameterization params = cylinder->parameterization;
+static int
+prc_build_regular_grid(prc_context *ctx, surface_func surface_eval_func, prc_surface_params *surf_params,
+    const prc_surface_sampling_info *sampling_info_in, uint8_t orientation, prc_regular_grid *grid_out)
+{
+    prc_surface_sampling_info sampling_info = *sampling_info_in;
+    uint32_t num_samples_u = sampling_info.num_samples_u;
+    uint32_t num_samples_v = sampling_info.num_samples_v;
+    double precision_u = sampling_info.precision_u;
+    double precision_v = sampling_info.precision_v;
+    uint32_t max_samples_u = sampling_info.max_samples_u;
+    uint32_t max_samples_v = sampling_info.max_samples_v;
+    double start_u = sampling_info.start_u;
+    double start_v = sampling_info.start_v;
+    double end_u = sampling_info.end_u;
+    double end_v = sampling_info.end_v;
+    uint8_t wrap_u, wrap_v;
+    uint32_t vertex_samples_u, vertex_samples_v, cell_count_u, cell_count_v;
+    uint8_t surface_approx_good = 0;
+    int code;
 
-            surf_params.surface_params = (void *)cylinder;
-            surface_eval_func = prc_evaluate_surf_cylinder;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Sphere:
-        {
-            prc_surf_sphere *sphere = surface.surf_sphere;
-            prc_uv_parameterization params = sphere->parameterization;
-
-            surf_params.surface_params = (void *)sphere;
-            surface_eval_func = prc_evaluate_surf_sphere;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Torus:
-        {
-            prc_surf_torus *torus = surface.surf_torus;
-            prc_uv_parameterization params = torus->parameterization;
-
-            surf_params.surface_params = (void *)torus;
-            surface_eval_func = prc_evaluate_surf_torus;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Cylindrical:
-        {
-            prc_surf_cylindrical *cylindrical = surface.surf_cylindrical;
-            prc_uv_parameterization params = cylindrical->parameterization;
-
-            surf_params.surface_params = (void *)cylindrical;
-            surface_eval_func = prc_evaluate_surf_cylindrical;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Extrusion:
-        {
-            prc_surf_extrusion *extrusion = surface.surf_extrusion;
-            prc_uv_parameterization params = extrusion->parameterization;
-
-            surf_params.surface_params = (void *)extrusion;
-            surface_eval_func = prc_evaluate_surf_extrusion;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Revolution:
-        {
-            prc_surf_revolution *revolution = surface.surf_revolution;
-            prc_uv_parameterization params = revolution->parameterization;
-
-            surf_params.surface_params = (void *)revolution;
-            surface_eval_func = prc_evaluate_surf_revolution;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Plane:
-        {
-            prc_surf_plane *plane = surface.surf_plane;
-            prc_domain params = plane->domain;
-
-            surf_params.surface_params = (void *)plane;
-            surface_eval_func = prc_evaluate_surf_plane;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Offset:
-        {
-            prc_surf_offset *offset = surface.surf_offset;
-
-            surf_params.surface_params = (void *)offset;
-            surface_eval_func = prc_evaluate_surf_offset;
-            break;
-        }
-
-        case PRC_TYPE_SURF_NURBS:
-        {
-            prc_surf_nurbs *nurbs = surface.surf_nurbs;
-
-            surf_params.surface_params = (void *)nurbs;
-            surface_eval_func = prc_evaluate_surf_nurbs;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Blend02:
-        {
-            prc_surf_blend02 *blend = surface.surf_blend02;
-
-            surf_params.surface_params = (void *)blend;
-            surface_eval_func = prc_evaluate_surf_blend02;
-            break;
-        }
-
-        case PRC_TYPE_SURF_Blend01:
-        {
-            prc_surf_blend01 *blend = surface.surf_blend01;
-
-            surf_params.surface_params = (void *)blend;
-            surface_eval_func = prc_evaluate_surf_blend01;
-            break;
-        }
-
-        default:
-            data->exact_geom_tess_part[data->exact_geom_tess_part_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
-            return 0;
-    }
-
-    if (surface_eval_func == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid surface evaluation function in prc_tessellate_surface\n");
-        return PRC_ERROR_INTERNAL;
-    }
-
-    /* A planar face bounded by loops is tessellated straight from those loop
-       boundaries (ear-clipped, holes bridged in) instead of the regular grid
-       below: the plane's own schema domain need not match the face at all,
-       only the loops define its real outer edge and holes. Curved surfaces
-       where a loop degenerates to a straight line (e.g. a circle loop around
-       a cylinder) are not handled this way yet and still use the grid path */
-    if (surface.surface_type == PRC_TYPE_SURF_Plane && num_loops > 0 && loop_samples != NULL)
-    {
-        return prc_tessellate_planar_face_from_loops(ctx, data, shell_index, face_index,
-            geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
-            num_loops, loop_samples);
-    }
-
-    wrap_u = prc_surface_axis_wraps(start_u, end_u, sampling_info.u_periodic,
-        sampling_info.u_period);
-    wrap_v = prc_surface_axis_wraps(start_v, end_v, sampling_info.v_periodic,
-        sampling_info.v_period);
+    wrap_u = prc_surface_axis_wraps(start_u, end_u, sampling_info.u_periodic, sampling_info.u_period);
+    wrap_v = prc_surface_axis_wraps(start_v, end_v, sampling_info.v_periodic, sampling_info.v_period);
     vertex_samples_u = wrap_u ? (num_samples_u - 1) : num_samples_u;
     vertex_samples_v = wrap_v ? (num_samples_v - 1) : num_samples_v;
     cell_count_u = wrap_u ? vertex_samples_u : (vertex_samples_u - 1);
     cell_count_v = wrap_v ? vertex_samples_v : (vertex_samples_v - 1);
 
-    /* Now we need to do a tesselation of the surface_eval_func across the start_u, end_u,
-       start_v, end_v domain.  The surface_eval_func will return 3D vectors.  Note that
-       the range may wrap around (for example 0 maps to 2pi) so we need to check the edges
-       of the domain to see if that gets us to the same values (or very close).  For each
-       triangle we can do a linearity check to see if that triangle needs to be further
-       subdivided.  Once we have sufficiently sampled the domain to get a small error in
-       the range then we can go head and create the tessellation */
     while (!surface_approx_good)
     {
         uint32_t i, j;
@@ -6311,9 +6438,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                     double u0 = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                     double u1 = prc_get_surface_param(start_u, end_u, next_i, vertex_samples_u, wrap_u);
                     double v = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
-                    prc_vec3 p0 = surface_eval_func(ctx, &surf_params, u0, v);
-                    prc_vec3 p1 = surface_eval_func(ctx, &surf_params, u1, v);
-                    prc_vec3 mid = surface_eval_func(ctx, &surf_params, 0.5 * (u0 + u1), v);
+                    prc_vec3 p0 = surface_eval_func(ctx, surf_params, u0, v);
+                    prc_vec3 p1 = surface_eval_func(ctx, surf_params, u1, v);
+                    prc_vec3 mid = surface_eval_func(ctx, surf_params, 0.5 * (u0 + u1), v);
                     prc_vec3 seg_mid;
 
                     seg_mid.x = 0.5 * (p0.x + p1.x);
@@ -6342,9 +6469,9 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                     double u = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                     double v0 = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
                     double v1 = prc_get_surface_param(start_v, end_v, next_j, vertex_samples_v, wrap_v);
-                    prc_vec3 p0 = surface_eval_func(ctx, &surf_params, u, v0);
-                    prc_vec3 p1 = surface_eval_func(ctx, &surf_params, u, v1);
-                    prc_vec3 mid = surface_eval_func(ctx, &surf_params, u, 0.5 * (v0 + v1));
+                    prc_vec3 p0 = surface_eval_func(ctx, surf_params, u, v0);
+                    prc_vec3 p1 = surface_eval_func(ctx, surf_params, u, v1);
+                    prc_vec3 mid = surface_eval_func(ctx, surf_params, u, 0.5 * (v0 + v1));
                     prc_vec3 seg_mid;
 
                     seg_mid.x = 0.5 * (p0.x + p1.x);
@@ -6386,75 +6513,17 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
         }
     }
 
-    /* Per-surface developer trace. Gated, and on stderr rather than stdout:
-       it fired 7171 times over a 310-file corpus, and being on stdout it
-       corrupts any consumer that emits machine-readable output there -- it
-       was found by it landing in the middle of a generated CSV. The env
-       lookup is cached so the hot path pays one getenv for the whole run,
-       mirroring prc_debug_hooks_init in prc_decode_compressed_tess.c, and
-       the whole hook compiles out when PRC_ENABLE_DIAG_ENV is OFF.
-       Set PRC_DIAG_TESSELLATE_SURFACE=1 to get the old always-on output. */
+    grid_out->vertex_samples_u = vertex_samples_u;
+    grid_out->vertex_samples_v = vertex_samples_v;
+    grid_out->wrap_u = wrap_u;
+    grid_out->wrap_v = wrap_v;
+    grid_out->uv = (prc_vec2 *)prc_calloc(ctx, vertex_samples_u * vertex_samples_v, sizeof(prc_vec2));
+    grid_out->verts = (prc_exact_geom_vertex *)prc_calloc(ctx, vertex_samples_u * vertex_samples_v, sizeof(prc_exact_geom_vertex));
+    if (grid_out->uv == NULL || grid_out->verts == NULL)
     {
-        static int surf_trace_read = 0;
-        static int surf_trace_on = 0;
-
-        if (!surf_trace_read)
-        {
-            const char *v = prc_diag_getenv("PRC_DIAG_TESSELLATE_SURFACE");
-            surf_trace_read = 1;
-            surf_trace_on = (v != NULL && v[0] != 0 && v[0] != '0');
-        }
-
-        if (surf_trace_on)
-            fprintf(stderr, "prc_tessellate_surface: surface_type=%u orientation=%u wrap_u=%u wrap_v=%u u_linear=%u v_linear=%u num_samples_u=%u num_samples_v=%u vertex_samples_u=%u vertex_samples_v=%u cell_count_u=%u cell_count_v=%u start_u=%f end_u=%f start_v=%f end_v=%f\n",
-                topo_face->surface_geometry.surface.surface_type,
-                orientation,
-                wrap_u,
-                wrap_v,
-                sampling_info.u_linear,
-                sampling_info.v_linear,
-                num_samples_u,
-                num_samples_v,
-                vertex_samples_u,
-                vertex_samples_v,
-                cell_count_u,
-                cell_count_v,
-                start_u,
-                end_u,
-                start_v,
-                end_v);
-    }
-
-    /* At this point we have the tessellation data */
-    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
-        (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
-    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_surface\n");
-        return PRC_ERROR_MEMORY;
-    }
-
-    prc_exact_geom_tess_data *tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
-    tess_data->number_of_vertices = vertex_samples_u * vertex_samples_v;
-    tess_data->vertices =
-        (prc_exact_geom_vertex *)prc_calloc(ctx,
-            tess_data->number_of_vertices,
-            sizeof(prc_exact_geom_vertex));
-    if (tess_data->vertices == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data vertices in prc_tessellate_surface\n");
-        return PRC_ERROR_MEMORY;
-    }
-
-    tess_data->number_of_triangles =
-        cell_count_u * cell_count_v * 2;
-    tess_data->triangles =
-        (uint32_t *)prc_calloc(ctx,
-            tess_data->number_of_triangles * 3,
-            sizeof(uint32_t));
-    if (tess_data->triangles == NULL)
-    {
-        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data triangles in prc_tessellate_surface\n");
+        prc_free(ctx, grid_out->uv);
+        prc_free(ctx, grid_out->verts);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure in prc_build_regular_grid\n");
         return PRC_ERROR_MEMORY;
     }
 
@@ -6464,7 +6533,6 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
             (double)(wrap_u ? vertex_samples_u : (vertex_samples_u - 1)) : 1.0;
         double dv = (vertex_samples_v > 1) ? fabs(end_v - start_v) /
             (double)(wrap_v ? vertex_samples_v : (vertex_samples_v - 1)) : 1.0;
-        uint32_t triangle_index = 0;
 
         for (j = 0; j < vertex_samples_v; j++)
         {
@@ -6476,59 +6544,1487 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                 double u = prc_get_surface_param(start_u, end_u, i, vertex_samples_u, wrap_u);
                 double v = prc_get_surface_param(start_v, end_v, j, vertex_samples_v, wrap_v);
 
-                position = surface_eval_func(ctx, &surf_params, u, v);
+                position = surface_eval_func(ctx, surf_params, u, v);
 
-                code = prc_compute_surface_normal(ctx, surface_eval_func, &surf_params,
+                code = prc_compute_surface_normal(ctx, surface_eval_func, surf_params,
                     u, v, du, dv, start_u, end_u, start_v, end_v, &sampling_info,
                     orientation, &normal);
                 if (code < 0)
                 {
+                    prc_free(ctx, grid_out->uv);
+                    prc_free(ctx, grid_out->verts);
                     return code;
                 }
 
-                tess_data->vertices[vertex_index].position[0] = (float)position.x;
-                tess_data->vertices[vertex_index].position[1] = (float)position.y;
-                tess_data->vertices[vertex_index].position[2] = (float)position.z;
-                tess_data->vertices[vertex_index].normal[0] = (float)normal.x;
-                tess_data->vertices[vertex_index].normal[1] = (float)normal.y;
-                tess_data->vertices[vertex_index].normal[2] = (float)normal.z;
+                grid_out->uv[vertex_index].x = u;
+                grid_out->uv[vertex_index].y = v;
+                grid_out->verts[vertex_index].position[0] = (float)position.x;
+                grid_out->verts[vertex_index].position[1] = (float)position.y;
+                grid_out->verts[vertex_index].position[2] = (float)position.z;
+                grid_out->verts[vertex_index].normal[0] = (float)normal.x;
+                grid_out->verts[vertex_index].normal[1] = (float)normal.y;
+                grid_out->verts[vertex_index].normal[2] = (float)normal.z;
             }
+        }
+    }
+
+    return 0;
+}
+
+/* Emits the standard 2-triangles-per-cell tessellation of every cell in a
+   regular grid (the untrimmed case, where every cell is kept) */
+static int
+prc_emit_grid_all_triangles(prc_context *ctx, const prc_regular_grid *grid, uint8_t orientation,
+    uint32_t **triangles_out, uint32_t *num_triangles_out)
+{
+    uint32_t cell_count_u = grid->wrap_u ? grid->vertex_samples_u : (grid->vertex_samples_u - 1);
+    uint32_t cell_count_v = grid->wrap_v ? grid->vertex_samples_v : (grid->vertex_samples_v - 1);
+    uint32_t *triangles;
+    uint32_t triangle_index = 0;
+    uint32_t i, j;
+
+    triangles = (uint32_t *)prc_calloc(ctx, cell_count_u * cell_count_v * 6, sizeof(uint32_t));
+    if (triangles == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure in prc_emit_grid_all_triangles\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    for (j = 0; j < cell_count_v; j++)
+    {
+        for (i = 0; i < cell_count_u; i++)
+        {
+            uint32_t next_i = (i + 1 == grid->vertex_samples_u && grid->wrap_u) ? 0 : (i + 1);
+            uint32_t next_j = (j + 1 == grid->vertex_samples_v && grid->wrap_v) ? 0 : (j + 1);
+            uint32_t i00 = j * grid->vertex_samples_u + i;
+            uint32_t i10 = j * grid->vertex_samples_u + next_i;
+            uint32_t i01 = next_j * grid->vertex_samples_u + i;
+            uint32_t i11 = next_j * grid->vertex_samples_u + next_i;
+
+            if (orientation == 0)
+            {
+                triangles[triangle_index++] = i00;
+                triangles[triangle_index++] = i01;
+                triangles[triangle_index++] = i10;
+                triangles[triangle_index++] = i10;
+                triangles[triangle_index++] = i01;
+                triangles[triangle_index++] = i11;
+            }
+            else
+            {
+                triangles[triangle_index++] = i00;
+                triangles[triangle_index++] = i10;
+                triangles[triangle_index++] = i01;
+                triangles[triangle_index++] = i10;
+                triangles[triangle_index++] = i11;
+                triangles[triangle_index++] = i01;
+            }
+        }
+    }
+
+    *triangles_out = triangles;
+    *num_triangles_out = cell_count_u * cell_count_v * 2;
+    return 0;
+}
+
+/* Finds where a loop that winds once around uv axis wrap_axis crosses the
+   query point's own coordinate on that axis, and reports whether the query
+   point is on the loop's material side there (interior-on-the-left
+   convention -- see prc_build_periodic_outer_loop) */
+static int
+prc_wrapping_loop_side(const prc_loop_samples *loop, uint8_t wrap_axis, int32_t wind, prc_vec2 q)
+{
+    uint32_t count = (loop->num_samples > 0) ? (loop->num_samples - 1) : 0;
+    double a_first, a_last, period, mid, qa, qa_shifted, qb;
+    uint32_t i;
+
+    if (count < 2)
+        return 1;
+
+    a_first = wrap_axis ? loop->uv_samples[0].y : loop->uv_samples[0].x;
+    a_last = wrap_axis ? loop->uv_samples[count].y : loop->uv_samples[count].x;
+    period = fabs(a_last - a_first);
+    if (period <= 0.0)
+        return 1;
+
+    mid = (a_first + a_last) / 2.0;
+    qa = wrap_axis ? q.y : q.x;
+    qb = wrap_axis ? q.x : q.y;
+    qa_shifted = qa + period * (double)lround((mid - qa) / period);
+
+    for (i = 0; i < count; i++)
+    {
+        double ai = wrap_axis ? loop->uv_samples[i].y : loop->uv_samples[i].x;
+        double bi = wrap_axis ? loop->uv_samples[i].x : loop->uv_samples[i].y;
+        double ai1 = wrap_axis ? loop->uv_samples[i + 1].y : loop->uv_samples[i + 1].x;
+        double bi1 = wrap_axis ? loop->uv_samples[i + 1].x : loop->uv_samples[i + 1].y;
+
+        if ((ai <= qa_shifted && qa_shifted <= ai1) || (ai1 <= qa_shifted && qa_shifted <= ai))
+        {
+            double t = (ai1 != ai) ? (qa_shifted - ai) / (ai1 - ai) : 0.0;
+            double b_curve = bi + t * (bi1 - bi);
+
+            return (wind > 0) ? (qb > b_curve) : (qb < b_curve);
+        }
+    }
+
+    /* No bracketing segment found (shouldn't happen for a loop spanning a
+       full period) -- fall back to comparing against the nearest endpoint */
+    {
+        double b_curve = (fabs(qa_shifted - a_first) < fabs(qa_shifted - a_last)) ?
+            (wrap_axis ? loop->uv_samples[0].x : loop->uv_samples[0].y) :
+            (wrap_axis ? loop->uv_samples[count].x : loop->uv_samples[count].y);
+
+        return (wind > 0) ? (qb > b_curve) : (qb < b_curve);
+    }
+}
+
+/* Whether uv point q lies inside the region a face's loop(s) bound.
+   Non-wrapping loops use point-in-polygon nesting (inside an outer loop,
+   outside every hole loop); a loop that winds once around a periodic axis
+   instead divides the surface along that axis, classified via
+   prc_wrapping_loop_side. Multiple loops simply AND together */
+static int
+prc_point_inside_trimmed_region(uint32_t num_loops, const prc_loop_samples *loop_samples, prc_vec2 q)
+{
+    uint32_t k;
+
+    for (k = 0; k < num_loops; k++)
+    {
+        const prc_loop_samples *loop = &loop_samples[k];
+        uint32_t count = (loop->num_samples > 0) ? (loop->num_samples - 1) : 0;
+
+        if (loop->wind_u != 0 || loop->wind_v != 0)
+        {
+            uint8_t wrap_axis = (loop->wind_u != 0) ? 0 : 1;
+            int32_t wind = wrap_axis ? loop->wind_v : loop->wind_u;
+
+            if (!prc_wrapping_loop_side(loop, wrap_axis, wind, q))
+                return 0;
+        }
+        else if (count >= 3)
+        {
+            int contains = prc_uv_point_in_polygon(q, count, loop->uv_samples);
+
+            if (loop->is_outer_loop)
+            {
+                if (!contains)
+                    return 0;
+            }
+            else if (contains)
+            {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
+static int32_t
+prc_wrap_cell_index(int32_t idx, uint32_t cell_count, uint8_t wraps)
+{
+    if (wraps)
+    {
+        int32_t m = (int32_t)cell_count;
+
+        return ((idx % m) + m) % m;
+    }
+    if (idx < 0 || idx >= (int32_t)cell_count)
+        return -1;
+    return idx;
+}
+
+/* Traces the boundary/boundaries of the "kept" (fully inside) cells of a
+   classified regular grid, marching-squares style: any cell edge whose
+   neighboring cell is either out of range (a true domain edge) or not kept
+   is a boundary edge; those edges are stitched end-to-end into one or more
+   closed polylines. Returns each traced polyline as a prc_loop_samples
+   (caller owns and must free each entry's uv_samples, and the array itself) */
+static int
+prc_trace_kept_region_boundaries(prc_context *ctx, const uint8_t *cell_inside,
+    uint32_t vertex_samples_u, uint32_t vertex_samples_v, uint8_t wrap_u, uint8_t wrap_v,
+    const prc_vec2 *grid_uv, prc_loop_samples **out_loops, uint32_t *out_num_loops)
+{
+    uint32_t cell_count_u = wrap_u ? vertex_samples_u : (vertex_samples_u - 1);
+    uint32_t cell_count_v = wrap_v ? vertex_samples_v : (vertex_samples_v - 1);
+    uint32_t num_verts = vertex_samples_u * vertex_samples_v;
+    uint32_t i, j, k;
+    prc_uint32_pair *edges;
+    uint32_t num_edges = 0, edges_cap;
+    uint32_t *adj0, *adj1;
+    uint8_t *visited;
+    prc_loop_samples *loops = NULL;
+    uint32_t num_loops = 0, loops_cap = 0;
+
+    edges_cap = cell_count_u * cell_count_v * 4 + 4;
+    edges = (prc_uint32_pair *)prc_calloc(ctx, edges_cap, sizeof(prc_uint32_pair));
+    if (edges == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate edges in prc_trace_kept_region_boundaries\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    for (j = 0; j < cell_count_v; j++)
+    {
+        for (i = 0; i < cell_count_u; i++)
+        {
+            uint32_t vnext_i, vnext_j;
+            int32_t ni_left, ni_right, nj_below, nj_above;
+
+            if (!cell_inside[j * cell_count_u + i])
+                continue;
+
+            vnext_i = (i + 1 == vertex_samples_u && wrap_u) ? 0 : (i + 1);
+            vnext_j = (j + 1 == vertex_samples_v && wrap_v) ? 0 : (j + 1);
+
+            nj_below = prc_wrap_cell_index((int32_t)j - 1, cell_count_v, wrap_v);
+            if (nj_below < 0 || !cell_inside[(uint32_t)nj_below * cell_count_u + i])
+            {
+                edges[num_edges].a = j * vertex_samples_u + i;
+                edges[num_edges].b = j * vertex_samples_u + vnext_i;
+                num_edges++;
+            }
+
+            nj_above = prc_wrap_cell_index((int32_t)j + 1, cell_count_v, wrap_v);
+            if (nj_above < 0 || !cell_inside[(uint32_t)nj_above * cell_count_u + i])
+            {
+                edges[num_edges].a = vnext_j * vertex_samples_u + vnext_i;
+                edges[num_edges].b = vnext_j * vertex_samples_u + i;
+                num_edges++;
+            }
+
+            ni_left = prc_wrap_cell_index((int32_t)i - 1, cell_count_u, wrap_u);
+            if (ni_left < 0 || !cell_inside[j * cell_count_u + (uint32_t)ni_left])
+            {
+                edges[num_edges].a = vnext_j * vertex_samples_u + i;
+                edges[num_edges].b = j * vertex_samples_u + i;
+                num_edges++;
+            }
+
+            ni_right = prc_wrap_cell_index((int32_t)i + 1, cell_count_u, wrap_u);
+            if (ni_right < 0 || !cell_inside[j * cell_count_u + (uint32_t)ni_right])
+            {
+                edges[num_edges].a = j * vertex_samples_u + vnext_i;
+                edges[num_edges].b = vnext_j * vertex_samples_u + vnext_i;
+                num_edges++;
+            }
+        }
+    }
+
+    if (num_edges == 0)
+    {
+        prc_free(ctx, edges);
+        *out_loops = NULL;
+        *out_num_loops = 0;
+        return 0;
+    }
+
+    adj0 = (uint32_t *)prc_calloc(ctx, num_verts, sizeof(uint32_t));
+    adj1 = (uint32_t *)prc_calloc(ctx, num_verts, sizeof(uint32_t));
+    visited = (uint8_t *)prc_calloc(ctx, num_edges, sizeof(uint8_t));
+    if (adj0 == NULL || adj1 == NULL || visited == NULL)
+    {
+        prc_free(ctx, edges);
+        prc_free(ctx, adj0);
+        prc_free(ctx, adj1);
+        prc_free(ctx, visited);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate adjacency in prc_trace_kept_region_boundaries\n");
+        return PRC_ERROR_MEMORY;
+    }
+    for (k = 0; k < num_verts; k++)
+    {
+        adj0[k] = (uint32_t)-1;
+        adj1[k] = (uint32_t)-1;
+    }
+    for (k = 0; k < num_edges; k++)
+    {
+        uint32_t a = edges[k].a, b = edges[k].b;
+
+        if (adj0[a] == (uint32_t)-1)
+            adj0[a] = k;
+        else
+            adj1[a] = k;
+        if (adj0[b] == (uint32_t)-1)
+            adj0[b] = k;
+        else
+            adj1[b] = k;
+    }
+
+    for (k = 0; k < num_edges; k++)
+    {
+        uint32_t start, cur_vert, cur_edge;
+        prc_vec2 *path = NULL;
+        uint32_t path_len = 0, path_cap = 0;
+
+        if (visited[k])
+            continue;
+
+        start = edges[k].a;
+        cur_vert = edges[k].a;
+        cur_edge = k;
+
+        for (;;)
+        {
+            uint32_t other = (edges[cur_edge].a == cur_vert) ? edges[cur_edge].b : edges[cur_edge].a;
+            uint32_t e0, e1, next_edge;
+
+            visited[cur_edge] = 1;
+
+            if (path_len + 1 > path_cap)
+            {
+                uint32_t new_cap = path_cap ? path_cap * 2 : 16;
+                prc_vec2 *new_path = (prc_vec2 *)prc_realloc(ctx, path, new_cap * sizeof(prc_vec2));
+
+                if (new_path == NULL)
+                {
+                    prc_free(ctx, path);
+                    prc_free(ctx, edges);
+                    prc_free(ctx, adj0);
+                    prc_free(ctx, adj1);
+                    prc_free(ctx, visited);
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow traced path in prc_trace_kept_region_boundaries\n");
+                    return PRC_ERROR_MEMORY;
+                }
+                path = new_path;
+                path_cap = new_cap;
+            }
+            path[path_len++] = grid_uv[cur_vert];
+
+            cur_vert = other;
+            if (cur_vert == start)
+                break;
+
+            e0 = adj0[cur_vert];
+            e1 = adj1[cur_vert];
+            next_edge = (e0 != cur_edge && !visited[e0]) ? e0 :
+                        (e1 != (uint32_t)-1 && e1 != cur_edge && !visited[e1]) ? e1 : (uint32_t)-1;
+            if (next_edge == (uint32_t)-1)
+                break;   /* not a clean manifold boundary; stop this loop early rather than spin forever */
+            cur_edge = next_edge;
+        }
+
+        if (path_len >= 3)
+        {
+            if (num_loops + 1 > loops_cap)
+            {
+                uint32_t new_cap = loops_cap ? loops_cap * 2 : 4;
+                prc_loop_samples *new_loops = (prc_loop_samples *)prc_realloc(ctx, loops, new_cap * sizeof(prc_loop_samples));
+
+                if (new_loops == NULL)
+                {
+                    prc_free(ctx, path);
+                    prc_free(ctx, edges);
+                    prc_free(ctx, adj0);
+                    prc_free(ctx, adj1);
+                    prc_free(ctx, visited);
+                    prc_free(ctx, loops);
+                    prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow traced loops in prc_trace_kept_region_boundaries\n");
+                    return PRC_ERROR_MEMORY;
+                }
+                loops = new_loops;
+                loops_cap = new_cap;
+            }
+
+            memset(&loops[num_loops], 0, sizeof(prc_loop_samples));
+            loops[num_loops].num_samples = path_len + 1;
+            loops[num_loops].uv_samples = (prc_vec2 *)prc_calloc(ctx, path_len + 1, sizeof(prc_vec2));
+            if (loops[num_loops].uv_samples == NULL)
+            {
+                prc_free(ctx, path);
+                prc_free(ctx, edges);
+                prc_free(ctx, adj0);
+                prc_free(ctx, adj1);
+                prc_free(ctx, visited);
+                prc_free(ctx, loops);
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate traced loop uv in prc_trace_kept_region_boundaries\n");
+                return PRC_ERROR_MEMORY;
+            }
+            memcpy(loops[num_loops].uv_samples, path, path_len * sizeof(prc_vec2));
+            loops[num_loops].uv_samples[path_len] = path[0];
+            num_loops++;
+        }
+
+        prc_free(ctx, path);
+    }
+
+    prc_free(ctx, edges);
+    prc_free(ctx, adj0);
+    prc_free(ctx, adj1);
+    prc_free(ctx, visited);
+
+    *out_loops = loops;
+    *out_num_loops = num_loops;
+
+    return 0;
+}
+
+static void
+prc_free_loop_array(prc_context *ctx, prc_loop_samples *loops, uint32_t count)
+{
+    uint32_t k;
+
+    if (loops == NULL)
+        return;
+    for (k = 0; k < count; k++)
+        prc_free(ctx, loops[k].uv_samples);
+    prc_free(ctx, loops);
+}
+
+/* Assembles the outer boundary for a face whose loop(s) wind around a
+   periodic uv axis (wrap_axis: 0 = u, 1 = v) into one flat, ordinary uv
+   polygon by cutting a synthetic seam, so it can be handed to the same
+   ear-clip machinery used for planar outer loops. Handles the two shapes
+   this can take:
+     - a single wrapping loop, closed off against the surface's own natural
+       domain edge on the other axis (e.g. a cylinder trimmed at one rim
+       only, still bounded by the surface's actual v extent on the other
+       side)
+     - two loops winding oppositely around the same axis, bridged directly
+       to each other with no natural domain edge involved (a band trimmed
+       by two rims, e.g. the middle section of a cylinder)
+   The seam itself becomes a real (if thin) edge of the output mesh, the
+   same trade-off the existing hole-bridging code already makes. Caller owns
+   and must free outer_loop_out->uv_samples */
+static int
+prc_build_periodic_outer_loop(prc_context *ctx, uint32_t num_loops, prc_loop_samples *loop_samples,
+    uint8_t wrap_axis, const prc_surface_sampling_info *sampling_info,
+    prc_loop_samples *outer_loop_out)
+{
+    uint32_t k;
+    uint32_t wrap_indices[2];
+    uint32_t num_wrap = 0;
+    uint32_t count_a;
+    prc_vec2 *combined = NULL;
+    uint32_t combined_count = 0;
+
+    for (k = 0; k < num_loops; k++)
+    {
+        int32_t wind = wrap_axis ? loop_samples[k].wind_v : loop_samples[k].wind_u;
+
+        if (wind != 0)
+        {
+            if (num_wrap >= 2)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Too many wrapping loops in prc_build_periodic_outer_loop\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            wrap_indices[num_wrap++] = k;
+        }
+    }
+
+    if (num_wrap == 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "No wrapping loop in prc_build_periodic_outer_loop\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    count_a = (loop_samples[wrap_indices[0]].num_samples > 0) ? (loop_samples[wrap_indices[0]].num_samples - 1) : 0;
+    if (count_a < 2)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Degenerate wrapping loop in prc_build_periodic_outer_loop\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    if (num_wrap == 2)
+    {
+        uint32_t idx_b = wrap_indices[1];
+        uint32_t count_b = (loop_samples[idx_b].num_samples > 0) ? (loop_samples[idx_b].num_samples - 1) : 0;
+        double a_end_a, a_start_b, shift;
+        uint32_t j;
+
+        if (count_b < 2)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Degenerate wrapping loop in prc_build_periodic_outer_loop\n");
+            return PRC_ERROR_INTERNAL;
+        }
+
+        /* Align loop B into the same unwrapped coordinate frame as loop A
+           (each was unwrapped independently, starting from its own first
+           sample) so the two meet up at a short seam instead of at
+           arbitrary, independently-chosen angle offsets */
+        a_end_a = wrap_axis ? loop_samples[wrap_indices[0]].uv_samples[count_a].y
+                             : loop_samples[wrap_indices[0]].uv_samples[count_a].x;
+        a_start_b = wrap_axis ? loop_samples[idx_b].uv_samples[0].y : loop_samples[idx_b].uv_samples[0].x;
+        shift = a_end_a - a_start_b;
+
+        combined_count = count_a + count_b;
+        combined = (prc_vec2 *)prc_calloc(ctx, combined_count, sizeof(prc_vec2));
+        if (combined == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate combined seam ring in prc_build_periodic_outer_loop\n");
+            return PRC_ERROR_MEMORY;
+        }
+
+        for (j = 0; j < count_a; j++)
+            combined[j] = loop_samples[wrap_indices[0]].uv_samples[j];
+        for (j = 0; j < count_b; j++)
+        {
+            prc_vec2 p = loop_samples[idx_b].uv_samples[j];
+
+            if (wrap_axis)
+                p.y += shift;
+            else
+                p.x += shift;
+            combined[count_a + j] = p;
+        }
+    }
+    else /* num_wrap == 1: close against the surface's natural domain edge */
+    {
+        int32_t wind = wrap_axis ? loop_samples[wrap_indices[0]].wind_v : loop_samples[wrap_indices[0]].wind_u;
+        double edge_b, a_start, a_end;
+        uint32_t j;
+
+        /* Interior-on-left convention (walking the loop in its sampled
+           direction, material is on the left in the uv plane): travelling
+           in the increasing direction on the wrap axis puts the interior on
+           the side of the larger-valued domain edge on the other axis, and
+           vice versa. This relies on loop sample direction matching the
+           standard B-rep convention, which prc_sample_loop does not yet
+           fully guarantee (prc_sample_coedge ignores coedge_orientation) --
+           flip this rule if a real file comes out trimmed to the wrong side */
+        edge_b = (wind > 0) ? (wrap_axis ? sampling_info->end_u : sampling_info->end_v)
+                             : (wrap_axis ? sampling_info->start_u : sampling_info->start_v);
+
+        a_start = wrap_axis ? loop_samples[wrap_indices[0]].uv_samples[0].y : loop_samples[wrap_indices[0]].uv_samples[0].x;
+        a_end = wrap_axis ? loop_samples[wrap_indices[0]].uv_samples[count_a].y : loop_samples[wrap_indices[0]].uv_samples[count_a].x;
+
+        combined_count = count_a + 2;
+        combined = (prc_vec2 *)prc_calloc(ctx, combined_count, sizeof(prc_vec2));
+        if (combined == NULL)
+        {
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate combined seam ring in prc_build_periodic_outer_loop\n");
+            return PRC_ERROR_MEMORY;
+        }
+
+        for (j = 0; j < count_a; j++)
+            combined[j] = loop_samples[wrap_indices[0]].uv_samples[j];
+
+        /* The two synthetic corners closing the ring against the domain edge */
+        if (wrap_axis)
+        {
+            combined[count_a].x = edge_b;
+            combined[count_a].y = a_end;
+            combined[count_a + 1].x = edge_b;
+            combined[count_a + 1].y = a_start;
+        }
+        else
+        {
+            combined[count_a].x = a_end;
+            combined[count_a].y = edge_b;
+            combined[count_a + 1].x = a_start;
+            combined[count_a + 1].y = edge_b;
+        }
+    }
+
+    memset(outer_loop_out, 0, sizeof(*outer_loop_out));
+    outer_loop_out->num_samples = combined_count + 1;   /* +1 re-duplicates the closing point, matching prc_sample_loop's convention */
+    outer_loop_out->uv_samples = (prc_vec2 *)prc_calloc(ctx, outer_loop_out->num_samples, sizeof(prc_vec2));
+    if (outer_loop_out->uv_samples == NULL)
+    {
+        prc_free(ctx, combined);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate outer loop uv_samples in prc_build_periodic_outer_loop\n");
+        return PRC_ERROR_MEMORY;
+    }
+    memcpy(outer_loop_out->uv_samples, combined, combined_count * sizeof(prc_vec2));
+    outer_loop_out->uv_samples[combined_count] = combined[0];
+    outer_loop_out->is_outer_loop = 1;
+
+    prc_free(ctx, combined);
+
+    return 0;
+}
+
+/* Tessellates a curved (Cone/Cylinder/Sphere/Torus) face bounded by loop(s),
+   whether a genuine simple closed trim polygon or a loop that winds around a
+   periodic uv axis (degenerating to a line rather than an enclosed area in
+   uv space, e.g. a circle around a cylinder's circumference). Rather than
+   triangulating just the loop boundary (which can leave a few large
+   ear-clip triangles cutting straight across a curved shape), this
+   tessellates the FULL regular surface grid as usual, keeps whichever grid
+   cells fall entirely inside the trimmed region, and ear-clip-fills only the
+   thin fringe strip between the kept grid and the true trim boundary. The
+   same building blocks (prc_build_regular_grid + prc_point_inside_trimmed_
+   region) are general enough to later "cut" an already-tessellated surface,
+   not just build a trimmed one from scratch */
+static int
+prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_index,
+    uint32_t face_index, uint32_t geom_count, uint8_t orientation,
+    surface_func surface_eval_func, prc_surface_params *surf_params,
+    const prc_surface_sampling_info *sampling_info,
+    uint32_t num_loops, prc_loop_samples *loop_samples, uint8_t has_wrapping_loop, uint8_t wrap_axis)
+{
+    prc_regular_grid grid = { 0 };
+    uint8_t *cell_inside = NULL;
+    uint32_t cell_count_u, cell_count_v, i, j, k;
+    uint32_t *kept_triangles = NULL;
+    uint32_t num_kept_triangles = 0;
+    prc_loop_samples *traced_loops = NULL;
+    uint32_t num_traced = 0;
+    prc_loop_samples true_outer_loop = { 0 };
+    uint32_t true_outer_index = (uint32_t)-1;
+    prc_loop_samples *combined_loops = NULL;
+    uint32_t combined_num_loops;
+    uint32_t idx;
+    prc_vec2 *fringe_poly_verts = NULL;
+    uint32_t fringe_poly_num_verts = 0;
+    uint32_t *fringe_poly_triangles = NULL;
+    uint32_t fringe_poly_num_triangles = 0;
+    prc_vec2 *fringe_verts = NULL;
+    uint32_t fringe_num_verts = 0, fringe_verts_cap = 0;
+    uint32_t *fringe_triangles = NULL;
+    uint32_t fringe_num_triangles = 0, fringe_tris_cap = 0;
+    double tolerance;
+    prc_exact_geom_tess_data *tess_data;
+    uint32_t total_verts, total_triangles, grid_num_verts;
+    uint32_t v, t;
+    int code;
+
+    code = prc_build_regular_grid(ctx, surface_eval_func, surf_params, sampling_info, orientation, &grid);
+    if (code < 0)
+        return code;
+    grid_num_verts = grid.vertex_samples_u * grid.vertex_samples_v;
+
+    cell_count_u = grid.wrap_u ? grid.vertex_samples_u : (grid.vertex_samples_u - 1);
+    cell_count_v = grid.wrap_v ? grid.vertex_samples_v : (grid.vertex_samples_v - 1);
+
+    {
+        uint8_t *cell_inside_raw = (uint8_t *)prc_calloc(ctx, cell_count_u * cell_count_v, sizeof(uint8_t));
+
+        cell_inside = (uint8_t *)prc_calloc(ctx, cell_count_u * cell_count_v, sizeof(uint8_t));
+        kept_triangles = (uint32_t *)prc_calloc(ctx, cell_count_u * cell_count_v * 6, sizeof(uint32_t));
+        if (cell_inside_raw == NULL || cell_inside == NULL || kept_triangles == NULL)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, grid.verts);
+            prc_free(ctx, cell_inside_raw);
+            prc_free(ctx, cell_inside);
+            prc_free(ctx, kept_triangles);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure in prc_tessellate_trimmed_face\n");
+            return PRC_ERROR_MEMORY;
         }
 
         for (j = 0; j < cell_count_v; j++)
         {
             for (i = 0; i < cell_count_u; i++)
             {
-                uint32_t next_i = (i + 1 == vertex_samples_u && wrap_u) ? 0 : (i + 1);
-                uint32_t next_j = (j + 1 == vertex_samples_v && wrap_v) ? 0 : (j + 1);
-                uint32_t i00 = j * vertex_samples_u + i;
-                uint32_t i10 = j * vertex_samples_u + next_i;
-                uint32_t i01 = next_j * vertex_samples_u + i;
-                uint32_t i11 = next_j * vertex_samples_u + next_i;
-                uint32_t *triangles = tess_data->triangles;
+                uint32_t vnext_i = (i + 1 == grid.vertex_samples_u && grid.wrap_u) ? 0 : (i + 1);
+                uint32_t vnext_j = (j + 1 == grid.vertex_samples_v && grid.wrap_v) ? 0 : (j + 1);
+                uint32_t i00 = j * grid.vertex_samples_u + i;
+                uint32_t i10 = j * grid.vertex_samples_u + vnext_i;
+                uint32_t i11 = vnext_j * grid.vertex_samples_u + vnext_i;
+                uint32_t i01 = vnext_j * grid.vertex_samples_u + i;
+
+                if (prc_point_inside_trimmed_region(num_loops, loop_samples, grid.uv[i00]) &&
+                    prc_point_inside_trimmed_region(num_loops, loop_samples, grid.uv[i10]) &&
+                    prc_point_inside_trimmed_region(num_loops, loop_samples, grid.uv[i11]) &&
+                    prc_point_inside_trimmed_region(num_loops, loop_samples, grid.uv[i01]))
+                {
+                    cell_inside_raw[j * cell_count_u + i] = 1;
+                }
+            }
+        }
+
+        /* Erode the raw classification by one cell in every direction (any
+           cell touching a non-kept neighbor, or the true domain edge, is
+           excluded) so the kept region's traced outline is always at least
+           one cell away from both the true trim boundary and the surface's
+           own natural domain edge. Without this, a face whose surface
+           domain happens to already match its trim loop (common -- e.g. a
+           1/8 torus authored with that as the surface's own domain box)
+           leaves an almost-zero-width fringe: the traced outline and the
+           true loop become nearly coincident, which is exactly the
+           degenerate near-duplicate-collinear-point case that stalls
+           ear-clipping */
+        for (j = 0; j < cell_count_v; j++)
+        {
+            for (i = 0; i < cell_count_u; i++)
+            {
+                if (!cell_inside_raw[j * cell_count_u + i])
+                    continue;
+
+                {
+                    int32_t ni_left = prc_wrap_cell_index((int32_t)i - 1, cell_count_u, grid.wrap_u);
+                    int32_t ni_right = prc_wrap_cell_index((int32_t)i + 1, cell_count_u, grid.wrap_u);
+                    int32_t nj_below = prc_wrap_cell_index((int32_t)j - 1, cell_count_v, grid.wrap_v);
+                    int32_t nj_above = prc_wrap_cell_index((int32_t)j + 1, cell_count_v, grid.wrap_v);
+
+                    if (ni_left >= 0 && ni_right >= 0 && nj_below >= 0 && nj_above >= 0 &&
+                        cell_inside_raw[j * cell_count_u + (uint32_t)ni_left] &&
+                        cell_inside_raw[j * cell_count_u + (uint32_t)ni_right] &&
+                        cell_inside_raw[(uint32_t)nj_below * cell_count_u + i] &&
+                        cell_inside_raw[(uint32_t)nj_above * cell_count_u + i])
+                    {
+                        cell_inside[j * cell_count_u + i] = 1;
+                    }
+                }
+            }
+        }
+        prc_free(ctx, cell_inside_raw);
+    }
+
+    for (j = 0; j < cell_count_v; j++)
+    {
+        for (i = 0; i < cell_count_u; i++)
+        {
+            if (cell_inside[j * cell_count_u + i])
+            {
+                uint32_t vnext_i = (i + 1 == grid.vertex_samples_u && grid.wrap_u) ? 0 : (i + 1);
+                uint32_t vnext_j = (j + 1 == grid.vertex_samples_v && grid.wrap_v) ? 0 : (j + 1);
+                uint32_t i00 = j * grid.vertex_samples_u + i;
+                uint32_t i10 = j * grid.vertex_samples_u + vnext_i;
+                uint32_t i11 = vnext_j * grid.vertex_samples_u + vnext_i;
+                uint32_t i01 = vnext_j * grid.vertex_samples_u + i;
 
                 if (orientation == 0)
                 {
-                    triangles[triangle_index++] = i00;
-                    triangles[triangle_index++] = i01;
-                    triangles[triangle_index++] = i10;
-                    triangles[triangle_index++] = i10;
-                    triangles[triangle_index++] = i01;
-                    triangles[triangle_index++] = i11;
+                    kept_triangles[num_kept_triangles * 3 + 0] = i00;
+                    kept_triangles[num_kept_triangles * 3 + 1] = i01;
+                    kept_triangles[num_kept_triangles * 3 + 2] = i10;
+                    num_kept_triangles++;
+                    kept_triangles[num_kept_triangles * 3 + 0] = i10;
+                    kept_triangles[num_kept_triangles * 3 + 1] = i01;
+                    kept_triangles[num_kept_triangles * 3 + 2] = i11;
+                    num_kept_triangles++;
                 }
                 else
                 {
-                    triangles[triangle_index++] = i00;
-                    triangles[triangle_index++] = i10;
-                    triangles[triangle_index++] = i01;
-                    triangles[triangle_index++] = i10;
-                    triangles[triangle_index++] = i11;
-                    triangles[triangle_index++] = i01;
+                    kept_triangles[num_kept_triangles * 3 + 0] = i00;
+                    kept_triangles[num_kept_triangles * 3 + 1] = i10;
+                    kept_triangles[num_kept_triangles * 3 + 2] = i01;
+                    num_kept_triangles++;
+                    kept_triangles[num_kept_triangles * 3 + 0] = i10;
+                    kept_triangles[num_kept_triangles * 3 + 1] = i11;
+                    kept_triangles[num_kept_triangles * 3 + 2] = i01;
+                    num_kept_triangles++;
                 }
             }
         }
     }
 
+    code = prc_trace_kept_region_boundaries(ctx, cell_inside, grid.vertex_samples_u, grid.vertex_samples_v,
+        grid.wrap_u, grid.wrap_v, grid.uv, &traced_loops, &num_traced);
+    if (code < 0)
+    {
+        prc_free(ctx, grid.uv);
+        prc_free(ctx, grid.verts);
+        prc_free(ctx, cell_inside);
+        prc_free(ctx, kept_triangles);
+        return code;
+    }
+
+    /* True outer boundary for the fringe fill: the surface's own trim loop
+       (already flagged is_outer_loop) for the closed case, or a synthetic
+       seam-cut ring folding the wrapping loop(s) into an ordinary polygon */
+    if (has_wrapping_loop)
+    {
+        code = prc_build_periodic_outer_loop(ctx, num_loops, loop_samples, wrap_axis, sampling_info, &true_outer_loop);
+        if (code < 0)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, grid.verts);
+            prc_free(ctx, cell_inside);
+            prc_free(ctx, kept_triangles);
+            prc_free_loop_array(ctx, traced_loops, num_traced);
+            return code;
+        }
+    }
+    else
+    {
+        for (k = 0; k < num_loops; k++)
+        {
+            if (loop_samples[k].is_outer_loop)
+            {
+                true_outer_loop = loop_samples[k];
+                true_outer_index = k;
+                break;
+            }
+        }
+        if (true_outer_index == (uint32_t)-1)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, grid.verts);
+            prc_free(ctx, cell_inside);
+            prc_free(ctx, kept_triangles);
+            prc_free_loop_array(ctx, traced_loops, num_traced);
+            prc_error(ctx, PRC_ERROR_INTERNAL, "No outer loop found in prc_tessellate_trimmed_face\n");
+            return PRC_ERROR_INTERNAL;
+        }
+    }
+
+    /* Assemble: [true outer ring] + [traced kept-grid outline(s), holes] +
+       [any additional non-wrapping loop not already the outer boundary,
+       also a hole -- e.g. a drilled hole inside the trimmed region] */
+    combined_num_loops = 1 + num_traced;
+    for (k = 0; k < num_loops; k++)
+    {
+        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index)
+            continue;
+        combined_num_loops++;
+    }
+
+    combined_loops = (prc_loop_samples *)prc_calloc(ctx, combined_num_loops, sizeof(prc_loop_samples));
+    if (combined_loops == NULL)
+    {
+        prc_free(ctx, grid.uv);
+        prc_free(ctx, grid.verts);
+        prc_free(ctx, cell_inside);
+        prc_free(ctx, kept_triangles);
+        prc_free_loop_array(ctx, traced_loops, num_traced);
+        if (has_wrapping_loop)
+            prc_free(ctx, true_outer_loop.uv_samples);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate combined loops in prc_tessellate_trimmed_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    combined_loops[0] = true_outer_loop;
+    combined_loops[0].is_outer_loop = 1;
+    idx = 1;
+    for (k = 0; k < num_traced; k++)
+    {
+        combined_loops[idx] = traced_loops[k];
+        combined_loops[idx].is_outer_loop = 0;
+        idx++;
+    }
+    for (k = 0; k < num_loops; k++)
+    {
+        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index)
+            continue;
+        combined_loops[idx] = loop_samples[k];
+        combined_loops[idx].is_outer_loop = 0;
+        idx++;
+    }
+
+    code = prc_triangulate_planar_loops(ctx, combined_num_loops, combined_loops,
+        &fringe_poly_verts, &fringe_poly_num_verts, &fringe_poly_triangles, &fringe_poly_num_triangles);
+    prc_free(ctx, combined_loops);
+    prc_free_loop_array(ctx, traced_loops, num_traced);
+    if (has_wrapping_loop)
+        prc_free(ctx, true_outer_loop.uv_samples);
+    if (code < 0)
+    {
+        prc_free(ctx, grid.uv);
+        prc_free(ctx, grid.verts);
+        prc_free(ctx, cell_inside);
+        prc_free(ctx, kept_triangles);
+        prc_error(ctx, code, "Failed in prc_triangulate_planar_loops\n");
+        return code;
+    }
+
+    tolerance = (sampling_info->precision_u > sampling_info->precision_v) ?
+        sampling_info->precision_u : sampling_info->precision_v;
+
+    for (t = 0; t < fringe_poly_num_triangles; t++)
+    {
+        uint32_t i0 = fringe_poly_triangles[t * 3 + 0];
+        uint32_t i1 = fringe_poly_triangles[t * 3 + 1];
+        uint32_t i2 = fringe_poly_triangles[t * 3 + 2];
+
+        code = prc_subdivide_curved_triangle(ctx, surface_eval_func, surf_params,
+            fringe_poly_verts[i0], fringe_poly_verts[i1], fringe_poly_verts[i2], tolerance, 0,
+            PRC_CURVED_LOOP_SUBDIVIDE_MAX_DEPTH,
+            &fringe_verts, &fringe_num_verts, &fringe_verts_cap,
+            &fringe_triangles, &fringe_num_triangles, &fringe_tris_cap);
+        if (code < 0)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, grid.verts);
+            prc_free(ctx, cell_inside);
+            prc_free(ctx, kept_triangles);
+            prc_free(ctx, fringe_poly_verts);
+            prc_free(ctx, fringe_poly_triangles);
+            prc_free(ctx, fringe_verts);
+            prc_free(ctx, fringe_triangles);
+            return code;
+        }
+    }
+    prc_free(ctx, fringe_poly_verts);
+    prc_free(ctx, fringe_poly_triangles);
+    prc_free(ctx, cell_inside);
+
+    total_verts = grid_num_verts + fringe_num_verts;
+    total_triangles = num_kept_triangles + fringe_num_triangles;
+
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
+        (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
+    if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
+    {
+        prc_free(ctx, grid.uv);
+        prc_free(ctx, grid.verts);
+        prc_free(ctx, kept_triangles);
+        prc_free(ctx, fringe_verts);
+        prc_free(ctx, fringe_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_trimmed_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+    tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
+
+    tess_data->number_of_vertices = total_verts;
+    tess_data->vertices = (prc_exact_geom_vertex *)prc_calloc(ctx, total_verts, sizeof(prc_exact_geom_vertex));
+    if (tess_data->vertices == NULL)
+    {
+        prc_free(ctx, grid.uv);
+        prc_free(ctx, grid.verts);
+        prc_free(ctx, kept_triangles);
+        prc_free(ctx, fringe_verts);
+        prc_free(ctx, fringe_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data vertices in prc_tessellate_trimmed_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+    memcpy(tess_data->vertices, grid.verts, grid_num_verts * sizeof(prc_exact_geom_vertex));
+    prc_free(ctx, grid.verts);
+
+    for (v = 0; v < fringe_num_verts; v++)
+    {
+        prc_vec3 position = surface_eval_func(ctx, surf_params, fringe_verts[v].x, fringe_verts[v].y);
+        prc_vec3 normal;
+
+        code = prc_compute_loop_vertex_normal(ctx, surface_eval_func, surf_params,
+            fringe_verts[v].x, fringe_verts[v].y,
+            sampling_info->precision_u, sampling_info->precision_v,
+            sampling_info, orientation, &normal);
+        if (code < 0)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, kept_triangles);
+            prc_free(ctx, fringe_verts);
+            prc_free(ctx, fringe_triangles);
+            return code;
+        }
+
+        idx = grid_num_verts + v;
+        tess_data->vertices[idx].position[0] = (float)position.x;
+        tess_data->vertices[idx].position[1] = (float)position.y;
+        tess_data->vertices[idx].position[2] = (float)position.z;
+        tess_data->vertices[idx].normal[0] = (float)normal.x;
+        tess_data->vertices[idx].normal[1] = (float)normal.y;
+        tess_data->vertices[idx].normal[2] = (float)normal.z;
+    }
+    prc_free(ctx, grid.uv);
+    prc_free(ctx, fringe_verts);
+
+    tess_data->number_of_triangles = total_triangles;
+    tess_data->triangles = (uint32_t *)prc_calloc(ctx, total_triangles * 3, sizeof(uint32_t));
+    if (tess_data->triangles == NULL)
+    {
+        prc_free(ctx, kept_triangles);
+        prc_free(ctx, fringe_triangles);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data triangles in prc_tessellate_trimmed_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+    memcpy(tess_data->triangles, kept_triangles, num_kept_triangles * 3 * sizeof(uint32_t));
+    prc_free(ctx, kept_triangles);
+
+    for (t = 0; t < fringe_num_triangles; t++)
+    {
+        uint32_t i0 = fringe_triangles[t * 3 + 0] + grid_num_verts;
+        uint32_t i1 = fringe_triangles[t * 3 + 1] + grid_num_verts;
+        uint32_t i2 = fringe_triangles[t * 3 + 2] + grid_num_verts;
+        uint32_t out_idx = (num_kept_triangles + t) * 3;
+
+        if (orientation == 0)
+        {
+            tess_data->triangles[out_idx + 0] = i0;
+            tess_data->triangles[out_idx + 1] = i2;
+            tess_data->triangles[out_idx + 2] = i1;
+        }
+        else
+        {
+            tess_data->triangles[out_idx + 0] = i0;
+            tess_data->triangles[out_idx + 1] = i1;
+            tess_data->triangles[out_idx + 2] = i2;
+        }
+    }
+    prc_free(ctx, fringe_triangles);
+
+    return 0;
+}
+
+static int
+prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
+    uint32_t face_index, prc_topo_face *topo_face,
+    uint8_t orientation, prc_nano_brep_ref_data *brep_ref_data,
+    prc_topo_context *topo_context)
+{
+    int code;
+    uint32_t k, j;
+    prc_surface_params surf_params = { 0 };
+    surface_func surface_eval_func = NULL;
+    uint32_t geom_count = data->exact_geom_tess_part_count;
+    prc_surface_sampling_info sampling_info = { 0 };
+    double start_u = 0.0;
+    double start_v = 0.0;
+    double end_u = 0.0;
+    double end_v = 0.0;
+    prc_exact_geom_transform exact_geom_trans;
+    prc_type_surf surface = topo_face->surface_geometry.surface;
+    uint32_t num_loops = topo_face->number_of_loops;
+    prc_ptr_topology *loops = topo_face->loops;
+    prc_loop_samples *loop_samples = NULL;
+    uint8_t topo_context_behavior = 0;
+
+    if (topo_context != NULL)
+    {
+        topo_context_behavior = topo_context->behavior;
+    }
+
+    /* Orientation is either 0 (opposite direction), 1 (same direction), or 2 (unknown.
+       If unknown it is needed to do geometric tests to determine the correct orientation.
+       The normal should point outside the material of the shell if the shell is closed
+       This also sets the transformation */
+    code = prc_get_surface_data(ctx, &surface, &sampling_info);
+    if (code < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to get surface data in prc_tessellate_surface\n");
+        return code;
+    }
+    start_u = sampling_info.start_u;
+    start_v = sampling_info.start_v;
+    end_u = sampling_info.end_u;
+    end_v = sampling_info.end_v;
+
+    /* Lets get any loops that may be associated with the surface. Loops
+       are curves (or vertices -- e.g. the tip of a cone) that make cuts
+       on the parametric surface. I would expect to see them primarily used
+       with planar surfaces to cut things like a washer for example. These have
+       to be PRC_TYPE_TOPO_Loop a vertex type is supposed to be a line with
+       the same starting and ending position */
+       /* Lets to a sanity check that indeed they are PRC_TYPE_TOPO_Loop. We will
+          not check the is stored values as we should have already tested those */
+          /* The check for brep_ref_data not NULL is due to the fact that this
+             method is sometimes called from the compressed surface code */
+    if (brep_ref_data != NULL)
+    {
+        for (k = 0; k < num_loops; k++)
+        {
+            if (!loops[k].is_stored)
+            {
+                if (loops[k].topo->tag != PRC_TYPE_TOPO_Loop)
+                {
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Surface loop is of wrong type\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+            }
+        }
+
+        /* For each of these loops we will need to get a set of samples that
+           are sufficient for us to approximate them before we can make use of them.
+           Lets do that first and store the loops in a sampled form */
+        if (num_loops > 0)
+        {
+            loop_samples = (prc_loop_samples *)prc_calloc(ctx, num_loops, sizeof(prc_loop_samples));
+            if (loop_samples == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed in allocation prc_tessellate_surface\n");
+                return PRC_ERROR_MEMORY;
+            }
+            for (k = 0; k < num_loops; k++)
+            {
+                code = prc_sample_loop(ctx, brep_ref_data, topo_face, &loops[k], &loop_samples[k]);
+                if (code < 0)
+                {
+                    for (j = 0; j <= k; j++)
+                    {
+                        if (loop_samples[j].samples != NULL)
+                        {
+                            prc_free(ctx, loop_samples[j].samples);
+                        }
+                    }
+                    prc_free(ctx, loop_samples);
+                    prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_sample_loop\n");
+                    return PRC_ERROR_INTERNAL;
+                }
+            }
+
+            /* Now lets get the loops onto the parametric surface so they can
+               be used as a edge boundary in the tessellation process */
+            code = prc_map_loops_to_surface(ctx, topo_face, orientation, &surface,
+                num_loops, loop_samples);
+            if (code < 0)
+            {
+                for (j = 0; j < num_loops; j++)
+                {
+                    if (loop_samples[j].samples != NULL)
+                    {
+                        prc_free(ctx, loop_samples[j].samples);
+                    }
+                    if (loop_samples[j].uv_samples != NULL)
+                    {
+                        prc_free(ctx, loop_samples[j].uv_samples);
+                    }
+                }
+                prc_free(ctx, loop_samples);
+                prc_error(ctx, code, "Failed in prc_map_loops_to_surface\n");
+                return code;
+            }
+
+            /* Now lets see if we can figure out which of these is an outer
+               and which is an inner loop */
+            code = prc_assign_loop_inner_outer(ctx, topo_face, orientation,
+                topo_context_behavior, num_loops, loop_samples, surface.surface_type);
+            if (code < 0)
+            {
+                for (j = 0; j < num_loops; j++)
+                {
+                    if (loop_samples[j].samples != NULL)
+                    {
+                        prc_free(ctx, loop_samples[j].samples);
+                    }
+                    if (loop_samples[j].uv_samples != NULL)
+                    {
+                        prc_free(ctx, loop_samples[j].uv_samples);
+                    }
+                }
+                prc_free(ctx, loop_samples);
+                prc_error(ctx, code, "Failed in prc_assign_loop_inner_outer\n");
+                return code;
+            }
+        }
+        surf_params.loop_samples = loop_samples;
+        surf_params.num_loops = num_loops;
+    }
+
+    switch (surface.surface_type)
+    {
+    case PRC_TYPE_SURF_FromCurves:
+    {
+        prc_surf_fromcurves *from_curves = surface.surf_fromcurves;
+        prc_uv_parameterization params = from_curves->parameterization;
+
+        surf_params.surface_params = (void *)from_curves;
+        surface_eval_func = prc_evaluate_surf_fromcurves;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cone:
+    {
+        prc_surf_cone *cone = surface.surf_cone;
+        prc_uv_parameterization params = cone->parameterization;
+
+        surf_params.surface_params = (void *)cone;
+        surface_eval_func = prc_evaluate_surf_cone;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cylinder:
+    {
+        prc_surf_cylinder *cylinder = surface.surf_cylinder;
+        prc_uv_parameterization params = cylinder->parameterization;
+
+        surf_params.surface_params = (void *)cylinder;
+        surface_eval_func = prc_evaluate_surf_cylinder;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Sphere:
+    {
+        prc_surf_sphere *sphere = surface.surf_sphere;
+        prc_uv_parameterization params = sphere->parameterization;
+
+        surf_params.surface_params = (void *)sphere;
+        surface_eval_func = prc_evaluate_surf_sphere;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Torus:
+    {
+        prc_surf_torus *torus = surface.surf_torus;
+        prc_uv_parameterization params = torus->parameterization;
+
+        surf_params.surface_params = (void *)torus;
+        surface_eval_func = prc_evaluate_surf_torus;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Cylindrical:
+    {
+        prc_surf_cylindrical *cylindrical = surface.surf_cylindrical;
+        prc_uv_parameterization params = cylindrical->parameterization;
+
+        surf_params.surface_params = (void *)cylindrical;
+        surface_eval_func = prc_evaluate_surf_cylindrical;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Extrusion:
+    {
+        prc_surf_extrusion *extrusion = surface.surf_extrusion;
+        prc_uv_parameterization params = extrusion->parameterization;
+
+        surf_params.surface_params = (void *)extrusion;
+        surface_eval_func = prc_evaluate_surf_extrusion;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Revolution:
+    {
+        prc_surf_revolution *revolution = surface.surf_revolution;
+        prc_uv_parameterization params = revolution->parameterization;
+
+        surf_params.surface_params = (void *)revolution;
+        surface_eval_func = prc_evaluate_surf_revolution;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Plane:
+    {
+        prc_surf_plane *plane = surface.surf_plane;
+        prc_domain params = plane->domain;
+
+        surf_params.surface_params = (void *)plane;
+        surface_eval_func = prc_evaluate_surf_plane;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Offset:
+    {
+        prc_surf_offset *offset = surface.surf_offset;
+
+        surf_params.surface_params = (void *)offset;
+        surface_eval_func = prc_evaluate_surf_offset;
+        break;
+    }
+
+    case PRC_TYPE_SURF_NURBS:
+    {
+        prc_surf_nurbs *nurbs = surface.surf_nurbs;
+
+        surf_params.surface_params = (void *)nurbs;
+        surface_eval_func = prc_evaluate_surf_nurbs;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Blend02:
+    {
+        prc_surf_blend02 *blend = surface.surf_blend02;
+
+        surf_params.surface_params = (void *)blend;
+        surface_eval_func = prc_evaluate_surf_blend02;
+        break;
+    }
+
+    case PRC_TYPE_SURF_Blend01:
+    {
+        prc_surf_blend01 *blend = surface.surf_blend01;
+
+        surf_params.surface_params = (void *)blend;
+        surface_eval_func = prc_evaluate_surf_blend01;
+        break;
+    }
+
+    default:
+        for (j = 0; j < num_loops; j++)
+        {
+            if (loop_samples[j].samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].samples);
+            }
+            if (loop_samples[j].uv_samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].uv_samples);
+            }
+        }
+        prc_free(ctx, loop_samples);
+        data->exact_geom_tess_part[data->exact_geom_tess_part_count].shells[shell_index].faces[face_index].type = PRC_EXACT_GEOM_UNKNOWN;
+        return 0;
+    }
+
+    if (surface_eval_func == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid surface evaluation function in prc_tessellate_surface\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    /* A planar face bounded by loops is tessellated straight from those loop
+       boundaries (ear-clipped, holes bridged in) instead of the regular grid
+       below: the plane's own schema domain need not match the face at all,
+       only the loops define its real outer edge and holes */
+    if (surface.surface_type == PRC_TYPE_SURF_Plane && num_loops > 0 && loop_samples != NULL)
+    {
+        code = prc_tessellate_planar_face_from_loops(ctx, data, shell_index, face_index,
+            geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
+            num_loops, loop_samples);
+        for (j = 0; j < num_loops; j++)
+        {
+            if (loop_samples[j].samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].samples);
+            }
+            if (loop_samples[j].uv_samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].uv_samples);
+            }
+        }
+        prc_free(ctx, loop_samples);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed in prc_tessellate_planar_face_from_loops\n");
+        }
+        return code;
+    }
+
+    /* Curved periodic surfaces (Cone/Cylinder/Sphere/Torus) bounded by loops:
+       classify each loop by how many times it winds around a periodic uv
+       axis before closing up (0 = a genuine simple polygon in uv space, e.g.
+       a hole or a self-contained trim region; nonzero = the loop is itself a
+       cut across the periodic direction, e.g. a circle around a cylinder's
+       circumference, which degenerates to a line rather than an enclosed
+       area in uv space) */
+    if (num_loops > 0 && loop_samples != NULL &&
+        (surface.surface_type == PRC_TYPE_SURF_Cone || surface.surface_type == PRC_TYPE_SURF_Cylinder ||
+            surface.surface_type == PRC_TYPE_SURF_Sphere || surface.surface_type == PRC_TYPE_SURF_Torus))
+    {
+        uint32_t num_wrapping = 0;
+        uint8_t wrap_axis = 0;
+        uint8_t mixed_axes = 0;
+        uint8_t bad_winding = 0;
+
+        for (k = 0; k < num_loops; k++)
+        {
+            int32_t wu = loop_samples[k].wind_u;
+            int32_t wv = loop_samples[k].wind_v;
+
+            if (wu != 0 && wv != 0)
+            {
+                mixed_axes = 1;
+            }
+            else if (wu != 0)
+            {
+                if (num_wrapping > 0 && wrap_axis != 0)
+                    mixed_axes = 1;
+                wrap_axis = 0;
+                if (wu != 1 && wu != -1)
+                    bad_winding = 1;
+                num_wrapping++;
+            }
+            else if (wv != 0)
+            {
+                if (num_wrapping > 0 && wrap_axis != 1)
+                    mixed_axes = 1;
+                wrap_axis = 1;
+                if (wv != 1 && wv != -1)
+                    bad_winding = 1;
+                num_wrapping++;
+            }
+        }
+
+        if (num_wrapping == 0 || (!mixed_axes && !bad_winding && num_wrapping <= 2))
+        {
+            code = prc_tessellate_trimmed_face(ctx, data, shell_index, face_index,
+                geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
+                num_loops, loop_samples, num_wrapping > 0, wrap_axis);
+            for (j = 0; j < num_loops; j++)
+            {
+                if (loop_samples[j].samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].samples);
+                }
+                if (loop_samples[j].uv_samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].uv_samples);
+                }
+            }
+            prc_free(ctx, loop_samples);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_tessellate_trimmed_face\n");
+            }
+            return code;
+        }
+        /* Anything else (wraps both axes, winds more than once, more than
+           two wrapping loops) isn't handled yet -- fall through to the
+           regular parametric grid below, same as before this loop support
+           existed */
+    }
+
+    {
+        prc_regular_grid grid = { 0 };
+        prc_exact_geom_tess_data *tess_data;
+
+        code = prc_build_regular_grid(ctx, surface_eval_func, &surf_params, &sampling_info, orientation, &grid);
+        if (code < 0)
+        {
+            prc_error(ctx, code, "Failed in prc_tessellate_trimmed_face\n");
+            for (j = 0; j < num_loops; j++)
+            {
+                if (loop_samples[j].samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].samples);
+                }
+                if (loop_samples[j].uv_samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].uv_samples);
+                }
+            }
+            prc_free(ctx, loop_samples);
+            return code;
+        }
+
+        /* Per-surface developer trace. Gated, and on stderr rather than stdout:
+           it fired 7171 times over a 310-file corpus, and being on stdout it
+           corrupts any consumer that emits machine-readable output there -- it
+           was found by it landing in the middle of a generated CSV. The env
+           lookup is cached so the hot path pays one getenv for the whole run,
+           mirroring prc_debug_hooks_init in prc_decode_compressed_tess.c, and
+           the whole hook compiles out when PRC_ENABLE_DIAG_ENV is OFF.
+           Set PRC_DIAG_TESSELLATE_SURFACE=1 to get the old always-on output. */
+        {
+            static int surf_trace_read = 0;
+            static int surf_trace_on = 0;
+
+            if (!surf_trace_read)
+            {
+                const char *v = prc_diag_getenv("PRC_DIAG_TESSELLATE_SURFACE");
+                surf_trace_read = 1;
+                surf_trace_on = (v != NULL && v[0] != 0 && v[0] != '0');
+            }
+
+            if (surf_trace_on)
+                fprintf(stderr, "prc_tessellate_surface: surface_type=%u orientation=%u wrap_u=%u wrap_v=%u vertex_samples_u=%u vertex_samples_v=%u start_u=%f end_u=%f start_v=%f end_v=%f\n",
+                    topo_face->surface_geometry.surface.surface_type,
+                    orientation,
+                    grid.wrap_u,
+                    grid.wrap_v,
+                    grid.vertex_samples_u,
+                    grid.vertex_samples_v,
+                    start_u,
+                    end_u,
+                    start_v,
+                    end_v);
+        }
+
+        data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
+            (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
+        if (data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data == NULL)
+        {
+            prc_free(ctx, grid.uv);
+            prc_free(ctx, grid.verts);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_surface\n");
+            return PRC_ERROR_MEMORY;
+        }
+        tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
+
+        tess_data->number_of_vertices = grid.vertex_samples_u * grid.vertex_samples_v;
+        tess_data->vertices = grid.verts;
+        prc_free(ctx, grid.uv);
+
+        for (j = 0; j < num_loops; j++)
+        {
+            if (loop_samples[j].samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].samples);
+            }
+            if (loop_samples[j].uv_samples != NULL)
+            {
+                prc_free(ctx, loop_samples[j].uv_samples);
+            }
+        }
+        prc_free(ctx, loop_samples);
+
+        code = prc_emit_grid_all_triangles(ctx, &grid, orientation, &tess_data->triangles, &tess_data->number_of_triangles);
+        if (code < 0)
+            return code;
+    }
     return 0;
 }
 

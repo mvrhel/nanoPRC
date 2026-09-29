@@ -3370,7 +3370,6 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
         return PRC_API_ERROR_PARAMETER;
     }
 
-    /* Associate the api_tess with the model tree part */
     if (api_tree == NULL)
     {
         code = PRC_API_ERROR;
@@ -6317,6 +6316,8 @@ prc_api_number_of_materials(prc_context *ctx, prc_api_data data_in, const prc_ap
 
         for (uint32_t k = 0; k < num_shells; k++)
         {
+            num_materials += tess->shells[k].num_faces;
+#if 0
             uint32_t num_faces_in_shell = tess->shells[k].num_faces;
 
             for (uint16_t j = 0; j < num_faces_in_shell; j++)
@@ -6327,6 +6328,7 @@ prc_api_number_of_materials(prc_context *ctx, prc_api_data data_in, const prc_ap
                     num_materials++;
                 }
             }
+#endif
         }
         return num_materials;
     }
