@@ -540,6 +540,7 @@ typedef enum {
 
 /* Table 245 */
 typedef enum {
+    PRC_TYPE_CRV_NONE = 0,
     PRC_TYPE_CRV = PRC_TYPE_ROOT + 10,
     PRC_TYPE_CRV_Base = PRC_TYPE_CRV + 1,
     PRC_TYPE_CRV_Blend02Boundary = PRC_TYPE_CRV + 2,

@@ -4822,6 +4822,38 @@ prc_tessellate_compressed_face(prc_context *ctx, prc_data *data, uint32_t shell_
 }
 
 static int
+prc_get_ptr_vertex(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
+                   prc_ptr_topology *ptr_topo_in, prc_vec3 *vertex)
+{
+    prc_topo *topo;
+
+    if (!ptr_topo_in->is_stored)
+    {
+        topo = ptr_topo_in->topo;
+    }
+    else
+    {
+        if (ptr_topo_in->topo_identifier >= brep_ref_data->number_of_topo_refs)
+        {
+            prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid topo identifier in prc_get_ptr_vertex\n");
+            return PRC_ERROR_INTERNAL;
+        }
+        /* These are biased I believe */
+        topo = brep_ref_data->topo_refs[ptr_topo_in->topo_identifier - 1];
+    }
+
+    /* I think this could be PRC_TYPE_TOPO_MultipleVertex also */
+    if (topo->tag != PRC_TYPE_TOPO_UniqueVertex)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid topo identifier in prc_get_ptr_vertex\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    *vertex = topo->topo_unique_vertex->vertex;
+    return 0;
+}
+
+static int
 prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
     prc_coedge_in_loop *topo_coedge, prc_coedge_samples *coedge_samples)
 {
@@ -4835,26 +4867,106 @@ prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
     }
     else
     {
-        if (topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo->tag != PRC_TYPE_TOPO_Edge)
+        prc_topo *topo;
+
+        /* First get the loop that we need */
+        if (!topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.is_stored)
+        {
+            topo = topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo;
+        }
+        else
+        {
+            if (topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo_identifier >= brep_ref_data->number_of_topo_refs)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid topo identifier in prc_sample_coedge\n");
+                return PRC_ERROR_INTERNAL;
+            }
+            /* These are biased I believe */
+            topo = brep_ref_data->topo_refs[topo_coedge->next_coedge.topo->topo_coedge->ptr_topology.topo_identifier - 1];
+        }
+
+        if (topo->tag != PRC_TYPE_TOPO_Edge)
         {
             prc_error(ctx, PRC_ERROR_INTERNAL, "Error in prc_sample_coedge\n");
             return PRC_ERROR_INTERNAL;
         }
         else
         {
-            /* Now we finally get to the curve */
+            /* Now we finally get to the curve. However, the curve may be
+               defined by two vertices */
             prc_topo_coedge *actual_coedge = topo_coedge->next_coedge.topo->topo_coedge;
-            prc_topo_wire_edge *wire_edge = actual_coedge->ptr_topology.topo->topo_wire_edge;
             prc_exact_geom_wire_data wire_samples = { 0 };
-            code = prc_sample_curve(ctx, &wire_edge->curve, &wire_samples);
-            if (code < 0)
+
+            /* We could have a PRC_TYPE_TOPO_WireEdge or a PRC_TYPE_TOPO_Edge */
+            if (topo->tag == PRC_TYPE_TOPO_WireEdge)
             {
-                if (wire_samples.points != NULL)
+                prc_topo_wire_edge *wire_edge = topo->topo_wire_edge;
+
+                code = prc_sample_curve(ctx, &wire_edge->curve, &wire_samples);
+                if (code < 0)
                 {
-                    prc_free(ctx, wire_samples.points);
+                    if (wire_samples.points != NULL)
+                    {
+                        prc_free(ctx, wire_samples.points);
+                    }
+                    prc_error(ctx, code, "Error in prc_sample_curve\n");
+                    return code;
                 }
-                prc_error(ctx, code, "Error in prc_sample_curve\n");
-                return code;
+            }
+            else if (topo->tag == PRC_TYPE_TOPO_Edge)
+            {
+                /* This is a confusing object. Not sure how the start
+                   and end vertex are used and there is a curve. For now
+                   check the curve. If it is no data use the vertices */
+                prc_topo_edge *topo_edge = topo->topo_edge;
+
+                if (topo_edge->wire_edge.ptr_curve.curve_type != PRC_TYPE_CRV_NONE)
+                {
+                    code = prc_sample_curve(ctx, &topo_edge->wire_edge, &wire_samples);
+                    if (code < 0)
+                    {
+                        if (wire_samples.points != NULL)
+                        {
+                            prc_free(ctx, wire_samples.points);
+                        }
+                        prc_error(ctx, code, "Error in prc_sample_curve\n");
+                        return code;
+                    }
+                }
+                else
+                {
+                    wire_samples.number_of_points = 2;
+                    wire_samples.points = (prc_vec3 *)prc_calloc(ctx, 2, sizeof(prc_vec3));
+                    if (wire_samples.points == NULL)
+                    {
+                        prc_error(ctx, PRC_ERROR_MEMORY, "Error in prc_sample_coedge\n");
+                        return PRC_ERROR_MEMORY;
+                    }
+
+                    prc_vec3 vertex;
+                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
+                                              &topo_edge->start_vertex, &vertex);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
+                        return code;
+                    }
+                    wire_samples.points[0] = vertex;
+
+                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
+                                              &topo_edge->end_vertex, &vertex);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
+                        return code;
+                    }
+                    wire_samples.points[1] = vertex;
+                }
+            }
+            else
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Error in prc_sample_coedge\n");
+                return PRC_ERROR_INTERNAL;
             }
 
             /* coedge_orientation == 0 means this coedge is traversed opposite
@@ -4911,7 +5023,8 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
             prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid loop identifier in prc_sample_loop\n");
             return PRC_ERROR_INTERNAL;
         }
-        topo_loop = brep_ref_data->topo_refs[loop->topo_identifier]->topo_loop;
+        /* These are biased I believe */
+        topo_loop = brep_ref_data->topo_refs[loop->topo_identifier - 1]->topo_loop;
     }
 
     num_coedges = topo_loop->number_of_coedges;
