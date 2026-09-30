@@ -394,18 +394,35 @@ prc_write_cart_trans(prc_context *ctx, prc_bit_write_state *s,
    Field values, and why each:
 
      texture_dimension        2, a 2D image.
-     texture_mapping_type     retrieve_UV. The UVs come from the
-                              tessellation's texture coordinates, which this
-                              writer has emitted since #99; the alternatives
-                              ask the reader to synthesise them.
+     texture_mapping_type     3D_tess. The UVs come from the tessellation's
+                              texture coordinates, which this writer has
+                              emitted since #99; the alternatives ask the
+                              reader to synthesise them. This field named
+                              retrieve_UV until the enumerators were rebased
+                              to their table values: the constant then carried
+                              the value 3, so the bytes said "use the mapping
+                              operator" where this paragraph says the
+                              coordinates are already there. The name
+                              describing parametric UVs and the value meaning
+                              an operator were both wrong for the stated
+                              intent, which is the stored coordinates.
      texture_mapping_operator unknown. The operators are projections --
                               planar, cylindrical, spherical, cubic -- used
                               when coordinates must be generated. With UVs
-                              supplied there is nothing to project.
+                              supplied there is nothing to project. Not
+                              written at all now: the operator is on the wire
+                              only for the mapping type that names one.
      texture_mapping_attributes  0, not a channel mask -- see below.
      texture_function         modulate, the standard diffuse behaviour --
                               the image multiplies the underlying colour
-                              rather than replacing it.
+                              rather than replacing it. The byte changes with
+                              the rebasing: the constant used to carry 2,
+                              which the table assigns to Replace, so every
+                              textured file this writer produced asked for the
+                              object colour to be replaced where this line
+                              says multiplied. It emits 1 now. Worth an
+                              Acrobat look, since replace and modulate differ
+                              in appearance wherever a base colour is set.
      blend_src_rgb/alpha      0, which suppresses the blend_des_* fields
                               entirely: the reader only reads each
                               destination when its source is non-zero.
@@ -432,12 +449,25 @@ prc_write_texture_definition_add(prc_context *ctx, prc_write_global_tables *tabl
             "prc_write_texture_definition_add: picture index past the end of the table\n");
         return 0;
     }
+    /* A placement transformation rides with the mapping operator, and the
+       mapping type written below does not carry one, so the record has no slot
+       to put it in. Refused rather than accepted and dropped, on the same rule
+       as the rest of this writer: a caller that asked for a placement and did
+       not get one is worse served by silence than by an error. Both callers in
+       the tree pass NULL. */
+    if (transformation != NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL,
+            "prc_write_texture_definition_add: a texture placement transformation "
+            "needs the mapping-operator type, which this writer does not emit\n");
+        return 0;
+    }
 
     memset(&entry, 0, sizeof(entry));
     entry.tag = PRC_TYPE_GRAPH_TextureDefinition;
     entry.biased_picture_index = biased_picture_index;
     entry.texture_dimension = 2;
-    entry.texture_mapping_type = PRC_texture_mapping_retrieve_UV;
+    entry.texture_mapping_type = PRC_texture_mapping_3D_tess;
     entry.texture_mapping_operator = PRC_texture_mapping_operator_unknown;
     /* Zero, not an rgb/rgba channel mask. Measured across four independent
        producers in prc-db -- vis5d, Voxler, a welding-robot animation and a
@@ -454,18 +484,24 @@ prc_write_texture_definition_add(prc_context *ctx, prc_write_global_tables *tabl
        writes 0; 4 is taken as the convention. Neither value sets the alpha
        bit, so no alpha-test fields follow either way. */
     entry.texture_application_mode = PRC_texture_application_combine;
-    /* application_choose on both axes, which is what all four reference
-       producers write -- not repeat, which is what the enum's names suggest
-       a texture ought to want. texture_dimension is 2, so s and t are
-       written and r is not. */
-    entry.texture_wrapping_mode_s = PRC_texture_wrapping_application_choose;
-    entry.texture_wrapping_mode_t = PRC_texture_wrapping_application_choose;
+    /* Repeat on both axes. texture_dimension is 2, so s and t are written and
+       r is not.
 
-    if (transformation != NULL)
-    {
-        entry.has_transformation = 1;
-        entry.transformation = *transformation;
-    }
+       The byte here is unchanged; only the name is. This read
+       application_choose, and the note with it said that was "what all four
+       reference producers write -- not repeat". The measurement was of the
+       wire, and the wire value measured was 1; the enumerator that then
+       carried 1 was called application_choose, so the conclusion came out
+       inverted. The table assigns 1 to Repeat and 0 to letting the
+       application choose. Re-censused across 1,210 texture definitions in the
+       public collection: 1,061 write 1 on both axes, 73 write 0, 67 write 1
+       and 0, 7 write 2 and 2 write 4. Repeat is the convention, which is what
+       this writer has been emitting all along under the other name. */
+    entry.texture_wrapping_mode_s = PRC_texture_wrapping_repeat;
+    entry.texture_wrapping_mode_t = PRC_texture_wrapping_repeat;
+
+    /* has_transformation stays 0 from the memset. A non-NULL transformation is
+       refused above, so there is nothing to copy in here. */
 
     if (prc_write_global_array_grow(ctx, (void **)&tables->texture_definitions,
             &tables->texture_definition_cap, tables->texture_definition_count,
@@ -706,11 +742,17 @@ prc_write_globals_to_stream(prc_context *ctx, prc_bit_write_state *s, const prc_
         if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_mapping_type) != 0) goto fail;
 
         /* The operator, and everything about placement, is only on the wire
-           for retrieve_UV -- prc_parse_graph_textures reads them inside that
-           branch. prc_write_texture_definition_add writes no other mapping
-           type, so this is always taken; the condition mirrors the reader
-           rather than assuming. */
-        if (d->texture_mapping_type == PRC_texture_mapping_retrieve_UV)
+           for the mapping type that names an operator --
+           prc_parse_graph_textures reads them inside that branch, and this
+           condition mirrors the reader rather than assuming.
+
+           prc_write_texture_definition_add now writes 3D_tess, so this branch
+           is NOT taken for anything this writer produces and the operator,
+           has_transformation and transformation go unwritten. It was always
+           taken before, because the constant it tested and the constant that
+           function assigned were the same one. A caller that builds a
+           definition by hand and asks for an operator still gets the fields. */
+        if (d->texture_mapping_type == PRC_texture_mapping_defined)
         {
             if (prc_bitwrite_int32(ctx, s, (int32_t)d->texture_mapping_operator) != 0) goto fail;
             if (prc_bitwrite_bit(ctx, s, d->has_transformation ? 1 : 0) != 0) goto fail;
