@@ -427,7 +427,11 @@ test_texture_chain_roundtrip(prc_context *ctx)
     def_idx = gd->materials[app_idx - 1].biased_texture_definition_index;
     PRC_ASSERT(def_idx != 0);
     PRC_ASSERT(def_idx - 1 < gd->texture_count);
-    PRC_ASSERT_EQ(gd->textures[def_idx - 1].texture_mapping_type, PRC_texture_mapping_retrieve_UV);
+    /* 3D_tess: the coordinates are stored on the tessellation. This asserted
+       retrieve_UV while that enumerator carried the value the table assigns to
+       the mapping operator, so the round trip agreed with itself on a value
+       neither the writer nor the reader meant. */
+    PRC_ASSERT_EQ(gd->textures[def_idx - 1].texture_mapping_type, PRC_texture_mapping_3D_tess);
 
     /* -> the picture. */
     pic_idx = gd->textures[def_idx - 1].biased_picture_index;

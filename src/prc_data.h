@@ -409,60 +409,67 @@ typedef enum {
     PRC_TYPE_TOPO_WireBody
 } prc_topological_entity_t;
 
-/* These texture items are poorly defined in original spec */
+/* The texture enumerations below are written to and read from the file
+   directly, with no adjustment, so each enumerator must equal the integer the
+   specification assigns it. Four of them were based at 1 where their tables
+   start at 0, which put every value one above the wire value. The tables are
+   in iso-prc/sections/07-base-entities.adoc, and the enumerator names were
+   already in the right order -- only the numbering was wrong. */
 
-/* Table 97 */
+/* Texture mapping type: 07-base-entities.adoc:1229 */
 typedef enum {
-    PRC_texture_mapping_choose = 1,
+    PRC_texture_mapping_choose = 0,
     PRC_texture_mapping_3D_tess,
     PRC_texture_mapping_retrieve_UV,
     PRC_texture_mapping_defined
 } PRC_texture_mapping_t;
 
-/* Table 98 */
+/* Texture mapping operator: 07-base-entities.adoc:1240 */
 typedef enum {
-    PRC_texture_mapping_operator_unknown = 1,
+    PRC_texture_mapping_operator_unknown = 0,
     PRC_texture_mapping_operator_planar,
     PRC_texture_mapping_operator_cylindrical,
     PRC_texture_mapping_operator_spherical,
     PRC_texture_mapping_operator_cubic
 } PRC_texture_mapping_operator_t;
 
-/* Table 99 */
+/* Texture mapping attributes: 07-base-entities.adoc:1253. A bit mask, and its
+   values already match the table. */
 typedef enum {
     PRC_texture_mapping_attributes_red = 0x1,
     PRC_texture_mapping_attributes_green = 0x2,
     PRC_texture_mapping_attributes_blue = 0x4,
-    PRC_texture_mapping_operator_rgb = 0x7,
+    PRC_texture_mapping_attributes_rgb = 0x7,
     PRC_texture_mapping_attributes_alpha = 0x8,
     PRC_texture_mapping_attributes_rgba = 0xf
 } PRC_texture_mapping_attributes_t;
 
-/* Table 100 */
+/* Texture function: 07-base-entities.adoc:1266 */
 typedef enum {
-    PRC_texture_function_unknown = 0x1,
-    PRC_texture_function_modulate = 0x2,
-    PRC_texture_function_replace = 0x3,
-    PRC_texture_function_blend = 0x4,
-    PRC_texture_function_decal = 0x5,
+    PRC_texture_function_unknown = 0,
+    PRC_texture_function_modulate = 1,
+    PRC_texture_function_replace = 2,
+    PRC_texture_function_blend = 3,
+    PRC_texture_function_decal = 4
 } PRC_texture_function_t;
 
-/* Table 101 */
+/* Texture application mode: 07-base-entities.adoc:1278. A bit mask, and its
+   values already match the table. */
 typedef enum {
     PRC_texture_application_app = 0x0,
     PRC_texture_application_lighting = 0x1,
     PRC_texture_application_alpha = 0x2,
-    PRC_texture_application_combine = 0x4,
+    PRC_texture_application_combine = 0x4
 } PRC_texture_application_mode_t;
 
-/* Table 102 */
+/* Texture wrapping mode: 07-base-entities.adoc:1288 */
 typedef enum {
-    PRC_texture_wrapping_application_choose = 1,
-    PRC_texture_wrapping_repeat = 2,
-    PRC_texture_wrapping_clamp_to_border = 3,
-    PRC_texture_wrapping_clamp = 4,
-    PRC_texture_wrapping_clamp_to_edge = 5,
-    PRC_texture_wrapping_mirrored_repeat = 6
+    PRC_texture_wrapping_application_choose = 0,
+    PRC_texture_wrapping_repeat = 1,
+    PRC_texture_wrapping_clamp_to_border = 2,
+    PRC_texture_wrapping_clamp = 3,
+    PRC_texture_wrapping_clamp_to_edge = 4,
+    PRC_texture_wrapping_mirrored_repeat = 5
 } PRC_texture_wrapping_mode_t;
 
 /* Table 141 */

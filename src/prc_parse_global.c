@@ -599,7 +599,11 @@ prc_parse_graph_textures(prc_context *ctx, prc_bit_state *bit_state, prc_graph_t
 
     data->texture_mapping_type = prc_bitread_int32(ctx, bit_state);
 
-    if (data->texture_mapping_type == PRC_texture_mapping_retrieve_UV)
+    /* The operator and its placement are on the wire only for the mapping type
+       that names an operator. This read is unchanged: it fired on the value 3
+       before, when PRC_texture_mapping_retrieve_UV happened to equal 3, and it
+       fires on 3 now under the enumerator that actually means it. */
+    if (data->texture_mapping_type == PRC_texture_mapping_defined)
     {
         data->texture_mapping_operator = prc_bitread_int32(ctx, bit_state);
 
@@ -647,6 +651,11 @@ prc_parse_graph_textures(prc_context *ctx, prc_bit_state *bit_state, prc_graph_t
     }
 
     data->texture_function = prc_bitread_int32(ctx, bit_state);
+    /* This read changes with the enumerator renumbering above, and it is the
+       one place in the texture record where it does. PRC_texture_function_blend
+       was 4, which the table assigns to Decal, so the four blend doubles were
+       consumed on a Decal texture and skipped on a Blend one -- a desync in
+       both directions. It is 3 now, which is Blend. */
     if (data->texture_function == PRC_texture_function_blend)
     {
         for (k = 0; k < 4; k++)
