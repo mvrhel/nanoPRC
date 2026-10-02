@@ -85,6 +85,12 @@ typedef struct prc_loop_samples_s
        paths */
     int32_t wind_u;
     int32_t wind_v;
+    /* Set by prc_sample_loop when every sample coincides (e.g. a loop
+       trimmed down to a cone's apex): such a loop bounds zero area and must
+       not be fed to the hole/ear-clip machinery or an angular (atan2-based)
+       uv mapping, both of which are numerically unstable or meaningless for
+       a degenerate single point */
+    uint8_t is_point_loop;
 } prc_loop_samples;
 
 typedef struct prc_coedge_samples_s
@@ -4935,32 +4941,47 @@ prc_sample_coedge(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
                 }
                 else
                 {
-                    wire_samples.number_of_points = 2;
-                    wire_samples.points = (prc_vec3 *)prc_calloc(ctx, 2, sizeof(prc_vec3));
+                    prc_vec3 vertex1, vertex2;
+                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
+                                              &topo_edge->start_vertex, &vertex1);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
+                        return code;
+                    }
+
+                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
+                                              &topo_edge->end_vertex, &vertex2);
+                    if (code < 0)
+                    {
+                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
+                        return code;
+                    }
+
+                    /* If vertex1 == vertex2, we only need one point.  This
+                       happens if we are clipping at a cone apex for example */
+                    if (vertex1.x == vertex2.x && vertex1.y == vertex2.y && 
+                        vertex1.z == vertex2.z)
+                    {
+                        wire_samples.number_of_points = 1;
+                    }
+                    else
+                    {
+                        wire_samples.number_of_points = 2;
+                    }
+
+                    wire_samples.points = (prc_vec3 *)prc_calloc(ctx,
+                                wire_samples.number_of_points, sizeof(prc_vec3));
                     if (wire_samples.points == NULL)
                     {
                         prc_error(ctx, PRC_ERROR_MEMORY, "Error in prc_sample_coedge\n");
                         return PRC_ERROR_MEMORY;
                     }
-
-                    prc_vec3 vertex;
-                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
-                                              &topo_edge->start_vertex, &vertex);
-                    if (code < 0)
+                    wire_samples.points[0] = vertex1;
+                    if (wire_samples.number_of_points > 1)
                     {
-                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
-                        return code;
+                        wire_samples.points[1] = vertex2;
                     }
-                    wire_samples.points[0] = vertex;
-
-                    code = prc_get_ptr_vertex(ctx, brep_ref_data,
-                                              &topo_edge->end_vertex, &vertex);
-                    if (code < 0)
-                    {
-                        prc_error(ctx, code, "Error in prc_get_ptr_vertex\n");
-                        return code;
-                    }
-                    wire_samples.points[1] = vertex;
                 }
             }
             else
@@ -5089,6 +5110,26 @@ prc_sample_loop(prc_context *ctx, prc_nano_brep_ref_data *brep_ref_data,
         }
         /* Duplicate the first point to complete the loop */
         loop_samples->samples[pos] = coedge_samples[0].samples[0];
+
+        /* A loop trimmed down to a single point (e.g. a cone's apex) samples
+           as every point coinciding with the first -- flag it so later
+           stages can skip the angular uv mapping and hole/ear-clip bridging
+           that only make sense for a loop enclosing real area */
+        {
+            uint32_t s;
+            prc_vec3 first = loop_samples->samples[0];
+            uint8_t all_coincide = 1;
+
+            for (s = 1; s < loop_samples->num_samples; s++)
+            {
+                if (prc_vec_dist_between_two_points(first, loop_samples->samples[s]) > CURVE_PRECISION)
+                {
+                    all_coincide = 0;
+                    break;
+                }
+            }
+            loop_samples->is_point_loop = all_coincide;
+        }
     }
 
     /* Free up the coedge samples */
@@ -5519,11 +5560,48 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             {
                 curr_loop = &loop_samples[k];
                 num_samples = curr_loop->num_samples;
+
+                /* A loop collapsed to the cone's apex has x=y=0 (within
+                   tolerance) at every sample, so atan2(y, x) there is just
+                   amplifying floating-point noise into an arbitrary angle --
+                   skip it and park every sample at a single, stable u since
+                   the loop bounds no area and no actual u value matters */
+                if (curr_loop->is_point_loop)
+                {
+                    v = curr_loop->samples[0].z;
+                    for (j = 0; j < num_samples; j++)
+                    {
+                        curr_loop->uv_samples[j].x = (0.0 - cone->parameterization.u_param_coeff_b) / u_coeff_a;
+                        curr_loop->uv_samples[j].y = (v - cone->parameterization.v_param_coeff_b) / v_coeff_a;
+                    }
+                    curr_loop->wind_u = 0;
+                    curr_loop->wind_v = 0;
+                    continue;
+                }
+
                 for (j = 0; j < num_samples; j++)
                 {
-                    u = atan2(curr_loop->samples[j].y, curr_loop->samples[j].x);
-                    u = prc_map_to_two_pi(u);
+                    double x = curr_loop->samples[j].x;
+                    double y = curr_loop->samples[j].y;
+
                     v = curr_loop->samples[j].z;
+
+                    /* x = radius(v)*cos(u), y = radius(v)*sin(u): wherever
+                       this cone's linear radius(v) = radius + v*tan(semi_angle)
+                       is negative (common away from the apex -- a cone's
+                       bottom_radius/semi_angle pair can put the whole usable
+                       v range on the negative side), atan2(y, x) recovers
+                       u + pi instead of u, since negating radius is the same
+                       as rotating u by pi. Negate x,y first to undo that so
+                       the recovered u matches the surface's own u = atan2(y,x)
+                       convention used by prc_evaluate_surf_cone. */
+                    if (cone->radius + v * tan(cone->semi_angle) < 0.0)
+                    {
+                        x = -x;
+                        y = -y;
+                    }
+                    u = atan2(y, x);
+                    u = prc_map_to_two_pi(u);
 
                     /* Store the raw angle/height for now; unwrap before the
                        affine parameterization map so the 2*pi period used to
@@ -6807,6 +6885,12 @@ prc_point_inside_trimmed_region(uint32_t num_loops, const prc_loop_samples *loop
         const prc_loop_samples *loop = &loop_samples[k];
         uint32_t count = (loop->num_samples > 0) ? (loop->num_samples - 1) : 0;
 
+        /* A loop collapsed to a single point (e.g. a cone's apex) bounds
+           zero area -- it can never exclude a grid point, so skip it rather
+           than running it through point-in-polygon */
+        if (loop->is_point_loop)
+            continue;
+
         if (loop->wind_u != 0 || loop->wind_v != 0)
         {
             uint8_t wrap_axis = (loop->wind_u != 0) ? 0 : 1;
@@ -7187,6 +7271,24 @@ prc_build_periodic_outer_loop(prc_context *ctx, uint32_t num_loops, prc_loop_sam
         int32_t wind = wrap_axis ? loop_samples[wrap_indices[0]].wind_v : loop_samples[wrap_indices[0]].wind_u;
         double edge_b, a_start, a_end;
         uint32_t j;
+        uint8_t have_point_loop_edge = 0;
+        double point_loop_edge = 0.0;
+
+        /* A loop degenerated to a single point (e.g. a cone's apex) tells us
+           definitively which domain edge the trimmed region closes against
+           -- use it directly rather than the orientation-dependent guess
+           below, which relies on loop sample direction matching the
+           standard B-rep convention; prc_sample_coedge does not yet
+           guarantee that (ignores coedge_orientation) */
+        for (j = 0; j < num_loops; j++)
+        {
+            if (loop_samples[j].is_point_loop)
+            {
+                point_loop_edge = wrap_axis ? loop_samples[j].uv_samples[0].x : loop_samples[j].uv_samples[0].y;
+                have_point_loop_edge = 1;
+                break;
+            }
+        }
 
         /* Interior-on-left convention (walking the loop in its sampled
            direction, material is on the left in the uv plane): travelling
@@ -7196,7 +7298,8 @@ prc_build_periodic_outer_loop(prc_context *ctx, uint32_t num_loops, prc_loop_sam
            standard B-rep convention, which prc_sample_loop does not yet
            fully guarantee (prc_sample_coedge ignores coedge_orientation) --
            flip this rule if a real file comes out trimmed to the wrong side */
-        edge_b = (wind > 0) ? (wrap_axis ? sampling_info->end_u : sampling_info->end_v)
+        edge_b = have_point_loop_edge ? point_loop_edge :
+                 (wind > 0) ? (wrap_axis ? sampling_info->end_u : sampling_info->end_v)
                              : (wrap_axis ? sampling_info->start_u : sampling_info->start_v);
 
         a_start = wrap_axis ? loop_samples[wrap_indices[0]].uv_samples[0].y : loop_samples[wrap_indices[0]].uv_samples[0].x;
@@ -7244,6 +7347,114 @@ prc_build_periodic_outer_loop(prc_context *ctx, uint32_t num_loops, prc_loop_sam
     outer_loop_out->is_outer_loop = 1;
 
     prc_free(ctx, combined);
+
+    return 0;
+}
+
+/* A cone's radius is affine in v (radius = base_radius + v*tan(semi_angle)),
+   so for fixed u, moving along v traces a straight 3D line (a ruling) all
+   the way to the apex -- a straight edge from the apex to any boundary
+   sample therefore lies exactly on the surface, with no curvature error.
+   When a cone face's only loops are the apex (a single-point loop) and one
+   loop winding once around the full circumference, that means a plain fan
+   of triangles from the apex to each boundary sample is an exact
+   tessellation of the whole face, simpler and more faithful than running it
+   through the general grid+clip machinery (which has to treat the apex as
+   just another regular-grid row, producing a dense cluster of nearly
+   degenerate triangles there).
+   The apex vertex is duplicated once per triangle: a true cone's normal
+   depends only on u, not v (so it's constant along a whole ruling, and
+   evaluating it anywhere on the ruling other than exactly at the apex -
+   where the radius is zero and the finite-difference tangent degenerates -
+   gives the exact value for that ruling, including at the apex), and each
+   fan triangle spans a different u, so sharing one apex vertex/normal
+   across all of them would be wrong. Winding/normal convention mirrors
+   prc_tessellate_planar_face_from_loops (orientation 1 keeps the loop's own
+   sample order, 0 swaps the last two indices) */
+static int
+prc_tessellate_cone_apex_fan_face(prc_context *ctx, prc_data *data, uint32_t shell_index,
+    uint32_t face_index, uint32_t geom_count, uint8_t orientation,
+    surface_func surface_eval_func, prc_surface_params *surf_params,
+    const prc_surface_sampling_info *sampling_info,
+    const prc_loop_samples *point_loop, const prc_loop_samples *wrap_loop)
+{
+    uint32_t count = (wrap_loop->num_samples > 0) ? (wrap_loop->num_samples - 1) : 0;
+    prc_exact_geom_tess_data *tess_data;
+    prc_vec3 apex_position;
+    uint32_t i;
+    int code;
+
+    if (count < 2)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Degenerate wrapping loop in prc_tessellate_cone_apex_fan_face\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data =
+        (prc_exact_geom_tess_data *)prc_calloc(ctx, 1, sizeof(prc_exact_geom_tess_data));
+    tess_data = data->exact_geom_tess_part[geom_count].shells[shell_index].faces[face_index].tess_data;
+    if (tess_data == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure of tess_data in prc_tessellate_cone_apex_fan_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    tess_data->number_of_vertices = count * 2;   /* shared boundary ring + one apex copy per triangle */
+    tess_data->vertices = (prc_exact_geom_vertex *)prc_calloc(ctx, tess_data->number_of_vertices, sizeof(prc_exact_geom_vertex));
+    tess_data->number_of_triangles = count;
+    tess_data->triangles = (uint32_t *)prc_calloc(ctx, count * 3, sizeof(uint32_t));
+    if (tess_data->vertices == NULL || tess_data->triangles == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_MEMORY, "Allocation failure in prc_tessellate_cone_apex_fan_face\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    apex_position = surface_eval_func(ctx, surf_params, point_loop->uv_samples[0].x, point_loop->uv_samples[0].y);
+
+    for (i = 0; i < count; i++)
+    {
+        prc_vec3 position = surface_eval_func(ctx, surf_params, wrap_loop->uv_samples[i].x, wrap_loop->uv_samples[i].y);
+        prc_vec3 normal;
+        uint32_t apex_idx = count + i;
+        uint32_t i_next = (i + 1 == count) ? 0 : (i + 1);
+
+        code = prc_compute_loop_vertex_normal(ctx, surface_eval_func, surf_params,
+            wrap_loop->uv_samples[i].x, wrap_loop->uv_samples[i].y,
+            sampling_info->precision_u, sampling_info->precision_v,
+            sampling_info, orientation, &normal);
+        if (code < 0)
+            return code;
+
+        tess_data->vertices[i].position[0] = (float)position.x;
+        tess_data->vertices[i].position[1] = (float)position.y;
+        tess_data->vertices[i].position[2] = (float)position.z;
+        tess_data->vertices[i].normal[0] = (float)normal.x;
+        tess_data->vertices[i].normal[1] = (float)normal.y;
+        tess_data->vertices[i].normal[2] = (float)normal.z;
+
+        /* This ruling's normal (computed above, away from the degenerate
+           apex) is exact for the apex copy too -- a cone's normal is
+           constant along the whole ruling from base to apex */
+        tess_data->vertices[apex_idx].position[0] = (float)apex_position.x;
+        tess_data->vertices[apex_idx].position[1] = (float)apex_position.y;
+        tess_data->vertices[apex_idx].position[2] = (float)apex_position.z;
+        tess_data->vertices[apex_idx].normal[0] = (float)normal.x;
+        tess_data->vertices[apex_idx].normal[1] = (float)normal.y;
+        tess_data->vertices[apex_idx].normal[2] = (float)normal.z;
+
+        if (orientation == 0)
+        {
+            tess_data->triangles[i * 3 + 0] = apex_idx;
+            tess_data->triangles[i * 3 + 1] = i_next;
+            tess_data->triangles[i * 3 + 2] = i;
+        }
+        else
+        {
+            tess_data->triangles[i * 3 + 0] = apex_idx;
+            tess_data->triangles[i * 3 + 1] = i;
+            tess_data->triangles[i * 3 + 2] = i_next;
+        }
+    }
 
     return 0;
 }
@@ -7471,7 +7682,8 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
     combined_num_loops = 1 + num_traced;
     for (k = 0; k < num_loops; k++)
     {
-        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index)
+        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index ||
+            loop_samples[k].is_point_loop)
             continue;
         combined_num_loops++;
     }
@@ -7501,7 +7713,8 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
     }
     for (k = 0; k < num_loops; k++)
     {
-        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index)
+        if (loop_samples[k].wind_u != 0 || loop_samples[k].wind_v != 0 || k == true_outer_index ||
+            loop_samples[k].is_point_loop)
             continue;
         combined_loops[idx] = loop_samples[k];
         combined_loops[idx].is_outer_loop = 0;
@@ -7653,6 +7866,194 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
     return 0;
 }
 
+/* A cone's single trim loop can itself detour out to the apex and back
+   (e.g. one loop built from a full circumference circle, a line down to
+   the apex, a degenerate zero-radius "circle" sampled entirely at the
+   apex, then a line back to the circle) instead of the apex being its own
+   dedicated loop -- this samples as one combined loop with a long run of
+   coincident apex points buried in the middle, which is_point_loop (a
+   whole-loop check) does not catch. atan2 is exactly as meaningless there
+   as for a whole-loop point loop, and unwrapping straight through that run
+   corrupts the whole loop's wind_u. Detect any such embedded run by local
+   (post-inverse-transform) radius and split it out into its own point
+   loop, leaving the remaining samples as a clean circumference loop -- the
+   same shape the dedicated-point-loop case already handles via
+   prc_tessellate_cone_apex_fan_face. Reallocates *loop_samples_ptr and
+   updates *num_loops_ptr in place only when a split actually happens. */
+static int
+prc_split_cone_apex_runs(prc_context *ctx, prc_type_surf *surface, uint32_t *num_loops_ptr, prc_loop_samples **loop_samples_ptr)
+{
+    uint32_t orig_num_loops = *num_loops_ptr;
+    prc_loop_samples *loops = *loop_samples_ptr;
+    prc_exact_geom_transform inverse_transform;
+    uint32_t *run_start_arr = NULL, *run_end_arr = NULL;
+    prc_vec3 *apex_point_arr = NULL;
+    uint32_t num_splits = 0;
+    uint32_t k;
+    int code;
+
+    if (surface->surface_type != PRC_TYPE_SURF_Cone || orig_num_loops == 0 || loops == NULL)
+        return 0;
+
+    code = prc_get_surface_transform_inverse(ctx, surface, &inverse_transform);
+    if (code < 0)
+        return code;
+
+    run_start_arr = (uint32_t *)prc_calloc(ctx, orig_num_loops, sizeof(uint32_t));
+    run_end_arr = (uint32_t *)prc_calloc(ctx, orig_num_loops, sizeof(uint32_t));
+    apex_point_arr = (prc_vec3 *)prc_calloc(ctx, orig_num_loops, sizeof(prc_vec3));
+    if (run_start_arr == NULL || run_end_arr == NULL || apex_point_arr == NULL)
+    {
+        prc_free(ctx, run_start_arr);
+        prc_free(ctx, run_end_arr);
+        prc_free(ctx, apex_point_arr);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed in allocation prc_split_cone_apex_runs\n");
+        return PRC_ERROR_MEMORY;
+    }
+
+    for (k = 0; k < orig_num_loops; k++)
+    {
+        prc_loop_samples *loop = &loops[k];
+        uint32_t n = loop->num_samples;
+        uint32_t run_start = (uint32_t)-1, run_end = (uint32_t)-1;
+        double max_radius = 0.0;
+        uint32_t i;
+
+        run_start_arr[k] = (uint32_t)-1;
+
+        if (loop->is_point_loop || n < 6)
+            continue;
+
+        for (i = 0; i < n; i++)
+        {
+            prc_vec3 p = inverse_transform.is_identity ? loop->samples[i] :
+                prc_exact_geom_apply_transform(ctx, &inverse_transform, loop->samples[i]);
+            double radius = sqrt(p.x * p.x + p.y * p.y);
+
+            if (radius > max_radius)
+                max_radius = radius;
+        }
+
+        {
+            double tol = fmax(max_radius * 1e-6, 1e-9);
+
+            for (i = 0; i < n; i++)
+            {
+                prc_vec3 p = inverse_transform.is_identity ? loop->samples[i] :
+                    prc_exact_geom_apply_transform(ctx, &inverse_transform, loop->samples[i]);
+                double radius = sqrt(p.x * p.x + p.y * p.y);
+
+                if (radius <= tol)
+                {
+                    if (run_start == (uint32_t)-1)
+                        run_start = i;
+                    run_end = i;
+                }
+                else if (run_start != (uint32_t)-1)
+                {
+                    break;   /* only ever expect one embedded apex run */
+                }
+            }
+        }
+
+        /* Require a genuine interior run: not the whole loop, and not
+           touching either end (a run touching the start/end would mean the
+           apex coincides with the loop's own closing point, a shape this
+           scan is not built to split) */
+        if (run_start == (uint32_t)-1 || run_start == 0 || run_end >= n - 1)
+            continue;
+
+        run_start_arr[k] = run_start;
+        run_end_arr[k] = run_end;
+        apex_point_arr[k] = loop->samples[run_start];
+        num_splits++;
+    }
+
+    if (num_splits == 0)
+    {
+        prc_free(ctx, run_start_arr);
+        prc_free(ctx, run_end_arr);
+        prc_free(ctx, apex_point_arr);
+        return 0;
+    }
+
+    {
+        prc_loop_samples *new_loops = (prc_loop_samples *)prc_calloc(ctx, orig_num_loops + num_splits, sizeof(prc_loop_samples));
+        uint32_t next_new_loop = orig_num_loops;
+
+        if (new_loops == NULL)
+        {
+            prc_free(ctx, run_start_arr);
+            prc_free(ctx, run_end_arr);
+            prc_free(ctx, apex_point_arr);
+            prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate split loops in prc_split_cone_apex_runs\n");
+            return PRC_ERROR_MEMORY;
+        }
+        memcpy(new_loops, loops, orig_num_loops * sizeof(prc_loop_samples));
+        prc_free(ctx, loops);
+
+        for (k = 0; k < orig_num_loops; k++)
+        {
+            prc_loop_samples *loop;
+            prc_loop_samples *point_loop;
+            uint32_t run_start = run_start_arr[k], run_end = run_end_arr[k];
+            uint32_t n, kept_count, pos, i;
+            prc_vec3 *kept;
+
+            if (run_start == (uint32_t)-1)
+                continue;
+
+            loop = &new_loops[k];
+            n = loop->num_samples;
+            kept_count = n - (run_end - run_start + 1);
+            kept = (prc_vec3 *)prc_calloc(ctx, kept_count, sizeof(prc_vec3));
+            if (kept == NULL)
+            {
+                prc_free(ctx, new_loops);
+                prc_free(ctx, run_start_arr);
+                prc_free(ctx, run_end_arr);
+                prc_free(ctx, apex_point_arr);
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate reduced loop in prc_split_cone_apex_runs\n");
+                return PRC_ERROR_MEMORY;
+            }
+            pos = 0;
+            for (i = 0; i < run_start; i++)
+                kept[pos++] = loop->samples[i];
+            for (i = run_end + 1; i < n; i++)
+                kept[pos++] = loop->samples[i];
+
+            prc_free(ctx, loop->samples);
+            loop->samples = kept;
+            loop->num_samples = kept_count;
+
+            point_loop = &new_loops[next_new_loop++];
+            memset(point_loop, 0, sizeof(*point_loop));
+            point_loop->num_samples = 2;
+            point_loop->samples = (prc_vec3 *)prc_calloc(ctx, 2, sizeof(prc_vec3));
+            if (point_loop->samples == NULL)
+            {
+                prc_free(ctx, new_loops);
+                prc_free(ctx, run_start_arr);
+                prc_free(ctx, run_end_arr);
+                prc_free(ctx, apex_point_arr);
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate apex point loop in prc_split_cone_apex_runs\n");
+                return PRC_ERROR_MEMORY;
+            }
+            point_loop->samples[0] = apex_point_arr[k];
+            point_loop->samples[1] = apex_point_arr[k];
+            point_loop->is_point_loop = 1;
+        }
+
+        *loop_samples_ptr = new_loops;
+        *num_loops_ptr = orig_num_loops + num_splits;
+    }
+
+    prc_free(ctx, run_start_arr);
+    prc_free(ctx, run_end_arr);
+    prc_free(ctx, apex_point_arr);
+    return 0;
+}
+
 static int
 prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t face_index, prc_topo_face *topo_face,
@@ -7747,6 +8148,27 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
                     prc_error(ctx, PRC_ERROR_INTERNAL, "Failed in prc_sample_loop\n");
                     return PRC_ERROR_INTERNAL;
                 }
+            }
+
+            /* A cone's single trim loop can detour out to the apex and back
+               (full circumference, line to apex, degenerate point, line
+               back) instead of the apex being its own loop -- split any such
+               embedded run out into its own point loop before the uv
+               mapping below, which would otherwise try to atan2 straight
+               through it. No-op (and cheap) for every other case */
+            code = prc_split_cone_apex_runs(ctx, &surface, &num_loops, &loop_samples);
+            if (code < 0)
+            {
+                for (j = 0; j < num_loops; j++)
+                {
+                    if (loop_samples[j].samples != NULL)
+                    {
+                        prc_free(ctx, loop_samples[j].samples);
+                    }
+                }
+                prc_free(ctx, loop_samples);
+                prc_error(ctx, code, "Failed in prc_split_cone_apex_runs\n");
+                return code;
             }
 
             /* Now lets get the loops onto the parametric surface so they can
@@ -7974,6 +8396,48 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
             prc_error(ctx, code, "Failed in prc_tessellate_planar_face_from_loops\n");
         }
         return code;
+    }
+
+    /* A cone trimmed down to exactly its apex (a single-point loop) plus one
+       loop winding once around the full circumference: an exact fan of
+       rulings from the apex, see prc_tessellate_cone_apex_fan_face. Anything
+       more complex (extra holes, more than one wrapping loop, etc.) falls
+       through to the general grid+clip path below like before */
+    if (surface.surface_type == PRC_TYPE_SURF_Cone && num_loops == 2 && loop_samples != NULL)
+    {
+        uint32_t point_idx = (uint32_t)-1, wrap_idx = (uint32_t)-1;
+
+        for (k = 0; k < num_loops; k++)
+        {
+            if (loop_samples[k].is_point_loop)
+                point_idx = k;
+            else if (loop_samples[k].wind_u != 0)
+                wrap_idx = k;
+        }
+
+        if (point_idx != (uint32_t)-1 && wrap_idx != (uint32_t)-1)
+        {
+            code = prc_tessellate_cone_apex_fan_face(ctx, data, shell_index, face_index,
+                geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
+                &loop_samples[point_idx], &loop_samples[wrap_idx]);
+            for (j = 0; j < num_loops; j++)
+            {
+                if (loop_samples[j].samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].samples);
+                }
+                if (loop_samples[j].uv_samples != NULL)
+                {
+                    prc_free(ctx, loop_samples[j].uv_samples);
+                }
+            }
+            prc_free(ctx, loop_samples);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_tessellate_cone_apex_fan_face\n");
+            }
+            return code;
+        }
     }
 
     /* Curved periodic surfaces (Cone/Cylinder/Sphere/Torus) bounded by loops:
