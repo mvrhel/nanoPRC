@@ -106,7 +106,7 @@ int main(int argc, char **argv)
 
     uint32_t total_tess = 0, total_line_tess = 0;
     uint32_t num_extra_geom_tess = 0;
-    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess) != 0) { fprintf(stderr, "count failed\n"); return 1; }
+    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess, 0) != 0) { fprintf(stderr, "count failed\n"); return 1; }
     printf("total_tess=%u\n", total_tess);
 
     /* Collect all triangles across all faces of tessellation 0 into flat

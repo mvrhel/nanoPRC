@@ -281,7 +281,7 @@ static int tess_table_build(prc_context *ctx, prc_api_data data,
     code = prc_api_get_number_tessellations(ctx, data, model_tree,
                                              &table->num_tess,
                                              &table->num_line_tess,
-                                             &num_extra_geom_tess);
+                                             &num_extra_geom_tess, 0);
     if (code < 0)
     {
         fprintf(stderr, "error: prc_api_get_number_tessellations failed (%d)\n", code);

@@ -685,7 +685,7 @@ void Scene::convertTree(prc_context *ctx, prc_api_data data, prc_api_product *ap
     }
 }
 
-void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
+void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck, bool exactGeomOnly)
 {
     uint32_t tess_offset = 0;
     uint32_t num_models, num_products;
@@ -748,7 +748,8 @@ void Scene::load(const char *infile, Camera *camera, bool memoryLeakCheck)
        in the spec but Adobe does this) and we can have line data in the uncompressed
        tessellation */
     code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations,
-                                            &totalLineTesselations, &totalExactGeomTess);
+                                            &totalLineTesselations, &totalExactGeomTess,
+                                            exactGeomOnly ? 1 : 0);
     if (code < 0)
     {
         printf("Scene::load: prc_api_get_number_tessellations failed\n");

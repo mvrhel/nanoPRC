@@ -235,7 +235,7 @@ main(int argc, char **argv)
         }
         if (prc_api_prep_model_tree(ctx, data, &num_parts, &num_products, &num_markups) < 0 ||
             prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups) < 0 ||
-            prc_api_get_number_tessellations(ctx, data, model_tree, &total, &total_line, &num_eg) < 0)
+            prc_api_get_number_tessellations(ctx, data, model_tree, &total, &total_line, &num_eg, 0) < 0)
         {
             fprintf(stderr, "model tree / tess count failed\n");
             prc_api_release_data(ctx, data, NULL, 0, NULL, 0, NULL, 0, model_tree);

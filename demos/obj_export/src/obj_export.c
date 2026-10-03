@@ -309,7 +309,7 @@ int main(int argc, char *argv[])
     PRC_CHECK_RC(prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups),
                  "prc_api_create_model_tree node creation failed");
 
-    PRC_CHECK_RC(prc_api_get_number_tessellations(ctx, data, model_tree, &total_tessellations, &total_line_tessellations, &num_extra_geom_tess),
+    PRC_CHECK_RC(prc_api_get_number_tessellations(ctx, data, model_tree, &total_tessellations, &total_line_tessellations, &num_extra_geom_tess, 0),
                  "prc_api_get_number_tessellations count retrieval failed");
 
     if (total_tessellations > 0)

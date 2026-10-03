@@ -3865,6 +3865,7 @@ typedef struct prc_exact_geom_tess_s
     uint32_t topo_context_index;
     uint32_t body_index;
     uint32_t part_reserve_index;
+    void *style_leaf; /* Different faces can have different styles. This has access to them */
 } prc_exact_geom_tess;
 
 /* Done with exact geometry tessellation management */

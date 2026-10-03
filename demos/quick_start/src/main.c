@@ -97,7 +97,7 @@ int main(int argc, char *argv[])
        in the spec but Adobe does this) and we can have line data in the uncompressed
        tessellation */
     code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations,
-                                            &totalLineTesselations, &num_extra_geom_tess);
+                                            &totalLineTesselations, &num_extra_geom_tess, 0);
     if (code < 0)
     {
         printf("prc_api_get_number_tessellations failed\n");

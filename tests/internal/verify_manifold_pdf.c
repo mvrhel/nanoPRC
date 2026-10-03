@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     printf("parts=%u products=%u markups=%u\n", num_parts, num_products, num_markups);
 
     code = prc_api_get_number_tessellations(ctx, data, model_tree,
-        &totalTesselations, &totalLineTesselations, &num_extra_geom_tess);
+        &totalTesselations, &totalLineTesselations, &num_extra_geom_tess, 0);
     if (code < 0) { printf("get_number_tessellations failed\n"); return 1; }
     printf("total tessellations=%u (line=%u)\n", totalTesselations, totalLineTesselations);
 

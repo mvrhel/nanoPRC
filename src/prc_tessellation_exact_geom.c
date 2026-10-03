@@ -1558,6 +1558,18 @@ prc_sample_curve(prc_context *ctx, prc_content_wire_edge *curve,
     curve_params = sample_info.curve_params;
     curve_eval_func = sample_info.curve_eval_func;
 
+    if (curve->is_trimmed)
+    {
+        if (curve->trim_interval.min_value > start)
+        {
+            start = curve->trim_interval.min_value;
+        }
+        if (curve->trim_interval.max_value < end)
+        {
+            end = curve->trim_interval.max_value;
+        }
+    }
+
     switch (curve->ptr_curve.curve_type)
     {
         case PRC_TYPE_CRV_NURBS:
