@@ -67,7 +67,7 @@ main(void)
     PRC_ASSERT(prc_api_create_model_tree(ctx, data, &tree, num_parts,
         num_products, num_markups) >= 0);
     PRC_ASSERT(prc_api_get_number_tessellations(ctx, data, tree, &total,
-        &num_lines, &num_extra) >= 0);
+        &num_lines, &num_extra, 0) >= 0);
     PRC_ASSERT(total > 0);
 
     tesses = (prc_api_tess *)calloc(total, sizeof(prc_api_tess));

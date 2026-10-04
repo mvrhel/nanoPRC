@@ -547,6 +547,7 @@ typedef enum {
 
 /* Table 245 */
 typedef enum {
+    PRC_TYPE_CRV_NONE = 0,
     PRC_TYPE_CRV = PRC_TYPE_ROOT + 10,
     PRC_TYPE_CRV_Base = PRC_TYPE_CRV + 1,
     PRC_TYPE_CRV_Blend02Boundary = PRC_TYPE_CRV + 2,
@@ -3871,6 +3872,7 @@ typedef struct prc_exact_geom_tess_s
     uint32_t topo_context_index;
     uint32_t body_index;
     uint32_t part_reserve_index;
+    void *style_leaf; /* Different faces can have different styles. This has access to them */
 } prc_exact_geom_tess;
 
 /* Done with exact geometry tessellation management */

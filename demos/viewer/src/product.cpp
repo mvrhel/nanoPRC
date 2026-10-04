@@ -551,6 +551,231 @@ void Product::attachTextContent(prc_context *ctx, prc_api_data data,
     delete[] textVertices;
 }
 
+/* This bit of code is here to help me debug exact tessallation work. I am
+   able to render specified ranges of faces to hunt down particular problems. */
+#if 0
+void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *tess, Graphics2D &textRenderer)
+{
+    size_t numGraphicObjects;
+    size_t face_max;
+    int is_material;
+    int code;
+
+    uint32_t start_face_debug = 29;
+    uint32_t end_face_debug = 30;
+    uint32_t num_faces_debug = end_face_debug - start_face_debug;
+
+    // Store transparency flag from tessellation
+    _hasTransparency = tess->has_transparency;
+
+    numGraphicObjects = prc_api_get_num_graphics_primitives(ctx, data, tess);
+    numGraphicObjects = num_faces_debug;
+    _numMeshes = numGraphicObjects;
+    _meshes = new MeshSpec[_numMeshes];
+
+    /* Check if this product has multiple faces with multiple materials */
+    _numMaterials = prc_api_number_of_materials(ctx, data, tess);
+    _numMaterials = num_faces_debug;
+    if (_numMaterials > 1)
+    {
+        _material = new Material[_numMaterials];
+        for (uint32_t i = 0; i < _numMaterials; i++)
+        {
+            _material[i] = kMaterial;
+        }
+    }
+    else
+    {
+        _material = new Material[1];
+        _material[0] = kMaterial;
+    }
+
+    /* We may need to go back and reconfigure the face/tessellation relationship
+       as each face could in theory have different material but right now
+       we set the whole part (tessellation) to have a material. Probably OK but
+       there could be a case where we have different faces with textures and
+       materials and solid colors.  Fun! */
+    if (tess->type == PRC_API_TESS_3D_Wire || tess->type == PRC_API_TESS_MarkUp)
+    {
+        face_max = 1;
+    }
+    else if (tess->type == PRC_API_EXACT_GEOM)
+    {
+        face_max = numGraphicObjects;
+    }
+    else
+    {
+        face_max = tess->num_faces;
+    }
+
+    uint32_t counter = 0;
+    size_t num_text_primitives = 0;
+    prc_api_material prc_material;
+
+    /* A change here to simplify things when dealing with multiple faces
+       in the compressed code.  The vertex splitting was getting
+       overly complex. In the noncompressed case, we
+       can have multiple faces and those faces each have their own
+       vertices. We will squash them back together here though */
+    std::vector<unsigned int> indices;
+    std::vector<prc_api_vertex> combined_vertices;
+    uint32_t vertex_offset = 0;
+
+    for (uint32_t i = start_face_debug; i < end_face_debug; i++)
+    {
+        size_t num_graphic_primitives = 0;
+        prc_api_texture texture;
+        bool hasTexture = false;
+        bool verticesHaveMaterial = false;
+
+        if (prc_api_skip_face(ctx, tess, i))
+        {
+            continue;
+        }
+
+        /* Get the material for this face */
+        is_material = prc_api_face_is_material(ctx, tess, i);
+        if (is_material < 0)
+        {
+            printf("Model::load: prc_api_face_is_material failed\n");
+            exit(1);
+        }
+        if (is_material)
+        {
+            prc_api_get_face_material(ctx, tess, &prc_material, i);
+            _material[counter].diffuse = Vector3(prc_material.diffuse[0], prc_material.diffuse[1], prc_material.diffuse[2]);
+            _material[counter].tint = Vector3(prc_material.ambient[0], prc_material.ambient[1], prc_material.ambient[2]);
+            _material[counter].specular = Vector3(prc_material.specular[0], prc_material.specular[1], prc_material.specular[2]);
+            _material[counter].emissive = Vector3(prc_material.emissive[0], prc_material.emissive[1], prc_material.emissive[2]);
+            _material[counter].shininess = prc_material.shininess;
+            _material[counter].alpha = prc_material.diffuse_alpha; /* We really need to use all the alpha values... */
+        }
+
+        /* The vertices could have material definitions assigned to them */
+        verticesHaveMaterial = prc_api_vertices_have_material(ctx, tess, i);
+
+        if (tess->type == PRC_API_TESS_3D_Wire || tess->type == PRC_API_TESS_MarkUp)
+        {
+            num_graphic_primitives = tess->num_line_primitives;
+            if (tess->type == PRC_API_TESS_MarkUp)
+            {
+                num_text_primitives = tess->num_text_primitives;
+            }
+        }
+        else if (tess->type == PRC_API_EXACT_GEOM)
+        {
+            num_graphic_primitives = 1;
+            hasTexture = 0;
+        }
+        else
+        {
+            num_graphic_primitives = tess->tess_faces[i].num_graphic_primitives;
+            texture = tess->tess_faces[i].texture;
+            hasTexture = texture.data != nullptr;
+        }
+
+        if (hasTexture)
+        {
+            if (!_material[counter].diffuseTexture)
+                _material[counter].setDiffuseTexture(new Texture);
+
+            /* Load the image texture here */
+            _material[counter].diffuseTexture->load(texture);
+        }
+
+        prc_api_vertex *face_vertices = NULL;
+        uint32_t face_vertex_count;
+        code = prc_api_get_face_vertices(ctx, tess, i, &face_vertex_count, &face_vertices);
+        if (code < 0)
+        {
+            printf("Model::load: prc_api_get_face_vertices failed\n");
+            exit(1);
+        }
+
+        // Append THIS face's vertices to combined buffer
+        for (size_t v = 0; v < face_vertex_count; v++) {
+            combined_vertices.push_back(face_vertices[v]);
+        }
+
+        for (uint32_t j = 0; j < num_graphic_primitives; j++)
+        {
+            /* Get primitive from PRC data */
+            prc_api_graphic_primitive primitive;
+            int rc = prc_api_get_graphics_primitive(ctx, data,
+                (prc_api_tess *)tess, i, j, &primitive);
+            if (rc < 0)
+            {
+                printf("Model::load: prc_api_get_graphics_primitive failed\n");
+                exit(1);
+            }
+
+            /* Create a mesh */
+            MeshSpec &mesh = _meshes[counter];
+            mesh.faceIndex = counter;
+            switch (primitive.type)
+            {
+            default:
+                printf("Model::load: unknown primitive type\n");
+                exit(1);
+            case PRC_API_TRIANGLES:
+                mesh.primitive = GL_TRIANGLES;
+                break;
+            case PRC_API_FAN:
+                mesh.primitive = GL_TRIANGLE_FAN;
+                break;
+            case PRC_API_STRIP:
+                mesh.primitive = GL_TRIANGLE_STRIP;
+                break;
+            case PRC_API_LINE:
+                mesh.primitive = GL_LINES;
+                break;
+            case PRC_API_LINE_STRIP:
+                mesh.primitive = GL_LINE_STRIP;
+                break;
+            case PRC_API_LINE_LOOP:
+                mesh.primitive = GL_LINE_LOOP;
+                break;
+            }
+
+            /* Offset the primitive.indices by the vertex_offset of the face */
+            if (vertex_offset > 0)
+            {
+                for (size_t idx = 0; idx < primitive.num_indices; idx++)
+                {
+                    primitive.indices[idx] += vertex_offset;
+                }
+            }
+
+            mesh.offset = indices.size();
+            mesh.numIndices = primitive.num_indices;
+
+            /* Copy index data */
+            indices.resize(indices.size() + primitive.num_indices);
+            memcpy(&indices[mesh.offset], primitive.indices, primitive.num_indices * sizeof(unsigned int));
+
+            if (tess->type == PRC_API_TESS_MarkUp)
+            {
+                mesh.isMarkup = true;
+            }
+            else
+            {
+                mesh.isMarkup = false;
+            }
+
+            mesh.verticesHaveStyle = verticesHaveMaterial;
+            counter++;
+        } // End graphics primitives
+
+        /* For the indices offset in the multi-face case */
+        vertex_offset += face_vertex_count;
+    } // End faces (and materials)
+
+    if (combined_vertices.size() > 0 && indices.size() > 0)
+        uploadGPU(combined_vertices.size(), combined_vertices.data(), indices);
+}
+
+#else
+
 void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *tess, Graphics2D &textRenderer)
 {
     size_t numGraphicObjects;
@@ -764,6 +989,7 @@ void Product::attach(prc_context *ctx, prc_api_data data, const prc_api_tess *te
     if (combined_vertices.size() > 0 && indices.size() > 0)
         uploadGPU(combined_vertices.size(), combined_vertices.data(), indices);
 }
+#endif
 
 static std::string formatAttributeValue(const prc_api_attribute_entry &entry)
 {

@@ -3875,11 +3875,15 @@ prc_api_helper(prc_context *ctx, prc_data *data_in, uint32_t file_index,
 
 /* Gets number of tessellations in the file AND build our table relating the
    tessellations with the styles and the parts across the files. We also have
-   to add in the Markup tessellations */
+   to add in the Markup tessellations. If exact_geom_only is non-zero, the
+   stored tessellation data is ignored entirely (even for RIs that have it)
+   and every RI's tessellation is instead (re)built from its exact geometry,
+   for debugging the exact geometry tessellation path in isolation */
 PRC_EXPORT int
 prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                                  prc_api_product *model_tree, uint32_t *num_tess,
-                                 uint32_t *num_line_tess, uint32_t *num_exact_geom_tess)
+                                 uint32_t *num_line_tess, uint32_t *num_exact_geom_tess,
+                                 uint8_t exact_geom_only)
 {
     prc_data *data = (prc_data *)data_in;
     uint32_t num_files;
@@ -3935,7 +3939,7 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
     for (i = 0; i < num_files; i++)
     {
         num_tess_in_file = data->file_struct[i].tessellation->tess_count;
-        for (j = 0; j < num_tess_in_file; j++)
+        for (j = 0; j < num_tess_in_file && !exact_geom_only; j++)
         {
             found_part_match = 0;
 
@@ -4125,12 +4129,15 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
             uint32_t num_bodies = topo_context->number_of_bodies;
 
             /* Search the reserve for parts that have no tessellation but have
-               exact_geometry with a index_topological_context and index_body. */
+               exact_geometry with a index_topological_context and index_body.
+               When exact_geom_only is set, every part with matching exact
+               geometry qualifies, even if it also has stored tessellation
+               data (which the loop above never ran over in that case). */
             for (k = 0; k < num_parts; k++)
             {
                 part = &reserve->parts[k];
 
-                if (part->biased_tess_index == 0 && part->tess_file_index == i &&
+                if ((exact_geom_only || part->biased_tess_index == 0) && part->tess_file_index == i &&
                     part->biased_topo_contex_index == j + 1 && part->biased_body_index < num_bodies + 1 &&
                     part->biased_body_index != 0)
                 {
@@ -4180,6 +4187,8 @@ prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data_in,
                             0, new_bytes - old_bytes);
                     }
 
+                    /* This first item hands us all the styles for all the faces */
+                    data->exact_geom_tess_part[data->exact_geom_tess_part_count].style_leaf = (void *)reserve->parts[k].RI_item_style_node;
                     data->exact_geom_tess_part[data->exact_geom_tess_part_count].biased_style_index = part->biased_style_index;
                     data->exact_geom_tess_part[data->exact_geom_tess_part_count].file_index = i;
                     data->exact_geom_tess_part[data->exact_geom_tess_part_count].topo_context_index = j;

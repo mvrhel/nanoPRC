@@ -103,7 +103,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    code = prc_api_get_number_tessellations(ctx, data, model_tree, &num_tess, &num_line_tess, &num_extra_geom_tess);
+    code = prc_api_get_number_tessellations(ctx, data, model_tree, &num_tess, &num_line_tess, &num_extra_geom_tess, 0);
     if (code != 0)
     {
         printf("RESULT\tGET_NUM_TESS_FAIL\tcode=%d\n", code);

@@ -104,7 +104,7 @@ count_triangles_and_bbox(prc_context *ctx, const char *path, roundtrip_stats *ou
         goto cleanup;
     if (prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups) != 0)
         goto cleanup;
-    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess) != 0)
+    if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess, 0) != 0)
         goto cleanup;
 
     if (total_tess > 0)

@@ -572,9 +572,13 @@ PRC_EXPORT int prc_api_initialize_tessellation(prc_context* ctx, prc_api_data da
  * @param num_tess Output count of tessellations.
  * @param num_line_tess Output count of line tessellations.
  * @param num_exact_geom_tess Output count of exact geometry tessellations.
+ * @param exact_geom_only If non-zero, ignore all stored tessellation data and
+ *        build every RI's tessellation from its exact geometry instead, even
+ *        for RIs that have stored tessellation data. Useful for debugging the
+ *        exact geometry tessellation path in isolation.
  * @return 0 on success, negative PRC_API_ERROR_* code on failure.
  */
-PRC_EXPORT int prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data, prc_api_product *modeltree, uint32_t *num_tess, uint32_t *num_line_tess, uint32_t *num_exact_geom_tess);
+PRC_EXPORT int prc_api_get_number_tessellations(prc_context *ctx, prc_api_data data, prc_api_product *modeltree, uint32_t *num_tess, uint32_t *num_line_tess, uint32_t *num_exact_geom_tess, uint8_t exact_geom_only);
 
 /**
  * @brief Return number of faces for a tessellation.

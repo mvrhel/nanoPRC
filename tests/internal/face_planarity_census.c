@@ -177,7 +177,7 @@ run_file(const char *path, int csv)
     }
 
     if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess,
-                                         &total_line_tess, &num_eg_tess) < 0)
+                                         &total_line_tess, &num_eg_tess, 0) < 0)
     {
         if (!csv) printf("%-46s  TESS COUNT FAILED\n", path);
         goto out;

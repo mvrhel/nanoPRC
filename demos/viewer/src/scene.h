@@ -44,7 +44,7 @@ public:
     void recommendLightingDefaults(float *ambientWeight, float *diffuseWeight,
         float *sunIntensity) const;
 
-    void load(const char *infile, Camera *camera, bool memoryLeakCheck = false);
+    void load(const char *infile, Camera *camera, bool memoryLeakCheck = false, bool exactGeomOnly = false);
     void unload();
 
     constexpr Graphics2D *getTextRenderPtr() { return _textRenderer; }

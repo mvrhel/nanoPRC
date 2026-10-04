@@ -91,7 +91,7 @@ static int _mouse_up_x, _mouse_up_y; /* Needed to maintain mouse pos for trackba
 static Camera _camera;
 static Product *_selectedProduct = nullptr;
 
-static void run(Config &config, SDL_Window *window, const char *file, bool headless = false, const char *output_file = NULL, bool memoryLeakCheck = false);
+static void run(Config &config, SDL_Window *window, const char *file, bool headless = false, const char *output_file = NULL, bool memoryLeakCheck = false, bool exactGeomOnly = false);
 static bool debugMenu(float time, float deltaTime);
 
 struct PickResult
@@ -520,15 +520,18 @@ int main(int argc, char *argv[])
     bool batchMode = false;
     const char *outputFile = nullptr;
     bool memoryLeakMode = false;
+    bool exactGeomOnly = false;
 
     if (argc < 2)
     {
-        printf("Usage: nano_prc_viewer <file> [--batch] [--output <filename.png>] [--MemoryLeak]\n");
+        printf("Usage: nano_prc_viewer <file> [--batch] [--output <filename.png>] [--MemoryLeak] [--exact-geom-only]\n");
         return 1;
     }
 
     /* Parse args: first non-option is file, --batch/--headless enable batch mode,
-       --output specifies PNG output, --MemoryLeak enables leak-based exit code. */
+       --output specifies PNG output, --MemoryLeak enables leak-based exit code,
+       --exact-geom-only forces tessellation to be rebuilt from exact geometry
+       only (ignoring any stored tessellation data), for debugging. */
     for (int i = 1; i < argc; ++i)
     {
         if (strcmp(argv[i], "--batch") == 0 || strcmp(argv[i], "--headless") == 0)
@@ -538,6 +541,10 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--MemoryLeak") == 0 || strcmp(argv[i], "-MemoryLeak") == 0)
         {
             memoryLeakMode = true;
+        }
+        else if (strcmp(argv[i], "--exact-geom-only") == 0)
+        {
+            exactGeomOnly = true;
         }
         else if (strcmp(argv[i], "--output") == 0 || strcmp(argv[i], "-o") == 0)
         {
@@ -559,7 +566,7 @@ int main(int argc, char *argv[])
 
     if (!file)
     {
-        printf("Usage: nano_prc_viewer <file> [--batch] [--output <filename.png>] [--MemoryLeak]\n");
+        printf("Usage: nano_prc_viewer <file> [--batch] [--output <filename.png>] [--MemoryLeak] [--exact-geom-only]\n");
         return 1;
     }
 
@@ -583,7 +590,7 @@ int main(int argc, char *argv[])
         glGetString(GL_VERSION),
         glGetString(GL_SHADING_LANGUAGE_VERSION));
 
-    run(config, window, file, batchMode, outputFile, memoryLeakMode);
+    run(config, window, file, batchMode, outputFile, memoryLeakMode, exactGeomOnly);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
@@ -773,7 +780,7 @@ compute_rotation2(float x1, float y1, float z1, float x2, float y2, float z2)
         0.0f, 0.0f, 0.0f, 1.0f);
 }
 
-static void run(Config &config, SDL_Window *window, const char *file, bool headless, const char *outputFile, bool memoryLeakCheck)
+static void run(Config &config, SDL_Window *window, const char *file, bool headless, const char *outputFile, bool memoryLeakCheck, bool exactGeomOnly)
 {
     if (g_default_vao != 0)
         glBindVertexArray(g_default_vao);
@@ -786,7 +793,7 @@ static void run(Config &config, SDL_Window *window, const char *file, bool headl
     _camera.setNear(clamp(config.getFloat("Camera.near", 0.1f), 0.1f, 1.0f));
     _camera.setFar(clamp(config.getFloat("Camera.far", 500.0f), 10.0f, 8192.0f));
 
-    _scene.load(file, &_camera, memoryLeakCheck);
+    _scene.load(file, &_camera, memoryLeakCheck, exactGeomOnly);
     _scene.setCameraInitialPosition(&_camera);
 
     {

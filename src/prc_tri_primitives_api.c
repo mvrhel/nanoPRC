@@ -3009,6 +3009,12 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
     prc_api_tess *curr_tess = &api_tess_array_in[exact_object_index];
     prc_api_face *face_out;
     prc_internal_api_face *face_out_reserved = NULL;
+    int leaf_style_unbiased_index = -1;
+    uint32_t leaf_style_file_index = 0;
+    uint8_t is_uncompressed_with_no_texture_entities = false;
+    uint8_t has_texture;
+    float face_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    uint8_t has_ref_style_defined = false;
 
     if (exact_object_index >= data->exact_geom_tess_part_count)
     {
@@ -3034,28 +3040,6 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
     tess_type = data->exact_geom_tess_part[exact_object_index].shells[shell_index].faces[face_index].type;
     biased_style_index = data->exact_geom_tess_part[exact_object_index].biased_style_index;
     file_index = data->exact_geom_tess_part[exact_object_index].file_index;
-
-    if (biased_style_index > 0)
-    {
-        /* Lets get the style information for this */
-        code = prc_api_helper_get_material_from_style_index(ctx, data_in,
-            file_index, biased_style_index - 1, alpha, 0,
-            &is_material, &is_texture, &is_pure_color, &material, &style, color,
-            &had_defined_style);
-        if (code < 0)
-            return code;
-    }
-    else
-    {
-        /* No style information. Just use default values */
-        is_material = 0;
-        is_texture = 0;
-        is_pure_color = 1;
-        color[0] = 0.5f;
-        color[1] = 0.5f;
-        color[2] = 0.5f;
-        color[3] = 1.0f;
-    }
 
     /* Lets point to face that is in this shell */
     face_out = &curr_tess->shells[shell_index].shell_faces[face_index];
@@ -3129,28 +3113,26 @@ prc_api_get_exact_geometry_tessellation_vertices(prc_context *ctx, prc_api_data 
         face_out_reserved->owns_style = 1;
         prc_internal_api_initialize_style(ctx, face_out_reserved->style);
 
-        if (is_material)
+        /* Lets get the style information for this face. We will traverse
+            backwards from the leaf (which is the RI) and forward from the product.
+            dealing with inheritance etc along the way */
+        code = prc_api_helper_get_style_index_from_leaf(ctx, data, face_index,
+            (prc_api_object_style *)data->exact_geom_tess_part[exact_object_index].style_leaf,
+            &leaf_style_unbiased_index, &leaf_style_file_index);
+        if (code < 0)
         {
-            face_out->material = material;
-            memcpy(face_out_reserved->style->ambient_color, material.ambient, 3 * sizeof(float));
-            memcpy(face_out_reserved->style->diffuse_color, material.diffuse, 3 * sizeof(float));
-            memcpy(face_out_reserved->style->specular_color, material.specular, 3 * sizeof(float));
-            memcpy(face_out_reserved->style->emissive_color, material.emissive, 3 * sizeof(float));
-            face_out_reserved->style->ambient_alpha = material.ambient_alpha;
-            face_out_reserved->style->diffuse_alpha = material.diffuse_alpha;
-            face_out_reserved->style->specular_alpha = material.specular_alpha;
-            face_out_reserved->style->emissive_alpha = material.emissive_alpha;
-            face_out_reserved->style->shininess = material.shininess;
-            face_out_reserved->style->is_material = 1;
+            prc_error(ctx, code,
+                "Failed to get style from leaf in prc_api_get_tessellation_vertices\n");
         }
-        else
+
+        code = prc_api_helper_get_face_style(ctx, data_in, leaf_style_file_index,
+            leaf_style_unbiased_index, alpha, is_uncompressed_with_no_texture_entities,
+            &is_material, &is_texture, &is_pure_color, &material,
+            face_out_reserved->style, color, api_tess_array_in, face_out, &has_ref_style_defined);
+        if (code < 0)
         {
-            memcpy(face_out_reserved->style->diffuse_color, color, 3 * sizeof(float));
-            face_out_reserved->style->diffuse_alpha = color[3];
-            face_out_reserved->style->ambient_alpha = 1.0;
-            face_out_reserved->style->specular_alpha = 1.0;
-            face_out_reserved->style->emissive_alpha = 1.0;
-            face_out_reserved->style->is_material = 0;
+            prc_error(ctx, code,
+                "Failed to get face style in prc_api_get_tessellation_vertices\n");
         }
 
         face_out->face_vertices.num_vertices = num_vertices;

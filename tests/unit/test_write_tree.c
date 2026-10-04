@@ -535,7 +535,7 @@ run_shape(prc_context *ctx, const tree_spec *spec)
     PRC_ASSERT_EQ(count_nodes_with_parts(model_tree), f.num_nodes + 1);
 
     PRC_ASSERT_EQ(prc_api_get_number_tessellations(ctx, data, model_tree,
-        &num_tess, &num_line_tess, &num_exact), 0);
+        &num_tess, &num_line_tess, &num_exact, 0), 0);
     PRC_ASSERT_EQ(num_tess, f.num_leaves);
     PRC_ASSERT_EQ(num_exact, 0);
     /* The two encodings differ here, and legitimately so. For TRIANGLES the

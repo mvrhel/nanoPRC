@@ -124,7 +124,7 @@ int main(int argc, char **argv)
     code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
     if (code < 0) { printf("create_model_tree failed\n"); return 1; }
 
-    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations, &num_extra_geom_tess);
+    code = prc_api_get_number_tessellations(ctx, data, model_tree, &totalTesselations, &totalLineTesselations, &num_extra_geom_tess, 0);
     if (code < 0) { printf("get_number_tessellations failed\n"); return 1; }
     printf("parts=%u products=%u markups=%u total tessellations=%u\n",
         num_parts, num_products, num_markups, totalTesselations);

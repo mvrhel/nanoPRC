@@ -178,7 +178,7 @@ main(int argc, char **argv)
     if (code >= 0)
         code = prc_api_get_number_tessellations(ctx, data, model_tree,
                                                 &total_tess, &total_line_tess,
-                                                &num_extra_geom_tess);
+                                                &num_extra_geom_tess, 0);
     if (code < 0)
     {
         printf("parse failed before the model tree was walked\n");

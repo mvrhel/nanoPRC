@@ -852,7 +852,7 @@ int main(int argc, char *argv[])
             if (code == 0)
                 code = prc_api_create_model_tree(ctx, data, &model_tree, num_parts, num_products, num_markups);
             if (code == 0)
-                code = prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess);
+                code = prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess, &total_line_tess, &num_extra_geom_tess, 0);
 
             if (code != 0)
             {

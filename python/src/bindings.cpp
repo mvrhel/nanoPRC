@@ -738,7 +738,7 @@ public:
     Document& operator=(const Document&) = delete;
 
     Document(Document&& other) noexcept
-        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), exact_geom_shells_storage_(std::move(other.exact_geom_shells_storage_)), exact_geom_faces_storage_(std::move(other.exact_geom_faces_storage_)), exact_geom_merged_vertices_storage_(std::move(other.exact_geom_merged_vertices_storage_)), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_), num_exact_geom_tessellations_(other.num_exact_geom_tessellations_), exact_geom_offset_(other.exact_geom_offset_) {
+        : owner_(std::move(other.owner_)), data_(other.data_), model_tree_(other.model_tree_), num_parts_(other.num_parts_), num_products_(other.num_products_), num_markups_(other.num_markups_), tessellations_(std::move(other.tessellations_)), line_tessellations_(std::move(other.line_tessellations_)), tess_faces_storage_(std::move(other.tess_faces_storage_)), line_tess_faces_storage_(std::move(other.line_tess_faces_storage_)), line_tess_map_(std::move(other.line_tess_map_)), exact_geom_shells_storage_(std::move(other.exact_geom_shells_storage_)), exact_geom_faces_storage_(std::move(other.exact_geom_faces_storage_)), exact_geom_merged_vertices_storage_(std::move(other.exact_geom_merged_vertices_storage_)), exact_geom_only_(other.exact_geom_only_), tessellation_initialized_(other.tessellation_initialized_), num_tessellations_(other.num_tessellations_), num_line_tessellations_(other.num_line_tessellations_), num_exact_geom_tessellations_(other.num_exact_geom_tessellations_), exact_geom_offset_(other.exact_geom_offset_) {
         other.data_ = nullptr;
         other.model_tree_ = nullptr;
         other.tessellation_initialized_ = false;
@@ -776,6 +776,7 @@ public:
             exact_geom_shells_storage_ = std::move(other.exact_geom_shells_storage_);
             exact_geom_faces_storage_ = std::move(other.exact_geom_faces_storage_);
             exact_geom_merged_vertices_storage_ = std::move(other.exact_geom_merged_vertices_storage_);
+            exact_geom_only_ = other.exact_geom_only_;
             tessellation_initialized_ = other.tessellation_initialized_;
             num_tessellations_ = other.num_tessellations_;
             num_line_tessellations_ = other.num_line_tessellations_;
@@ -841,6 +842,21 @@ public:
 
     bool has_model_tree() const {
         return model_tree_ != nullptr;
+    }
+
+    /* When set, tessellation is always (re)built from exact geometry, even for
+       RIs that also have stored tessellation data -- useful for debugging the
+       exact geometry tessellation path in isolation. Must be set before the
+       first call that triggers tessellation initialization. */
+    void set_exact_geom_only(bool value) {
+        if (tessellation_initialized_ && value != exact_geom_only_) {
+            throw std::runtime_error("set_exact_geom_only must be called before tessellations are accessed");
+        }
+        exact_geom_only_ = value;
+    }
+
+    bool exact_geom_only() const {
+        return exact_geom_only_;
     }
 
     std::shared_ptr<ModelNode> create_model_tree() {
@@ -1114,7 +1130,7 @@ private:
         uint32_t num_tess = 0;
         uint32_t num_line_tess = 0;
         uint32_t num_exact_geom_tess = 0;
-        int result = prc_api_get_number_tessellations(owner_->raw(), data_, model_tree_, &num_tess, &num_line_tess, &num_exact_geom_tess);
+        int result = prc_api_get_number_tessellations(owner_->raw(), data_, model_tree_, &num_tess, &num_line_tess, &num_exact_geom_tess, exact_geom_only_ ? 1 : 0);
         if (result != 0) {
             throw std::runtime_error("prc_api_get_number_tessellations failed");
         }
@@ -1302,6 +1318,7 @@ private:
     std::vector<std::vector<std::vector<prc_api_face>>> exact_geom_faces_storage_;
     std::vector<std::vector<prc_api_vertex>> exact_geom_merged_vertices_storage_;
     uint32_t exact_geom_tess_counter_ = 0;
+    bool exact_geom_only_ = false;
     bool tessellation_initialized_ = false;
     uint32_t num_tessellations_ = 0;
     uint32_t num_line_tessellations_ = 0;
@@ -1383,6 +1400,9 @@ PYBIND11_MODULE(_core, m) {
              "Return whether a model tree has already been created.")
         .def("create_model_tree", &Document::create_model_tree,
              "Create the model tree and return its root node.")
+        .def_property("exact_geom_only", &Document::exact_geom_only, &Document::set_exact_geom_only,
+             "If True, tessellation is always rebuilt from exact geometry, even for RIs that also "
+             "have stored tessellation data. Must be set before tessellations are accessed.")
         .def("tessellation_counts", &Document::tessellation_counts,
              "Return a tuple (num_tess, num_line_tess) after the model tree exists.")
            .def("exact_geometry_tessellation_count", &Document::exact_geometry_tessellation_count,

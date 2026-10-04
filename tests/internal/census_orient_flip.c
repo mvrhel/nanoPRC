@@ -110,7 +110,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (prc_api_get_number_tessellations(ctx, data, model_tree, &total_tess,
-                                         &total_line_tess, &num_extra_geom_tess) != 0)
+                                         &total_line_tess, &num_extra_geom_tess, 0) != 0)
     {
         fprintf(stderr, "COUNTFAIL %s\n", argv[1]);
         return 1;
