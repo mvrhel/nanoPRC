@@ -24,6 +24,7 @@
 #include <string.h>
 
 //#define PRC_DEBUG_EARCLIP 1
+#define CHECK_SURFACE_PROJECTION 0
 
 #define CURVE_SAMPLES 32
 #define SURFACE_SAMPLES 32
@@ -57,6 +58,12 @@
    triangles worst case per boundary ear-clip triangle). Kept low for now
    while debugging -- raise once the trim shape itself is confirmed correct */
 #define PRC_CURVED_LOOP_SUBDIVIDE_MAX_DEPTH 3
+/* Safety cap on prc_subdivide_trim_boundary_triangle's recursion. In
+   practice only the one branch of the fan-split that keeps straddling the
+   trim curve recurses this deep (siblings resolve to all-in/all-out after
+   a level or two), so cost is roughly linear in boundary cell count, not
+   3^depth */
+#define PRC_TRIM_BOUNDARY_SUBDIVIDE_MAX_DEPTH 7
 
 static int prc_tessellate_surface(prc_context *ctx, prc_data *data,
     uint32_t shell_index, uint32_t face_index, prc_topo_face *topo_face,
@@ -2251,12 +2258,12 @@ prc_evaluate_surf_nurbs(prc_context *ctx, void *params, double u, double v)
             uint32_t ctrl_v = span_v - nurbs->dv + j;
             prc_control_points_nurbs_surf *cp = &nurbs->p[ctrl_u * num_ctrl_v + ctrl_v];
             double weight = nurbs->is_rational ? cp->w : 1.0;
-            double basis = Nu[i] * Nv[j] * weight;
+            double basis = Nu[i] * Nv[j];  /* Weight is already applied to these */
 
             x += basis * cp->x;
             y += basis * cp->y;
             z += basis * cp->z;
-            weight_sum += basis;
+            weight_sum += basis * weight; /* Denominator does need the weight */
         }
     }
 
@@ -2510,48 +2517,33 @@ prc_project_point_onto_curve(prc_context *ctx, curve_func eval_func, void *curve
     return eval_func(ctx, curve_params, t);
 }
 
-/* Minimizes the squared distance from point to surface_eval_func(u,v) via coarse grid
-   sampling followed by Gauss-Newton refinement (tangents from finite differences) */
+/* Gauss-Newton refinement of (u, v) (tangents from finite differences) starting
+   from a caller-supplied guess, minimizing the squared distance from point to
+   surface_eval_func(u,v). No coarse global search: callers that already have a
+   good starting guess -- e.g. the previously projected sample along the same
+   loop -- should prefer this over prc_project_point_onto_surface, since a fresh
+   global coarse search per sample can converge to a different, equally valid
+   but discontinuous (u,v) branch whenever the surface nearly meets itself (e.g.
+   a NURBS cylinder's own seam, where u near min_u and u near max_u map to
+   nearly the same 3D point); Newton's local convergence instead stays on
+   whichever branch the guess is already on, keeping a sampled loop continuous
+   in uv space */
 static prc_vec3
-prc_project_point_onto_surface(prc_context *ctx, surface_func eval_func, void *surface_params,
-    double min_u, double max_u, double min_v, double max_v, prc_vec3 point)
+prc_refine_point_on_surface(prc_context *ctx, surface_func eval_func, void *surface_params,
+    double min_u, double max_u, double min_v, double max_v, prc_vec3 point,
+    double u0, double v0, double *out_u, double *out_v)
 {
-    const uint32_t coarse_samples = 12;
     const uint32_t max_iterations = 30;
     double hu = (max_u - min_u) * 1e-5;
     double hv = (max_v - min_v) * 1e-5;
-    double best_u = min_u, best_v = min_v, best_dist_sq = -1.0;
-    uint32_t i, j, iter;
-    double u, v;
+    double u = u0, v = v0;
+    uint32_t iter;
 
     if (hu < 1e-9)
         hu = 1e-9;
     if (hv < 1e-9)
         hv = 1e-9;
 
-    for (i = 0; i < coarse_samples; i++)
-    {
-        u = min_u + (max_u - min_u) * ((double)i / (double)(coarse_samples - 1));
-        for (j = 0; j < coarse_samples; j++)
-        {
-            prc_vec3 p;
-            double dx, dy, dz, dist_sq;
-
-            v = min_v + (max_v - min_v) * ((double)j / (double)(coarse_samples - 1));
-            p = eval_func(ctx, surface_params, u, v);
-            dx = p.x - point.x; dy = p.y - point.y; dz = p.z - point.z;
-            dist_sq = dx * dx + dy * dy + dz * dz;
-            if (best_dist_sq < 0.0 || dist_sq < best_dist_sq)
-            {
-                best_dist_sq = dist_sq;
-                best_u = u;
-                best_v = v;
-            }
-        }
-    }
-
-    u = best_u;
-    v = best_v;
     for (iter = 0; iter < max_iterations; iter++)
     {
         prc_vec3 p, pu_plus, pu_minus, pv_plus, pv_minus;
@@ -2612,7 +2604,51 @@ prc_project_point_onto_surface(prc_context *ctx, surface_func eval_func, void *s
             break;
     }
 
+    if (out_u != NULL)
+        *out_u = u;
+    if (out_v != NULL)
+        *out_v = v;
+
     return eval_func(ctx, surface_params, u, v);
+}
+
+/* Minimizes the squared distance from point to surface_eval_func(u,v) via coarse grid
+   sampling followed by Gauss-Newton refinement (prc_refine_point_on_surface).
+   out_u/out_v are optional (pass NULL to ignore) and report the (u,v) found, for
+   callers that need the surface parameter itself rather than just the projected point */
+static prc_vec3
+prc_project_point_onto_surface(prc_context *ctx, surface_func eval_func, void *surface_params,
+    double min_u, double max_u, double min_v, double max_v, prc_vec3 point,
+    double *out_u, double *out_v)
+{
+    const uint32_t coarse_samples = 12;
+    double best_u = min_u, best_v = min_v, best_dist_sq = -1.0;
+    uint32_t i, j;
+    double u, v;
+
+    for (i = 0; i < coarse_samples; i++)
+    {
+        u = min_u + (max_u - min_u) * ((double)i / (double)(coarse_samples - 1));
+        for (j = 0; j < coarse_samples; j++)
+        {
+            prc_vec3 p;
+            double dx, dy, dz, dist_sq;
+
+            v = min_v + (max_v - min_v) * ((double)j / (double)(coarse_samples - 1));
+            p = eval_func(ctx, surface_params, u, v);
+            dx = p.x - point.x; dy = p.y - point.y; dz = p.z - point.z;
+            dist_sq = dx * dx + dy * dy + dz * dz;
+            if (best_dist_sq < 0.0 || dist_sq < best_dist_sq)
+            {
+                best_dist_sq = dist_sq;
+                best_u = u;
+                best_v = v;
+            }
+        }
+    }
+
+    return prc_refine_point_on_surface(ctx, eval_func, surface_params,
+        min_u, max_u, min_v, max_v, point, best_u, best_v, out_u, out_v);
 }
 
 /* Projects center onto whichever of bound_surface/bound_curve is present (exactly one
@@ -2639,7 +2675,7 @@ prc_project_onto_blend_bound(prc_context *ctx, prc_ptr_surface *bound_surface,
 
         *out = prc_project_point_onto_surface(ctx, eval_func, eval_params,
             sampling_info.start_u, sampling_info.end_u,
-            sampling_info.start_v, sampling_info.end_v, center);
+            sampling_info.start_v, sampling_info.end_v, center, NULL, NULL);
         return 0;
     }
 
@@ -3089,11 +3125,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_cone *cone = surface->surf_cone;
             params = cone->parameterization;
             has_transform = cone->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &cone->transform;
-                exact_geom_trans = &cone->exact_geom_transform;
-            }
+            prc_trans = &cone->transform;
+            exact_geom_trans = &cone->exact_geom_transform;
 
             sampling_info->num_samples_u = SURFACE_SAMPLES;
             sampling_info->num_samples_v = 2;
@@ -3126,11 +3159,9 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_cylinder *cylinder = surface->surf_cylinder;
             params = cylinder->parameterization;
             has_transform = cylinder->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &cylinder->transform;
-                exact_geom_trans = &cylinder->exact_geom_transform;
-            }
+            prc_trans = &cylinder->transform;
+            exact_geom_trans = &cylinder->exact_geom_transform;
+
             sampling_info->num_samples_u = SURFACE_SAMPLES;
             sampling_info->num_samples_v = 2;
             sampling_info->u_periodic = params.swap_uv ? 0 : 1;
@@ -3164,11 +3195,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             double center_min_u = 0.0, center_max_u = 0.0;
 
             has_transform = blend->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &blend->transform;
-                exact_geom_trans = &blend->exact_geom_transform;
-            }
+            prc_trans = &blend->transform;
+            exact_geom_trans = &blend->exact_geom_transform;
 
             /* u is the angle around the pipe; v is the center curve parameter */
             code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
@@ -3206,11 +3234,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             double center_min_u = 0.0, center_max_u = 0.0;
 
             has_transform = blend->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &blend->transform;
-                exact_geom_trans = &blend->exact_geom_transform;
-            }
+            prc_trans = &blend->transform;
+            exact_geom_trans = &blend->exact_geom_transform;
 
             /* u is the center curve parameter; v's range depends on parameterization_type */
             code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
@@ -3245,11 +3270,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_blend03 *blend = surface->surf_blend03;
             params = blend->parameterization;
             has_transform = blend->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &blend->transform;
-                exact_geom_trans = &blend->exact_geom_transform;
-            }
+            prc_trans = &blend->transform;
+            exact_geom_trans = &blend->exact_geom_transform;
             break;
         }
         case PRC_TYPE_SURF_NURBS:
@@ -3281,11 +3303,9 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_cylindrical *cylindrical = surface->surf_cylindrical;
             params = cylindrical->parameterization;
             has_transform = cylindrical->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &cylindrical->transform;
-                exact_geom_trans = &cylindrical->exact_geom_transform;
-            }
+            prc_trans = &cylindrical->transform;
+            exact_geom_trans = &cylindrical->exact_geom_transform;
+
             sampling_info->num_samples_u = CYLINDRICAL_MAX_SAMPLES;
             sampling_info->num_samples_v = CYLINDRICAL_MAX_SAMPLES;
             sampling_info->u_periodic = 0;
@@ -3305,11 +3325,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             params = offset->parameterization;
 
             has_transform = offset->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &offset->transform;
-                exact_geom_trans = &offset->exact_geom_transform;
-            }
+            prc_trans = &offset->transform;
+            exact_geom_trans = &offset->exact_geom_transform;
 
             /* The implicit parameterization matches the base surface's UV domain */
             if (offset->base_surface.is_referenced)
@@ -3337,11 +3354,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_pipe *pipe = surface->surf_pipe;
             params = pipe->parameterization;
             has_transform = pipe->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &pipe->transform;
-                exact_geom_trans = &pipe->exact_geom_transform;
-            }
+            prc_trans = &pipe->transform;
+            exact_geom_trans = &pipe->exact_geom_transform;
             break;
         }
         case PRC_TYPE_SURF_Plane:
@@ -3369,11 +3383,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_ruled *ruled = surface->surf_ruled;
             params = ruled->parameterization;
             has_transform = ruled->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &ruled->transform;
-                exact_geom_trans = &ruled->exact_geom_transform;
-            }
+            prc_trans = &ruled->transform;
+            exact_geom_trans = &ruled->exact_geom_transform;
             break;
         }
         case PRC_TYPE_SURF_Sphere:
@@ -3381,11 +3392,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_sphere *sphere = surface->surf_sphere;
             params = sphere->parameterization;
             has_transform = sphere->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &sphere->transform;
-                exact_geom_trans = &sphere->exact_geom_transform;
-            }
+            prc_trans = &sphere->transform;
+            exact_geom_trans = &sphere->exact_geom_transform;
             sampling_info->num_samples_u = SPHERE_MAX_SAMPLES;
             sampling_info->num_samples_v = SPHERE_MAX_SAMPLES;
             sampling_info->u_periodic = 1;
@@ -3406,11 +3414,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
 
             params = revolution->parameterization;
             has_transform = revolution->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &revolution->transform;
-                exact_geom_trans = &revolution->exact_geom_transform;
-            }
+            prc_trans = &revolution->transform;
+            exact_geom_trans = &revolution->exact_geom_transform;
 
             /* Goes with v unless swapped */
             prc_get_curve_periodicity(ctx, &revolution->base_curve,
@@ -3439,11 +3444,9 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             uint8_t curve_periodic = 0;
             double curve_period = 0.0;
 
-            if (has_transform)
-            {
-                prc_trans = &extrusion->transform;
-                exact_geom_trans = &extrusion->exact_geom_transform;
-            }
+            prc_trans = &extrusion->transform;
+            exact_geom_trans = &extrusion->exact_geom_transform;
+
             prc_get_curve_periodicity(ctx, &extrusion->base_curve,
                 &curve_periodic, &curve_period);
 
@@ -3469,11 +3472,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
 
             params = from_curves->parameterization;
             has_transform = from_curves->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &from_curves->transform;
-                exact_geom_trans = &from_curves->exact_geom_transform;
-            }
+            prc_trans = &from_curves->transform;
+            exact_geom_trans = &from_curves->exact_geom_transform;
 
             prc_get_curve_periodicity(ctx, &from_curves->first_curve,
                 &curve1_periodic, &curve1_period);
@@ -3499,11 +3499,9 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_torus *torus = surface->surf_torus;
             params = torus->parameterization;
             has_transform = torus->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &torus->transform;
-                exact_geom_trans = &torus->exact_geom_transform;
-            }
+            prc_trans = &torus->transform;
+            exact_geom_trans = &torus->exact_geom_transform;
+
             sampling_info->num_samples_u = TORUS_MAX_SAMPLES;
             sampling_info->num_samples_v = TORUS_MAX_SAMPLES;
             sampling_info->u_periodic = 0;
@@ -3523,11 +3521,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_transform *transform = surface->surf_transform;
             params = transform->parameterization;
             has_transform = transform->has_transform;
-            if (has_transform)
-            {
-                prc_trans = &transform->transform;
-                exact_geom_trans = &transform->exact_geom_transform;
-            }
+            prc_trans = &transform->transform;
+            exact_geom_trans = &transform->exact_geom_transform;
             break;
         }
         case PRC_TYPE_SURF_Blend04:
@@ -3546,6 +3541,10 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
         {
             return code;
         }
+    }
+    else if (exact_geom_trans != NULL)
+    {
+        exact_geom_trans->is_identity = 1;
     }
 
     if (surface->surface_type == PRC_TYPE_SURF_Plane || surface->surface_type == PRC_TYPE_SURF_NURBS ||
@@ -5432,7 +5431,10 @@ prc_assign_loop_inner_outer(prc_context *ctx, prc_topo_face *topo_face, uint8_t 
 
             case PRC_TYPE_SURF_NURBS:
             {
-                break;
+                /* NURBS loops are never periodic/wrapping (see prc_get_
+                   surface_data), so like Plane this is always plain
+                   point-in-polygon nesting. */
+                return prc_assign_outer_loop_by_nesting(ctx, num_loops, loop_samples);
             }
 
             case PRC_TYPE_SURF_Blend02:
@@ -5791,11 +5793,104 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_NURBS:
         {
+            /* No closed-form inverse like the analytic surfaces above (cone/
+               cylinder/sphere/torus can recover u,v directly from x,y,z via
+               atan2/etc.) -- each 3D sample is instead projected back onto
+               the surface numerically (coarse grid search + Gauss-Newton,
+               prc_project_point_onto_surface), the same machinery already
+               used to invert points for the Blend01/02 bound surfaces */
+            prc_surf_nurbs *nurbs = surface->surf_nurbs;
+            prc_surface_params nurbs_eval_params = { 0 };
+            double min_u = nurbs->knot_vector_u[nurbs->du];
+            double max_u = nurbs->knot_vector_u[nurbs->highest_index_of_knots_u - nurbs->du];
+            double min_v = nurbs->knot_vector_v[nurbs->dv];
+            double max_v = nurbs->knot_vector_v[nurbs->highest_index_of_knots_v - nurbs->dv];
+
+            nurbs_eval_params.surface_params = (void *)nurbs;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    double u, v;
+
+                    /* Warm-start every sample but the first from its
+                       predecessor along the same loop instead of redoing an
+                       independent global search: a NURBS surface can nearly
+                       meet itself (e.g. a cylinder's own seam), where a
+                       fresh coarse search per sample may land on either of
+                       two equally valid but discontinuous (u,v) branches --
+                       seeding Newton from the previous point's (u,v) keeps
+                       it on the same branch, producing a continuous uv loop */
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_nurbs, &nurbs_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_nurbs, &nurbs_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+#if CHECK_SURFACE_PROJECTION
+
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_nurbs(ctx, &nurbs_eval_params, u, v);
+                    fprintf(stderr, " Nurbs projection: curve_sample=%u delta=(%.9f,%.9f,%.9f)\n",
+                        j, curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Blend02:
         {
+            /* No closed-form inverse: u is the center curve's own parameter
+               and v is the swept angle (scaled to [0,1] when
+               parameterization_type == 0), but the angle itself depends on
+               the two bound directions projected from the center curve at
+               that u, which vary arbitrarily along the curve -- so each 3D
+               sample is projected back numerically, same as NURBS above */
+            prc_surf_blend02 *blend = surface->surf_blend02;
+            prc_surface_params blend_eval_params = { 0 };
+            curve_func center_eval_func = NULL;
+            void *center_params = NULL;
+            double min_u = 0.0, max_u = 0.0;
+            double min_v = 0.0;
+            double max_v = (blend->parameterization_type == 0) ? 1.0 : (2.0 * PRC_PI);
+
+            code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
+                &center_params, &min_u, &max_u);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Invalid center curve type in prc_map_loops_to_surface (Blend02)\n");
+                return code;
+            }
+
+            blend_eval_params.surface_params = (void *)blend;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    double u, v;
+
+                    /* Same warm-start rationale as the NURBS case above */
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_blend02, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_blend02, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                }
+            }
             break;
         }
 
@@ -7471,6 +7566,119 @@ prc_tessellate_cone_apex_fan_face(prc_context *ctx, prc_data *data, uint32_t she
     return 0;
 }
 
+/* Recursively splits a uv-space triangle (centroid fan-split, same pattern
+   as prc_subdivide_curved_triangle) until each leaf is classified entirely
+   inside or entirely outside the trimmed region (prc_point_inside_trimmed_
+   region on its 3 corners), discarding outside leaves. Used instead of
+   ear-clip-based boundary conformance for trim loops whose uv mapping is
+   numerically projected rather than closed-form (NURBS/Blend02): a sharp
+   corner or slightly noisy projected loop point there can make the ear-clip
+   bridge/triangulate degenerate into long spoke/fan triangles, which this
+   sidesteps entirely by never connecting two loop boundary points with a
+   chord -- at the cost of a jagged (but, at max depth, far finer than one
+   grid cell) boundary instead of an exact one */
+static int
+prc_subdivide_trim_boundary_triangle(prc_context *ctx, uint32_t num_loops, const prc_loop_samples *loop_samples,
+    prc_vec2 uv0, prc_vec2 uv1, prc_vec2 uv2, uint32_t depth, uint32_t max_depth,
+    prc_vec2 **out_verts, uint32_t *out_num_verts, uint32_t *out_verts_cap,
+    uint32_t **out_tris, uint32_t *out_num_triangles, uint32_t *out_tris_cap)
+{
+    int in0, in1, in2, all_in, all_out;
+    prc_vec2 uvc;
+    int code;
+
+    in0 = prc_point_inside_trimmed_region(num_loops, loop_samples, uv0);
+    in1 = prc_point_inside_trimmed_region(num_loops, loop_samples, uv1);
+    in2 = prc_point_inside_trimmed_region(num_loops, loop_samples, uv2);
+    all_in = in0 && in1 && in2;
+    all_out = !in0 && !in1 && !in2;
+
+    if (depth >= max_depth || all_in)
+    {
+        if (!all_in)
+        {
+            /* Mixed or fully-outside corners at max depth: fall back to one
+               centroid sample to decide whether this (by now tiny) leaf
+               belongs to the trimmed region at all */
+            uvc.x = (uv0.x + uv1.x + uv2.x) / 3.0;
+            uvc.y = (uv0.y + uv1.y + uv2.y) / 3.0;
+            if (!prc_point_inside_trimmed_region(num_loops, loop_samples, uvc))
+                return 0;
+        }
+
+        if (*out_num_verts + 3 > *out_verts_cap)
+        {
+            uint32_t new_cap = (*out_verts_cap == 0) ? 64 : (*out_verts_cap * 2);
+            prc_vec2 *new_verts;
+
+            while (new_cap < *out_num_verts + 3)
+                new_cap *= 2;
+            new_verts = (prc_vec2 *)prc_realloc(ctx, *out_verts, new_cap * sizeof(prc_vec2));
+            if (new_verts == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow vertices in prc_subdivide_trim_boundary_triangle\n");
+                return PRC_ERROR_MEMORY;
+            }
+            *out_verts = new_verts;
+            *out_verts_cap = new_cap;
+        }
+        if (*out_num_triangles + 1 > *out_tris_cap)
+        {
+            uint32_t new_cap = (*out_tris_cap == 0) ? 32 : (*out_tris_cap * 2);
+            uint32_t *new_tris = (uint32_t *)prc_realloc(ctx, *out_tris, new_cap * 3 * sizeof(uint32_t));
+
+            if (new_tris == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow triangles in prc_subdivide_trim_boundary_triangle\n");
+                return PRC_ERROR_MEMORY;
+            }
+            *out_tris = new_tris;
+            *out_tris_cap = new_cap;
+        }
+
+        (*out_verts)[*out_num_verts + 0] = uv0;
+        (*out_verts)[*out_num_verts + 1] = uv1;
+        (*out_verts)[*out_num_verts + 2] = uv2;
+        (*out_tris)[*out_num_triangles * 3 + 0] = *out_num_verts + 0;
+        (*out_tris)[*out_num_triangles * 3 + 1] = *out_num_verts + 1;
+        (*out_tris)[*out_num_triangles * 3 + 2] = *out_num_verts + 2;
+        *out_num_verts += 3;
+        *out_num_triangles += 1;
+        return 0;
+    }
+
+    if (all_out)
+    {
+        /* Cheap safety net for a trim feature thinner than this triangle:
+           only bother subdividing further if the centroid disagrees with
+           the 3 corners */
+        uvc.x = (uv0.x + uv1.x + uv2.x) / 3.0;
+        uvc.y = (uv0.y + uv1.y + uv2.y) / 3.0;
+        if (!prc_point_inside_trimmed_region(num_loops, loop_samples, uvc))
+            return 0;
+    }
+    else
+    {
+        uvc.x = (uv0.x + uv1.x + uv2.x) / 3.0;
+        uvc.y = (uv0.y + uv1.y + uv2.y) / 3.0;
+    }
+
+    code = prc_subdivide_trim_boundary_triangle(ctx, num_loops, loop_samples, uv0, uv1, uvc, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
+    code = prc_subdivide_trim_boundary_triangle(ctx, num_loops, loop_samples, uv1, uv2, uvc, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
+    code = prc_subdivide_trim_boundary_triangle(ctx, num_loops, loop_samples, uv2, uv0, uvc, depth + 1, max_depth,
+        out_verts, out_num_verts, out_verts_cap, out_tris, out_num_triangles, out_tris_cap);
+    if (code < 0)
+        return code;
+
+    return 0;
+}
+
 /* Tessellates a curved (Cone/Cylinder/Sphere/Torus) face bounded by loop(s),
    whether a genuine simple closed trim polygon or a loop that winds around a
    periodic uv axis (degenerating to a line rather than an enclosed area in
@@ -7482,13 +7690,21 @@ prc_tessellate_cone_apex_fan_face(prc_context *ctx, prc_data *data, uint32_t she
    thin fringe strip between the kept grid and the true trim boundary. The
    same building blocks (prc_build_regular_grid + prc_point_inside_trimmed_
    region) are general enough to later "cut" an already-tessellated surface,
-   not just build a trimmed one from scratch */
+   not just build a trimmed one from scratch.
+   use_subdivision_fringe switches the fringe strip itself from that
+   ear-clip method to prc_subdivide_trim_boundary_triangle -- used for
+   surface types (NURBS/Blend02) whose loop uv mapping is numerically
+   projected rather than closed-form, where ear-clip's boundary-conforming
+   chords are prone to fan/spike artifacts at sharp corners or noisy
+   projected points; Cone/Cylinder/Sphere/Torus keep the original ear-clip
+   fringe unchanged */
 static int
 prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_index,
     uint32_t face_index, uint32_t geom_count, uint8_t orientation,
     surface_func surface_eval_func, prc_surface_params *surf_params,
     const prc_surface_sampling_info *sampling_info,
-    uint32_t num_loops, prc_loop_samples *loop_samples, uint8_t has_wrapping_loop, uint8_t wrap_axis)
+    uint32_t num_loops, prc_loop_samples *loop_samples, uint8_t has_wrapping_loop, uint8_t wrap_axis,
+    uint8_t use_subdivision_fringe)
 {
     prc_regular_grid grid = { 0 };
     uint8_t *cell_inside = NULL;
@@ -7571,27 +7787,36 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
            leaves an almost-zero-width fringe: the traced outline and the
            true loop become nearly coincident, which is exactly the
            degenerate near-duplicate-collinear-point case that stalls
-           ear-clipping */
-        for (j = 0; j < cell_count_v; j++)
+           ear-clipping. The subdivision fringe doesn't trace an outline or
+           ear-clip at all, so it needs none of this -- it just subdivides
+           every cell the raw classification didn't already accept whole */
+        if (use_subdivision_fringe)
         {
-            for (i = 0; i < cell_count_u; i++)
+            memcpy(cell_inside, cell_inside_raw, cell_count_u * cell_count_v * sizeof(uint8_t));
+        }
+        else
+        {
+            for (j = 0; j < cell_count_v; j++)
             {
-                if (!cell_inside_raw[j * cell_count_u + i])
-                    continue;
-
+                for (i = 0; i < cell_count_u; i++)
                 {
-                    int32_t ni_left = prc_wrap_cell_index((int32_t)i - 1, cell_count_u, grid.wrap_u);
-                    int32_t ni_right = prc_wrap_cell_index((int32_t)i + 1, cell_count_u, grid.wrap_u);
-                    int32_t nj_below = prc_wrap_cell_index((int32_t)j - 1, cell_count_v, grid.wrap_v);
-                    int32_t nj_above = prc_wrap_cell_index((int32_t)j + 1, cell_count_v, grid.wrap_v);
+                    if (!cell_inside_raw[j * cell_count_u + i])
+                        continue;
 
-                    if (ni_left >= 0 && ni_right >= 0 && nj_below >= 0 && nj_above >= 0 &&
-                        cell_inside_raw[j * cell_count_u + (uint32_t)ni_left] &&
-                        cell_inside_raw[j * cell_count_u + (uint32_t)ni_right] &&
-                        cell_inside_raw[(uint32_t)nj_below * cell_count_u + i] &&
-                        cell_inside_raw[(uint32_t)nj_above * cell_count_u + i])
                     {
-                        cell_inside[j * cell_count_u + i] = 1;
+                        int32_t ni_left = prc_wrap_cell_index((int32_t)i - 1, cell_count_u, grid.wrap_u);
+                        int32_t ni_right = prc_wrap_cell_index((int32_t)i + 1, cell_count_u, grid.wrap_u);
+                        int32_t nj_below = prc_wrap_cell_index((int32_t)j - 1, cell_count_v, grid.wrap_v);
+                        int32_t nj_above = prc_wrap_cell_index((int32_t)j + 1, cell_count_v, grid.wrap_v);
+
+                        if (ni_left >= 0 && ni_right >= 0 && nj_below >= 0 && nj_above >= 0 &&
+                            cell_inside_raw[j * cell_count_u + (uint32_t)ni_left] &&
+                            cell_inside_raw[j * cell_count_u + (uint32_t)ni_right] &&
+                            cell_inside_raw[(uint32_t)nj_below * cell_count_u + i] &&
+                            cell_inside_raw[(uint32_t)nj_above * cell_count_u + i])
+                        {
+                            cell_inside[j * cell_count_u + i] = 1;
+                        }
                     }
                 }
             }
@@ -7636,6 +7861,53 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
                 }
             }
         }
+    }
+
+    if (use_subdivision_fringe)
+    {
+        for (j = 0; j < cell_count_v; j++)
+        {
+            for (i = 0; i < cell_count_u; i++)
+            {
+                uint32_t vnext_i, vnext_j, i00, i10, i11, i01;
+
+                if (cell_inside[j * cell_count_u + i])
+                    continue;
+
+                vnext_i = (i + 1 == grid.vertex_samples_u && grid.wrap_u) ? 0 : (i + 1);
+                vnext_j = (j + 1 == grid.vertex_samples_v && grid.wrap_v) ? 0 : (j + 1);
+                i00 = j * grid.vertex_samples_u + i;
+                i10 = j * grid.vertex_samples_u + vnext_i;
+                i11 = vnext_j * grid.vertex_samples_u + vnext_i;
+                i01 = vnext_j * grid.vertex_samples_u + i;
+
+                /* Fixed uv-space CCW winding regardless of orientation,
+                   matching the ear-clip fringe's own convention below --
+                   the shared triangle-output loop further down applies the
+                   orientation flip once, the same way it already does for
+                   that fringe */
+                code = prc_subdivide_trim_boundary_triangle(ctx, num_loops, loop_samples,
+                    grid.uv[i00], grid.uv[i10], grid.uv[i11], 0, PRC_TRIM_BOUNDARY_SUBDIVIDE_MAX_DEPTH,
+                    &fringe_verts, &fringe_num_verts, &fringe_verts_cap,
+                    &fringe_triangles, &fringe_num_triangles, &fringe_tris_cap);
+                if (code >= 0)
+                    code = prc_subdivide_trim_boundary_triangle(ctx, num_loops, loop_samples,
+                        grid.uv[i00], grid.uv[i11], grid.uv[i01], 0, PRC_TRIM_BOUNDARY_SUBDIVIDE_MAX_DEPTH,
+                        &fringe_verts, &fringe_num_verts, &fringe_verts_cap,
+                        &fringe_triangles, &fringe_num_triangles, &fringe_tris_cap);
+                if (code < 0)
+                {
+                    prc_free(ctx, grid.uv);
+                    prc_free(ctx, grid.verts);
+                    prc_free(ctx, cell_inside);
+                    prc_free(ctx, kept_triangles);
+                    prc_free(ctx, fringe_verts);
+                    prc_free(ctx, fringe_triangles);
+                    return code;
+                }
+            }
+        }
+        goto fringe_done;
     }
 
     code = prc_trace_kept_region_boundaries(ctx, cell_inside, grid.vertex_samples_u, grid.vertex_samples_v,
@@ -7778,6 +8050,8 @@ prc_tessellate_trimmed_face(prc_context *ctx, prc_data *data, uint32_t shell_ind
     }
     prc_free(ctx, fringe_poly_verts);
     prc_free(ctx, fringe_poly_triangles);
+
+fringe_done:
     prc_free(ctx, cell_inside);
 
     total_verts = grid_num_verts + fringe_num_verts;
@@ -8458,10 +8732,15 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
        a hole or a self-contained trim region; nonzero = the loop is itself a
        cut across the periodic direction, e.g. a circle around a cylinder's
        circumference, which degenerates to a line rather than an enclosed
-       area in uv space) */
+       area in uv space). NURBS is included here too -- it is never periodic
+       (see prc_get_surface_data), so every loop's wind_u/wind_v is always 0
+       and it always takes the num_wrapping == 0 closed-loop branch below,
+       the same grid+clip machinery already used for the non-wrapping
+       Cone/Cylinder/Sphere/Torus case */
     if (num_loops > 0 && loop_samples != NULL &&
         (surface.surface_type == PRC_TYPE_SURF_Cone || surface.surface_type == PRC_TYPE_SURF_Cylinder ||
-            surface.surface_type == PRC_TYPE_SURF_Sphere || surface.surface_type == PRC_TYPE_SURF_Torus))
+            surface.surface_type == PRC_TYPE_SURF_Sphere || surface.surface_type == PRC_TYPE_SURF_Torus ||
+            surface.surface_type == PRC_TYPE_SURF_NURBS))
     {
         uint32_t num_wrapping = 0;
         uint8_t wrap_axis = 0;
@@ -8501,7 +8780,8 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
         {
             code = prc_tessellate_trimmed_face(ctx, data, shell_index, face_index,
                 geom_count, orientation, surface_eval_func, &surf_params, &sampling_info,
-                num_loops, loop_samples, num_wrapping > 0, wrap_axis);
+                num_loops, loop_samples, num_wrapping > 0, wrap_axis,
+                surface.surface_type == PRC_TYPE_SURF_NURBS);
             for (j = 0; j < num_loops; j++)
             {
                 if (loop_samples[j].samples != NULL)
