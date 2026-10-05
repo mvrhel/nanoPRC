@@ -2664,6 +2664,7 @@ prc_project_onto_blend_bound(prc_context *ctx, prc_ptr_surface *bound_surface,
         surface_func eval_func = NULL;
         void *eval_params = NULL;
         prc_surface_sampling_info sampling_info = { 0 };
+        prc_surface_params surf_params = { 0 };
 
         code = prc_get_surface_eval_func(ctx, &bound_surface->surface, &eval_func, &eval_params);
         if (code < 0)
@@ -2673,7 +2674,8 @@ prc_project_onto_blend_bound(prc_context *ctx, prc_ptr_surface *bound_surface,
         if (code < 0)
             return code;
 
-        *out = prc_project_point_onto_surface(ctx, eval_func, eval_params,
+        surf_params.surface_params = eval_params;
+        *out = prc_project_point_onto_surface(ctx, eval_func, &surf_params,
             sampling_info.start_u, sampling_info.end_u,
             sampling_info.start_v, sampling_info.end_v, center, NULL, NULL);
         return 0;
@@ -2696,12 +2698,11 @@ prc_project_onto_blend_bound(prc_context *ctx, prc_ptr_surface *bound_surface,
     return PRC_ERROR_INTERNAL;
 }
 
-/* Note: the spec's additive term for this formula is the center curve, consistent with
-   Blend02 and the surface being "centred on the center curve" (origin_curve only supplies R(v)) */
 static prc_vec3
 prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
 {
-    prc_surf_blend01 *blend = (prc_surf_blend01 *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_blend01 *blend = (prc_surf_blend01 *)surf_params->surface_params;
     prc_vec3 output = { 0.0, 0.0, 0.0 };
     curve_func center_eval_func = NULL, origin_eval_func = NULL, tangent_eval_func = NULL;
     void *center_params = NULL, *origin_params = NULL, *tangent_params = NULL;
@@ -2750,14 +2751,11 @@ prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
         double v_plus, v_minus;
         prc_vec3 p_plus, p_minus;
 
-        if (h < 1e-9)
-            h = 1e-9;
+        if (h < 1e-9) h = 1e-9;
         v_plus = v + h;
         v_minus = v - h;
-        if (v_plus > origin_max_u)
-            v_plus = origin_max_u;
-        if (v_minus < origin_min_u)
-            v_minus = origin_min_u;
+        if (v_plus > origin_max_u) v_plus = origin_max_u;
+        if (v_minus < origin_min_u) v_minus = origin_min_u;
 
         p_plus = origin_eval_func(ctx, origin_params, v_plus);
         p_minus = origin_eval_func(ctx, origin_params, v_minus);
@@ -2765,18 +2763,32 @@ prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
         tangent_vec.x = (p_plus.x - p_minus.x) / (v_plus - v_minus);
         tangent_vec.y = (p_plus.y - p_minus.y) / (v_plus - v_minus);
         tangent_vec.z = (p_plus.z - p_minus.z) / (v_plus - v_minus);
+
+        // ONLY unitize the derivative fallback
+        tangent_len = sqrt(tangent_vec.x * tangent_vec.x + tangent_vec.y * tangent_vec.y + tangent_vec.z * tangent_vec.z);
+        if (tangent_len > 1e-12)
+        {
+            tangent_vec.x /= tangent_len;
+            tangent_vec.y /= tangent_len;
+            tangent_vec.z /= tangent_len;
+        }
     }
 
-    tangent_len = sqrt(tangent_vec.x * tangent_vec.x + tangent_vec.y * tangent_vec.y + tangent_vec.z * tangent_vec.z);
-    if (tangent_len > 1e-12)
-    {
-        tangent_vec.x /= tangent_len;
-        tangent_vec.y /= tangent_len;
-        tangent_vec.z /= tangent_len;
-    }
-
+    /* Compute the cross product (tangent ∧ R) */
     prc_vec_cross(tangent_vec, r_vec, &cross_vec);
 
+/*
+ * If cross_vec length is shrinking or your pipe looks oval,
+ * ensure cross_vec has the exact same scalar magnitude as r_vec:
+ */
+  double r_len = sqrt(r_vec.x*r_vec.x + r_vec.y*r_vec.y + r_vec.z*r_vec.z);
+  double c_len = sqrt(cross_vec.x*cross_vec.x + cross_vec.y*cross_vec.y + cross_vec.z*cross_vec.z);
+  if (c_len > 1e-12) {
+      cross_vec.x *= (r_len / c_len);
+      cross_vec.y *= (r_len / c_len);
+      cross_vec.z *= (r_len / c_len);
+  }
+ 
     output.x = center_pt.x + cos(u) * r_vec.x + sin(u) * cross_vec.x;
     output.y = center_pt.y + cos(u) * r_vec.y + sin(u) * cross_vec.y;
     output.z = center_pt.z + cos(u) * r_vec.z + sin(u) * cross_vec.z;
@@ -2792,7 +2804,8 @@ prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
 static prc_vec3
 prc_evaluate_surf_blend02(prc_context *ctx, void *params, double u, double v)
 {
-    prc_surf_blend02 *blend = (prc_surf_blend02 *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_blend02 *blend = (prc_surf_blend02 *)surf_params->surface_params;
     prc_vec3 output = { 0.0, 0.0, 0.0 };
     curve_func center_eval_func = NULL;
     void *center_params = NULL;
@@ -5860,6 +5873,7 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             double min_u = 0.0, max_u = 0.0;
             double min_v = 0.0;
             double max_v = (blend->parameterization_type == 0) ? 1.0 : (2.0 * PRC_PI);
+            double u = 0, v = 0;
 
             code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
                 &center_params, &min_u, &max_u);
@@ -5877,8 +5891,6 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
                 num_samples = curr_loop->num_samples;
                 for (j = 0; j < num_samples; j++)
                 {
-                    double u, v;
-
                     /* Same warm-start rationale as the NURBS case above */
                     if (j == 0)
                         prc_project_point_onto_surface(ctx, prc_evaluate_surf_blend02, &blend_eval_params,
@@ -5889,6 +5901,14 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
                             curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
                     curr_loop->uv_samples[j].x = u;
                     curr_loop->uv_samples[j].y = v;
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_blend02(ctx, &blend_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Blend02 projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
                 }
             }
             break;
@@ -5896,6 +5916,56 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Blend01:
         {
+            prc_surf_blend01 *blend = surface->surf_blend01;
+            prc_surface_params blend_eval_params = { 0 };
+            curve_func center_eval_func = NULL;
+            void *center_params = NULL;
+            double min_u = 0.0, max_u = 2.0 * PRC_PI;
+            double min_v = 0.0, max_v = 1;
+            double u = 0, v = 0;
+            double u_coeff_a = (blend->parameterization.u_param_coeff_a != 0.0) ? blend->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (blend->parameterization.v_param_coeff_a != 0.0) ? blend->parameterization.v_param_coeff_a : 1.0;
+
+            /* u is the angle around the pipe; v is the center curve parameter */
+            code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
+            &center_params, &min_v, &max_v);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Invalid center curve type in prc_get_surface_data (Blend01)\n");
+                return code;
+            }
+
+            blend_eval_params.surface_params = (void *)blend;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    /* Same warm-start rationale as the NURBS case above */
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_blend01, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_blend01, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - blend->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - blend->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_blend01(ctx, &blend_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Blend01 projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
