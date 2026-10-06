@@ -4973,7 +4973,45 @@ prc_parse_surf_blend02(prc_context *ctx, prc_bit_state *bit_state,
 
     return 0;
 }
-/* Table 292 � PRC_TYPE_SURF_Blend03 */
+
+static prc_blend03_layout
+prc_blend03_detect_layout(prc_context *ctx, prc_surf_blend03 *blend)
+{
+    prc_blend03_layout layout = { 0, 1, 2 }; /* Default fallback to legacy spec */
+
+    if (blend->number_of_elements < 1 || !blend->points) {
+        return layout;
+    }
+
+    /* Grab the first stride block of 3 points */
+    prc_vec3 p0 = blend->points[0];
+    prc_vec3 p1 = blend->points[1];
+    prc_vec3 p2 = blend->points[2];
+
+    /* Calculate squared distances to avoid expensive sqrt calls */
+    double d01_sq = (p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y) + (p1.z - p0.z) * (p1.z - p0.z);
+    double d02_sq = (p2.x - p0.x) * (p2.x - p0.x) + (p2.y - p0.y) * (p2.y - p0.y) + (p2.z - p0.z) * (p2.z - p0.z);
+    double d12_sq = (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y) + (p2.z - p1.z) * (p2.z - p1.z);
+
+    /* Test Case 1: If p0 is Center (Legacy Spec) -> dist(p0, p1) == dist(p0, p2) */
+    double diff_legacy = fabs(d01_sq - d02_sq);
+
+    /* Test Case 2: If p2 is Center (Updated Spec) -> dist(p2, p0) == dist(p2, p1) */
+    double diff_updated = fabs(d02_sq - d12_sq);
+
+    /* Pick the layout where the radial legs are closest to perfectly equal */
+    if (diff_updated < diff_legacy)
+    {
+        /* Updated layout: Rail1, Rail2, Center */
+        layout.rail1_offset = 0;
+        layout.rail2_offset = 1;
+        layout.center_offset = 2;
+    }
+
+    return layout;
+}
+
+/* Table 292 PRC_TYPE_SURF_Blend03 */
 static int
 prc_parse_surf_blend03(prc_context *ctx, prc_bit_state *bit_state,
     prc_surf_blend03 *data, uint8_t read_tag)
@@ -5128,7 +5166,8 @@ prc_parse_surf_blend03(prc_context *ctx, prc_bit_state *bit_state,
             data->supplemental_doubles[k] = prc_bitread_double(ctx, bit_state);
         }
     }
-     return 0;
+    data->layout_offsets = prc_blend03_detect_layout(ctx, data);
+    return 0;
 }
 
 /* Table 294 � ControlPointsNURBSSurf */

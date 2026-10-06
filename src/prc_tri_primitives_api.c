@@ -2446,8 +2446,8 @@ prc_api_helper_get_style_index_from_leaf(prc_context *ctx, prc_data *data,
             }
         }
 #endif
-
-        if (style->base_with_graphics->graphics_content.biased_index_of_line_style > 0)
+        /* TODO This inheritance is confusing */
+        if (style->base_with_graphics->graphics_content.biased_index_of_line_style > 0 && *style_unbiased_index == -1)
         {
             *file_index = style->base_with_graphics->base.file_index;
             *style_unbiased_index = style->base_with_graphics->graphics_content.biased_index_of_line_style - 1;
