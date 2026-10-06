@@ -2698,6 +2698,182 @@ prc_project_onto_blend_bound(prc_context *ctx, prc_ptr_surface *bound_surface,
     return PRC_ERROR_INTERNAL;
 }
 
+/* --- Local Helper: Find Knot Interval ---
+ * Locates index i such that parameters[i] <= u < parameters[i+1]
+ */
+static int
+prc_blend03_find_knot_interval(double u, prc_surf_blend03 *blend)
+{
+    uint32_t n = blend->number_of_elements;
+    if (u <= blend->parameters[0]) return 0;
+    if (u >= blend->parameters[n - 1]) return (int)n - 2;
+
+    int low = 0, high = (int)n - 1;
+    while (high - low > 1)
+    {
+        int mid = (low + high) / 2;
+        if (blend->parameters[mid] <= u) low = mid;
+        else high = mid;
+    }
+    return low;
+}
+
+/* Quintic Hermite Segment Math
+ * Evaluates a single 1D quintic Hermite spline segment using 6 boundary conditions.
+ */
+static double
+prc_blend03_evaluate_quintic_segment(double t, double dt, double p0, double p1,
+    double t0, double t1, double a0, double a1)
+{
+    double s = t / dt;
+    double s2 = s * s;
+    double s3 = s2 * s;
+    double s4 = s3 * s;
+    double s5 = s4 * s;
+
+    /* Rescale derivatives to match normalized local domain space [0, 1] */
+    double v0 = t0 * dt;
+    double v1 = t1 * dt;
+    double acc0 = a0 * dt * dt;
+    double acc1 = a1 * dt * dt;
+
+    /* Quintic Hermite Basis Functions */
+    double h0 = -6.0 * s5 + 15.0 * s4 - 10.0 * s3 + 1.0;
+    double h1 = -3.0 * s5 + 8.0 * s4 - 6.0 * s3 + s;
+    double h2 = -0.5 * s5 + 1.5 * s4 - 1.5 * s3 + 0.5 * s2;
+    double h3 = 0.5 * s5 - 1.0 * s4 + 0.5 * s3;
+    double h4 = -3.0 * s5 + 7.0 * s4 - 4.0 * s3;
+    double h5 = 6.0 * s5 - 15.0 * s4 + 10.0 * s3;
+
+    return (h0 * p0) + (h1 * v0) + (h2 * acc0) + (h3 * acc1) + (h4 * v1) + (h5 * p1);
+}
+
+/* Vector Curve Evaluation
+ * Evaluates the 3D curves (center, rail1, or rail2) based on interleaved stride indices.
+ */
+static prc_vec3
+prc_blend03_eval_spline_vec3(double u, prc_surf_blend03 *blend, int curve_offset)
+{
+    int i = prc_blend03_find_knot_interval(u, blend);
+    double u0 = blend->parameters[i];
+    double u1 = blend->parameters[i + 1];
+    double dt = u1 - u0;
+
+    if (dt < 1e-12)
+        dt = 1e-12;
+
+    /* Compute sequential structural offsets (i * 3 + curve_offset) */
+    int idx0 = i * 3 + curve_offset;
+    int idx1 = (i + 1) * 3 + curve_offset;
+
+    prc_vec3 p0 = blend->points[idx0];
+    prc_vec3 p1 = blend->points[idx1];
+    prc_vec3 t0 = blend->tangents[idx0];
+    prc_vec3 t1 = blend->tangents[idx1];
+    prc_vec3 a0 = blend->second_derivatives[idx0];
+    prc_vec3 a1 = blend->second_derivatives[idx1];
+
+    prc_vec3 res;
+    double local_u = u - u0;
+    res.x = prc_blend03_evaluate_quintic_segment(local_u, dt, p0.x, p1.x, t0.x, t1.x, a0.x, a1.x);
+    res.y = prc_blend03_evaluate_quintic_segment(local_u, dt, p0.y, p1.y, t0.y, t1.y, a0.y, a1.y);
+    res.z = prc_blend03_evaluate_quintic_segment(local_u, dt, p0.z, p1.z, t0.z, t1.z, a0.z, a1.z);
+    return res;
+}
+
+/* Scalar Curve Evaluation
+ * Evaluates the 1D Rail 2 Angle Curve.
+ */
+static double
+prc_blend03_eval_spline_double(double u, prc_surf_blend03 *blend)
+{
+    int i = prc_blend03_find_knot_interval(u, blend);
+    double u0 = blend->parameters[i];
+    double u1 = blend->parameters[i + 1];
+    double dt = u1 - u0;
+    if (dt < 1e-12)
+        dt = 1e-12;
+
+    double local_u = u - u0;
+    return prc_blend03_evaluate_quintic_segment(local_u, dt,
+        blend->rail_2_angles_v[i],
+        blend->rail_2_angles_v[i + 1],
+        blend->rail_2_derivatives_v[i],
+        blend->rail_2_derivatives_v[i + 1],
+        blend->rail_2_second_derivatives[i],
+        blend->rail_2_second_derivatives[i + 1]);
+}
+
+static prc_vec3
+prc_evaluate_surf_blend03(prc_context *ctx, void *params, double u, double v)
+{
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_blend03 *blend = (prc_surf_blend03 *)surf_params->surface_params;
+    prc_vec3 output = { 0.0, 0.0, 0.0 };
+    prc_vec3 center_pt, rail1_pt, rail2_pt;
+    prc_vec3 x_dir, y_dir, cross_xy, y2_dir;
+    double angle_curve_val, x_len, radius, y2_len, angle_a, implicit_v;
+
+    if (!blend || blend->number_of_elements < 2 || !blend->parameters)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid spline data arrays in prc_evaluate_surf_blend03\n");
+        return output;
+    }
+
+    /* 1. Evaluate underlying splines at parameter 'u' */
+    /* Initial spec was wrong on the ordering, so we have a detector pick
+       it for files that used the spec and for those that use the updated spec */
+    rail1_pt = prc_blend03_eval_spline_vec3(u, blend, blend->layout_offsets.rail1_offset);
+    rail2_pt = prc_blend03_eval_spline_vec3(u, blend, blend->layout_offsets.rail2_offset);
+    center_pt = prc_blend03_eval_spline_vec3(u, blend, blend->layout_offsets.center_offset);
+    angle_curve_val = prc_blend03_eval_spline_double(u, blend);
+
+    /* 2. Compute Local Frame Orthogonal Vector Base */
+    /* X(u) = (rail_curve_1(u) - center_curve(u)) unitized */
+    x_dir.x = rail1_pt.x - center_pt.x;
+    x_dir.y = rail1_pt.y - center_pt.y;
+    x_dir.z = rail1_pt.z - center_pt.z;
+    x_len = sqrt(x_dir.x * x_dir.x + x_dir.y * x_dir.y + x_dir.z * x_dir.z);
+    if (x_len > 1e-12)
+    {
+        x_dir.x /= x_len; x_dir.y /= x_len; x_dir.z /= x_len;
+    }
+
+    /* Y(u) = rail_curve_2(u) - center_curve(u) */
+    y_dir.x = rail2_pt.x - center_pt.x;
+    y_dir.y = rail2_pt.y - center_pt.y;
+    y_dir.z = rail2_pt.z - center_pt.z;
+
+    /* Radius(u) = ||rail_curve_2(u) - center_curve(u)|| */
+    radius = sqrt(y_dir.x * y_dir.x + y_dir.y * y_dir.y + y_dir.z * y_dir.z);
+
+    /* Y_2(u) = [[X(u) ∧ Y(u)] ∧ X(u)] unitized */
+    prc_vec_cross(x_dir, y_dir, &cross_xy);
+    prc_vec_cross(cross_xy, x_dir, &y2_dir);
+    y2_len = sqrt(y2_dir.x * y2_dir.x + y2_dir.y * y2_dir.y + y2_dir.z * y2_dir.z);
+    if (y2_len > 1e-12)
+    {
+        y2_dir.x /= y2_len; y2_dir.y /= y2_len; y2_dir.z /= y2_len;
+    }
+
+    /* 3. Evaluate Scaled Circular Angular Sweep Profile Space */
+    /* A(u) = rail2_anglesV_curve(u) / Rail2ParameterV */
+    angle_a = 0.0;
+    if (fabs(blend->rail_2_parameter_v) > 1e-12)
+    {
+        angle_a = angle_curve_val / blend->rail_2_parameter_v;
+    }
+
+    implicit_v = angle_a * v;
+
+    /* 4. Construct Final 3D Geometric Coordinate Surface Point Mapping */
+    output.x = center_pt.x + radius * (cos(implicit_v) * x_dir.x + sin(implicit_v) * y2_dir.x);
+    output.y = center_pt.y + radius * (cos(implicit_v) * x_dir.y + sin(implicit_v) * y2_dir.y);
+    output.z = center_pt.z + radius * (cos(implicit_v) * x_dir.z + sin(implicit_v) * y2_dir.z);
+
+    return output;
+}
+
 static prc_vec3
 prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
 {
@@ -2773,8 +2949,6 @@ prc_evaluate_surf_blend01(prc_context *ctx, void *params, double u, double v)
             tangent_vec.z /= tangent_len;
         }
     }
-
-    /* Compute the cross product (tangent ∧ R) */
     prc_vec_cross(tangent_vec, r_vec, &cross_vec);
 
 /*
@@ -3285,6 +3459,31 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             has_transform = blend->has_transform;
             prc_trans = &blend->transform;
             exact_geom_trans = &blend->exact_geom_transform;
+
+            domain.min_uv.x = blend->parameters[0];
+            domain.max_uv.x = blend->parameters[blend->number_of_elements - 1];
+            domain.min_uv.y = blend->trim_v_min;
+            domain.max_uv.y = blend->trim_v_max;
+
+            if (domain.min_uv.y >= domain.max_uv.y)
+            {
+                domain.min_uv.y = 0;
+                domain.max_uv.y = 1;
+            }
+
+            sampling_info->num_samples_u = SURFACE_SAMPLES;
+            sampling_info->num_samples_v = SURFACE_SAMPLES;
+            sampling_info->u_periodic = 0;
+            sampling_info->v_periodic = 0;
+            sampling_info->u_linear = 0;
+            sampling_info->v_linear = 0;
+            sampling_info->u_period = 0;
+            sampling_info->v_period = 0;
+            sampling_info->precision_u = SURFACE_PRECISION;
+            sampling_info->precision_v = SURFACE_PRECISION;
+            sampling_info->max_samples_u = SURFACE_MAX_SAMPLES;
+            sampling_info->max_samples_v = SURFACE_MAX_SAMPLES;
+
             break;
         }
         case PRC_TYPE_SURF_NURBS:
@@ -3424,15 +3623,29 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_revolution *revolution = surface->surf_revolution;
             uint8_t curve_periodic = 0;
             double curve_period = 0.0;
+            prc_curve_sampling_info curve_sampling_info;
 
             params = revolution->parameterization;
             has_transform = revolution->has_transform;
             prc_trans = &revolution->transform;
             exact_geom_trans = &revolution->exact_geom_transform;
 
+            code = prc_get_curve_sample_info(ctx, &revolution->base_curve, &curve_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Error in prc_get_curve_sample_info for Extrusion base curve\n");
+                return code;
+            }
+
             /* Goes with v unless swapped */
             prc_get_curve_periodicity(ctx, &revolution->base_curve,
                 &curve_periodic, &curve_period);
+
+            /* u is 0 to 2pi  v is base curve */
+            domain.min_uv.x = 0;
+            domain.max_uv.x = 2 * PRC_PI;
+            domain.min_uv.y = curve_sampling_info.start;
+            domain.max_uv.y = curve_sampling_info.end;
 
             /* TODO Finish the period here */
             sampling_info->num_samples_u = REVOLUTION_MAX_SAMPLES;
@@ -3456,12 +3669,25 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             has_transform = extrusion->has_transform;
             uint8_t curve_periodic = 0;
             double curve_period = 0.0;
+            prc_curve_sampling_info curve_sampling_info;
 
             prc_trans = &extrusion->transform;
             exact_geom_trans = &extrusion->exact_geom_transform;
 
             prc_get_curve_periodicity(ctx, &extrusion->base_curve,
                 &curve_periodic, &curve_period);
+
+            code = prc_get_curve_sample_info(ctx, &extrusion->base_curve, &curve_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Error in prc_get_curve_sample_info for Extrusion base curve\n");
+                return code;
+            }
+
+            domain.min_uv.x = curve_sampling_info.start;
+            domain.max_uv.x = curve_sampling_info.end;
+            domain.min_uv.y = extrusion->parameterization.surface_domain.min_uv.y;
+            domain.max_uv.y = extrusion->parameterization.surface_domain.max_uv.y;
 
             sampling_info->num_samples_u = EXTRUSION_MAX_SAMPLES;
             sampling_info->num_samples_v = EXTRUSION_MAX_SAMPLES;
@@ -3482,6 +3708,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             prc_surf_fromcurves *from_curves = surface->surf_fromcurves;
             uint8_t curve1_periodic, curve2_periodic;
             double curve1_period, curve2_period;
+            prc_curve_sampling_info curve1_sampling_info;
+            prc_curve_sampling_info curve2_sampling_info;
 
             params = from_curves->parameterization;
             has_transform = from_curves->has_transform;
@@ -3492,6 +3720,14 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
                 &curve1_periodic, &curve1_period);
             prc_get_curve_periodicity(ctx, &from_curves->second_curve,
                 &curve2_periodic, &curve2_period);
+
+            prc_get_curve_sample_info(ctx, &from_curves->first_curve, &curve1_sampling_info);
+            prc_get_curve_sample_info(ctx, &from_curves->second_curve, &curve2_sampling_info);
+
+            domain.min_uv.x = curve1_sampling_info.start;
+            domain.max_uv.x = curve1_sampling_info.end;
+            domain.min_uv.y = curve2_sampling_info.start;
+            domain.max_uv.y = curve2_sampling_info.end;
 
             sampling_info->num_samples_u = SURFACE_SAMPLES;
             sampling_info->num_samples_v = SURFACE_SAMPLES;
@@ -3540,7 +3776,7 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
         }
         case PRC_TYPE_SURF_Blend04:
         {
-            /* TODO */
+            /* UNDEFINED */
             break;
         }
         default:
@@ -3561,7 +3797,8 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
     }
 
     if (surface->surface_type == PRC_TYPE_SURF_Plane || surface->surface_type == PRC_TYPE_SURF_NURBS ||
-        surface->surface_type == PRC_TYPE_SURF_Blend01 || surface->surface_type == PRC_TYPE_SURF_Blend02)
+        surface->surface_type == PRC_TYPE_SURF_Blend01 || surface->surface_type == PRC_TYPE_SURF_Blend02 ||
+        surface->surface_type == PRC_TYPE_SURF_FromCurves)
     {
         sampling_info->start_u = domain.min_uv.x;
         sampling_info->start_v = domain.min_uv.y;
@@ -5258,6 +5495,12 @@ prc_get_surface_transform_inverse(prc_context *ctx, prc_type_surf *surface,
             break;
         }
 
+        case PRC_TYPE_SURF_Blend03:
+        {
+            exact_transform = &surface->surf_blend03->exact_geom_transform;
+            break;
+        }
+
         default:
             return 0;
     }
@@ -5573,11 +5816,64 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
     {
         case PRC_TYPE_SURF_FromCurves:
         {
+            /* Use numerical projection */
+            prc_surf_fromcurves *from_curves = surface->surf_fromcurves;
+            prc_surface_params blend_eval_params = { 0 };
+            prc_curve_sampling_info curve1_sampling_info;
+            prc_curve_sampling_info curve2_sampling_info;
+
+            prc_get_curve_sample_info(ctx, &from_curves->first_curve, &curve1_sampling_info);
+            prc_get_curve_sample_info(ctx, &from_curves->second_curve, &curve2_sampling_info);
+
+            double min_u = curve1_sampling_info.start;
+            double max_u = curve1_sampling_info.end;
+            double min_v = curve2_sampling_info.start;
+            double max_v = curve2_sampling_info.end;
+            double u = 0, v = 0;
+            double u_coeff_a = (from_curves->parameterization.u_param_coeff_a != 0.0) ? from_curves->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (from_curves->parameterization.v_param_coeff_a != 0.0) ? from_curves->parameterization.v_param_coeff_a : 1.0;
+
+            blend_eval_params.surface_params = (void *)from_curves;
+            if (min_v >= max_v)
+            {
+                min_v = 0;
+                max_v = 1;
+            }
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_fromcurves, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_fromcurves, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - from_curves->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - from_curves->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_fromcurves(ctx, &blend_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_FromCurves projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Cone:
         {
+            /* Use analytical projection */
             prc_surf_cone *cone = surface->surf_cone;
             double u_coeff_a = (cone->parameterization.u_param_coeff_a != 0.0) ? cone->parameterization.u_param_coeff_a : 1.0;
             double v_coeff_a = (cone->parameterization.v_param_coeff_a != 0.0) ? cone->parameterization.v_param_coeff_a : 1.0;
@@ -5651,6 +5947,7 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Cylinder:
         {
+            /* Use analytical projection */
             prc_surf_cylinder *cylinder = surface->surf_cylinder;
             double u_coeff_a = (cylinder->parameterization.u_param_coeff_a != 0.0) ? cylinder->parameterization.u_param_coeff_a : 1.0;
             double v_coeff_a = (cylinder->parameterization.v_param_coeff_a != 0.0) ? cylinder->parameterization.v_param_coeff_a : 1.0;
@@ -5684,6 +5981,7 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Sphere:
         {
+            /* Use analytical projection */
             prc_surf_sphere *sphere = surface->surf_sphere;
             double u_coeff_a = (sphere->parameterization.u_param_coeff_a != 0.0) ? sphere->parameterization.u_param_coeff_a : 1.0;
             double v_coeff_a = (sphere->parameterization.v_param_coeff_a != 0.0) ? sphere->parameterization.v_param_coeff_a : 1.0;
@@ -5721,6 +6019,7 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Torus:
         {
+            /* Use analytical projection */
             prc_surf_torus *torus = surface->surf_torus;
             double u_coeff_a = (torus->parameterization.u_param_coeff_a != 0.0) ? torus->parameterization.u_param_coeff_a : 1.0;
             double v_coeff_a = (torus->parameterization.v_param_coeff_a != 0.0) ? torus->parameterization.v_param_coeff_a : 1.0;
@@ -5760,23 +6059,132 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             break;
         }
 
-        case PRC_TYPE_SURF_Cylindrical:
-        {
-            break;
-        }
-
         case PRC_TYPE_SURF_Extrusion:
         {
+            /* Use numerical projection */
+            prc_surf_extrusion *extrusion = surface->surf_extrusion;
+            prc_surface_params extrusion_eval_params = { 0 };
+            prc_curve_sampling_info curve_sampling_info;
+
+            code = prc_get_curve_sample_info(ctx, &extrusion->base_curve, &curve_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_get_curve_sample_info\n");
+                return code;
+            }
+            double min_u = curve_sampling_info.start;
+            double max_u = curve_sampling_info.end;
+            double min_v = extrusion->parameterization.surface_domain.min_uv.y;
+            double max_v = extrusion->parameterization.surface_domain.max_uv.y;
+
+            double u = 0, v = 0;
+            double u_coeff_a = (extrusion->parameterization.u_param_coeff_a != 0.0) ? extrusion->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (extrusion->parameterization.v_param_coeff_a != 0.0) ? extrusion->parameterization.v_param_coeff_a : 1.0;
+
+            extrusion_eval_params.surface_params = (void *)extrusion;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_extrusion, &extrusion_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_extrusion, &extrusion_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - extrusion->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - extrusion->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_extrusion(ctx, &extrusion_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Extrusion projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Revolution:
         {
+            /* Use numerical projection */
+            prc_surf_revolution *revolution = surface->surf_revolution;
+            prc_surface_params revolution_eval_params = { 0 };
+            prc_curve_sampling_info revolution_sampling_info;
+
+            code = prc_get_curve_sample_info(ctx, &revolution->base_curve, &revolution_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_get_curve_sample_info\n");
+                return code;
+            }
+
+            double min_u = 0;
+            double max_u = 2 * PRC_PI;
+            double min_v = revolution_sampling_info.start;
+            double max_v = revolution_sampling_info.end;
+
+            double u = 0, v = 0;
+            double u_coeff_a = (revolution->parameterization.u_param_coeff_a != 0.0) ? revolution->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (revolution->parameterization.v_param_coeff_a != 0.0) ? revolution->parameterization.v_param_coeff_a : 1.0;
+
+            revolution_eval_params.surface_params = (void *)revolution;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_revolution, &revolution_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_revolution, &revolution_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - revolution->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - revolution->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_revolution(ctx, &revolution_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Extrusion projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
+            break;
+        }
+
+        case PRC_TYPE_SURF_Offset:
+        {
+            /* Use numerical projection */
+            break;
+        }
+
+        case PRC_TYPE_SURF_Cylindrical:
+        {
+            /* Use numerical projection */
             break;
         }
 
         case PRC_TYPE_SURF_Plane:
         {
+            /* Use analytial projection */
             /* The Z = 0 plane which these samples should already be mapped to
                with the inverse transform is local (x, y) space, not (u, v):
                prc_evaluate_surf_plane maps x = u * coeff_a + coeff_b (same for
@@ -5799,13 +6207,9 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             break;
         }
 
-        case PRC_TYPE_SURF_Offset:
-        {
-            break;
-        }
-
         case PRC_TYPE_SURF_NURBS:
         {
+            /* Use numerical projection */
             /* No closed-form inverse like the analytic surfaces above (cone/
                cylinder/sphere/torus can recover u,v directly from x,y,z via
                atan2/etc.) -- each 3D sample is instead projected back onto
@@ -5858,14 +6262,62 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             break;
         }
 
+        case PRC_TYPE_SURF_Blend03:
+        {
+            /* Use numerical projection */
+            prc_surf_blend03 *blend = surface->surf_blend03;
+            prc_surface_params blend_eval_params = { 0 };
+            curve_func center_eval_func = NULL;
+            void *center_params = NULL;
+            double min_u = blend->parameters[0];
+            double max_u = blend->parameters[blend->number_of_elements - 1];
+            double min_v = blend->trim_v_min;
+            double max_v = blend->trim_v_max;
+            double u = 0, v = 0;
+            double u_coeff_a = (blend->parameterization.u_param_coeff_a != 0.0) ? blend->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (blend->parameterization.v_param_coeff_a != 0.0) ? blend->parameterization.v_param_coeff_a : 1.0;
+
+            blend_eval_params.surface_params = (void *)blend;
+            if (min_v >= max_v)
+            {
+                min_v = 0;
+                max_v = 1;
+            }
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_blend03, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_blend03, &blend_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - blend->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - blend->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_blend03(ctx, &blend_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Blend03 projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
+            break;
+        }
+
         case PRC_TYPE_SURF_Blend02:
         {
-            /* No closed-form inverse: u is the center curve's own parameter
-               and v is the swept angle (scaled to [0,1] when
-               parameterization_type == 0), but the angle itself depends on
-               the two bound directions projected from the center curve at
-               that u, which vary arbitrarily along the curve -- so each 3D
-               sample is projected back numerically, same as NURBS above */
+            /* Use numerical projection */
             prc_surf_blend02 *blend = surface->surf_blend02;
             prc_surface_params blend_eval_params = { 0 };
             curve_func center_eval_func = NULL;
@@ -5874,6 +6326,8 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
             double min_v = 0.0;
             double max_v = (blend->parameterization_type == 0) ? 1.0 : (2.0 * PRC_PI);
             double u = 0, v = 0;
+            double u_coeff_a = (blend->parameterization.u_param_coeff_a != 0.0) ? blend->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (blend->parameterization.v_param_coeff_a != 0.0) ? blend->parameterization.v_param_coeff_a : 1.0;
 
             code = prc_get_curve_eval_func(ctx, &blend->center_curve, &center_eval_func,
                 &center_params, &min_u, &max_u);
@@ -5901,6 +6355,9 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
                             curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
                     curr_loop->uv_samples[j].x = u;
                     curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - blend->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - blend->parameterization.v_param_coeff_b) / v_coeff_a;
+
 #if CHECK_SURFACE_PROJECTION
                     prc_vec3 test_xyz;
                     test_xyz = prc_evaluate_surf_blend02(ctx, &blend_eval_params, u, v);
@@ -5916,6 +6373,7 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
 
         case PRC_TYPE_SURF_Blend01:
         {
+            /* Use numerical projection */
             prc_surf_blend01 *blend = surface->surf_blend01;
             prc_surface_params blend_eval_params = { 0 };
             curve_func center_eval_func = NULL;
@@ -8703,6 +9161,15 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
         break;
     }
 
+    case PRC_TYPE_SURF_Blend03:
+    {
+        prc_surf_blend03 *blend = surface.surf_blend03;
+
+        surf_params.surface_params = (void *)blend;
+        surface_eval_func = prc_evaluate_surf_blend03;
+        break;
+    }
+
     default:
         for (j = 0; j < num_loops; j++)
         {
@@ -8810,7 +9277,10 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
     if (num_loops > 0 && loop_samples != NULL &&
         (surface.surface_type == PRC_TYPE_SURF_Cone || surface.surface_type == PRC_TYPE_SURF_Cylinder ||
             surface.surface_type == PRC_TYPE_SURF_Sphere || surface.surface_type == PRC_TYPE_SURF_Torus ||
-            surface.surface_type == PRC_TYPE_SURF_NURBS))
+            surface.surface_type == PRC_TYPE_SURF_NURBS || surface.surface_type == PRC_TYPE_SURF_Blend03 ||
+            surface.surface_type == PRC_TYPE_SURF_Blend02 || surface.surface_type == PRC_TYPE_SURF_Blend01 ||
+            surface.surface_type == PRC_TYPE_SURF_Extrusion || surface.surface_type == PRC_TYPE_SURF_FromCurves ||
+            surface.surface_type == PRC_TYPE_SURF_Revolution))
     {
         uint32_t num_wrapping = 0;
         uint8_t wrap_axis = 0;

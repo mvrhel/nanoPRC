@@ -2507,6 +2507,13 @@ struct prc_surf_blend02_s
     uint8_t parameterization_type;
 };
 
+/* Dynamic mapping offsets. Needed due to legacy vs updated spec differences */
+typedef struct {
+    int center_offset;
+    int rail1_offset;
+    int rail2_offset;
+} prc_blend03_layout;
+
 /* Table 292 — PRC_TYPE_SURF_Blend03 */
 struct prc_surf_blend03_s
 {
@@ -2534,6 +2541,7 @@ struct prc_surf_blend03_s
     uint8_t reserved_char_2;
     int32_t number_of_supplemental_doubles;
     double *supplemental_doubles;
+    prc_blend03_layout layout_offsets;
 };
 
 struct prc_control_points_nurbs_surf_s
