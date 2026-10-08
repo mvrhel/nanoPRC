@@ -3056,10 +3056,11 @@ static prc_vec3
 prc_evaluate_surf_cylindrical(prc_context *ctx, void *params, double u, double v)
 {
     prc_vec3 output, base_point;
-    prc_surf_cylindrical *cylindrical = (prc_surf_cylindrical *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_cylindrical *cylindrical = (prc_surf_cylindrical *)surf_params->surface_params;
     surface_func base_eval_func = NULL;
     void *base_params = NULL;
-    prc_surface_params surf_params = { 0 };
+    prc_surface_params surf_params_base = { 0 };
     int code;
     prc_ptr_surface base_surf = cylindrical->base_surface;
     double base_start_u;
@@ -3098,8 +3099,8 @@ prc_evaluate_surf_cylindrical(prc_context *ctx, void *params, double u, double v
         return output;
     }
 
-    surf_params.surface_params = base_params;
-    base_point = base_eval_func(ctx, &surf_params, u, v);
+    surf_params_base.surface_params = base_params;
+    base_point = base_eval_func(ctx, &surf_params_base, u, v);
     output.x = base_point.x * cos(base_point.y);
     output.y = base_point.x * sin(base_point.y);
     output.z = base_point.z;
@@ -3231,7 +3232,9 @@ prc_compute_surface_normal(prc_context *ctx, surface_func surface_eval_func,
 static prc_vec3
 prc_evaluate_surf_offset(prc_context *ctx, void *params, double u, double v)
 {
-    prc_surf_offset *offset = (prc_surf_offset *)params;
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_offset *offset = (prc_surf_offset *)surf_params->surface_params;
+    prc_surface_params base_surf_params;
     prc_vec3 output = { 0.0, 0.0, 0.0 };
     surface_func base_eval_func = NULL;
     void *base_params = NULL;
@@ -3267,10 +3270,11 @@ prc_evaluate_surf_offset(prc_context *ctx, void *params, double u, double v)
     if (dv < 1e-9)
         dv = 1e-9;
 
-    base_point = base_eval_func(ctx, base_params, u, v);
+    base_surf_params.surface_params = base_params;
+    base_point = base_eval_func(ctx, &base_surf_params, u, v);
 
     /* Orientation 1 (no negation): the offset direction follows the base surface's natural normal */
-    code = prc_compute_surface_normal(ctx, base_eval_func, base_params, u, v, du, dv,
+    code = prc_compute_surface_normal(ctx, base_eval_func, &base_surf_params, u, v, du, dv,
         sampling_info.start_u, sampling_info.end_u, sampling_info.start_v, sampling_info.end_v,
         &sampling_info, 1, &base_normal);
     if (code < 0)
@@ -3810,7 +3814,7 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
         sampling_info->start_u = params.surface_domain.min_uv.x;
         sampling_info->start_v = params.surface_domain.min_uv.y;
         sampling_info->end_u = params.surface_domain.max_uv.x;
-        sampling_info-> end_v = params.surface_domain.max_uv.y;
+        sampling_info->end_v = params.surface_domain.max_uv.y;
 
         if (params.swap_uv)
         {
@@ -6173,12 +6177,112 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
         case PRC_TYPE_SURF_Offset:
         {
             /* Use numerical projection */
+            prc_surf_offset *offset = surface->surf_offset;
+            prc_surface_params offset_eval_params = { 0 };
+            prc_surface_sampling_info offset_sampling_info;
+
+            code = prc_get_surface_data(ctx, &offset->base_surface.surface, &offset_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_get_surface_data\n");
+                return code;
+            }
+
+            double min_u = offset_sampling_info.start_u;
+            double max_u = offset_sampling_info.end_u;
+            double min_v = offset_sampling_info.start_v;
+            double max_v = offset_sampling_info.end_v;
+
+            double u = 0, v = 0;
+            double u_coeff_a = (offset->parameterization.u_param_coeff_a != 0.0) ? offset->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (offset->parameterization.v_param_coeff_a != 0.0) ? offset->parameterization.v_param_coeff_a : 1.0;
+
+            offset_eval_params.surface_params = (void *)offset;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_offset, &offset_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_offset, &offset_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - offset->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - offset->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_offset(ctx, &offset_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Offset projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
         case PRC_TYPE_SURF_Cylindrical:
         {
             /* Use numerical projection */
+            prc_surf_cylindrical *cylindrical = surface->surf_cylindrical;
+            prc_surface_params cylindrical_eval_params = { 0 };
+            prc_surface_sampling_info cylindrical_sampling_info;
+
+            code = prc_get_surface_data(ctx, &cylindrical->base_surface.surface, &cylindrical_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_get_surface_data\n");
+                return code;
+            }
+
+            double min_u = cylindrical_sampling_info.start_u;
+            double max_u = cylindrical_sampling_info.end_u;
+            double min_v = cylindrical_sampling_info.start_v;
+            double max_v = cylindrical_sampling_info.end_v;
+
+            double u = 0, v = 0;
+            double u_coeff_a = (cylindrical->parameterization.u_param_coeff_a != 0.0) ? cylindrical->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (cylindrical->parameterization.v_param_coeff_a != 0.0) ? cylindrical->parameterization.v_param_coeff_a : 1.0;
+
+            cylindrical_eval_params.surface_params = (void *)cylindrical;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_cylindrical, &cylindrical_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_cylindrical, &cylindrical_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - cylindrical->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - cylindrical->parameterization.v_param_coeff_b) / v_coeff_a;
+
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_cylindrical(ctx, &cylindrical_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Cylindrical projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
             break;
         }
 
@@ -9280,7 +9384,8 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
             surface.surface_type == PRC_TYPE_SURF_NURBS || surface.surface_type == PRC_TYPE_SURF_Blend03 ||
             surface.surface_type == PRC_TYPE_SURF_Blend02 || surface.surface_type == PRC_TYPE_SURF_Blend01 ||
             surface.surface_type == PRC_TYPE_SURF_Extrusion || surface.surface_type == PRC_TYPE_SURF_FromCurves ||
-            surface.surface_type == PRC_TYPE_SURF_Revolution))
+            surface.surface_type == PRC_TYPE_SURF_Revolution || surface.surface_type == PRC_TYPE_SURF_Offset ||
+            surface.surface_type == PRC_TYPE_SURF_Cylindrical))
     {
         uint32_t num_wrapping = 0;
         uint8_t wrap_axis = 0;
