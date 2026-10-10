@@ -116,7 +116,7 @@ typedef enum
     PRC_TYPE_MATH_FCT_1D_Fraction,
     PRC_TYPE_MATH_FCT_1D_ArctanCos,
     PRC_TYPE_MATH_FCT_1D_Combination,
-    PRC_TYPE_MATH_FCT_3D,
+    PRC_TYPE_MATH_FCT_3D = 910,
     PRC_TYPE_MATH_FCT_3D_Linear,
     PRC_TYPE_MATH_FCT_3D_nonLinear
 } prc_math_operator_entity_type;

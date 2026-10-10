@@ -24,7 +24,7 @@
 #include <string.h>
 
 //#define PRC_DEBUG_EARCLIP 1
-#define CHECK_SURFACE_PROJECTION 0
+#define CHECK_SURFACE_PROJECTION 1
 
 #define CURVE_SAMPLES 32
 #define SURFACE_SAMPLES 32
@@ -161,6 +161,96 @@ static int prc_get_surface_eval_func(prc_context *ctx, prc_type_surf *surface,
 /* Forward declaration */
 static int prc_get_hcg_circle_data(prc_context *ctx, prc_hcg_circle *hcg_circle,
     prc_hcg_circle_information *info, prc_nano_brep_compressed_data *compressed_data);
+
+static int
+prc_apply_linear_math_transform(prc_context *ctx, prc_math_fct_3d_linear *linear, prc_vec3 base_point, prc_vec3 *output)
+{
+    if (linear == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Linear function pointer is NULL in prc_apply_linear_math_transform\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    double *matrix = linear->mat;
+    double *vector = linear->vect;
+
+    output->x = matrix[0] * base_point.x + matrix[3] * base_point.y + matrix[6] * base_point.z + vector[0];
+    output->y = matrix[1] * base_point.x + matrix[4] * base_point.y + matrix[7] * base_point.z + vector[1];
+    output->z = matrix[2] * base_point.x + matrix[5] * base_point.y + matrix[8] * base_point.z + vector[2];
+
+    return 0;
+}
+
+static int
+prc_apply_nonlinear_math_transform(prc_context *ctx, prc_math_fct_3d_nonlinear *nonlinear, prc_vec3 base_point, prc_vec3 *output)
+{
+    int code;
+    prc_vec3 temp_point;
+
+    if (nonlinear == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Nonlinear function pointer is NULL in prc_apply_nonlinear_math_transform\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    prc_math_fct_3d_linear *left = nonlinear->left_transformation.linear;
+    prc_math_fct_3d_linear *right = nonlinear->right_transformation.linear;
+    
+    code = prc_apply_linear_math_transform(ctx, left, base_point, &temp_point);
+    if (code != 0)
+    {
+        return code;
+    }
+
+    output->x = temp_point.x * cos(temp_point.y * nonlinear->d2);
+    output->y = temp_point.x * sin(temp_point.y * nonlinear->d2);
+    output->z = temp_point.z;
+
+    code = prc_apply_linear_math_transform(ctx, right, *output, output);
+    if (code != 0)
+    {
+        return code;
+    }
+
+    return 0;
+}
+
+/* Apply the 3D Math functions */
+static int
+prc_apply_math_transform(prc_context *ctx, prc_math_fct_3d *function, prc_vec3 base_point, prc_vec3 *output)
+{
+    int code;
+
+    if (function == NULL)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Function pointer is NULL in prc_exact_geom_apply_math_transform\n");
+        return PRC_ERROR_INTERNAL;
+    }
+
+    if (function->tag == PRC_TYPE_MATH_FCT_3D_Linear)
+    {
+        code = prc_apply_linear_math_transform(ctx, function->linear, base_point, output);
+        if (code != 0)
+        {
+            return code;
+        }
+        return 0;
+    }
+    else if (function->tag == PRC_TYPE_MATH_FCT_3D_nonLinear)
+    {
+        code = prc_apply_nonlinear_math_transform(ctx, function->nonlinear, base_point, output);
+        if (code != 0)
+        {
+            return code;
+        }
+        return 0;
+    }
+    else
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Unknown function type in prc_exact_geom_apply_math_transform\n");
+        return PRC_ERROR_INTERNAL;
+    }
+    return 0;
+}
 
 /* Invert the transform associated with the surface. This is applied to the loop
    samples */
@@ -2805,6 +2895,36 @@ prc_blend03_eval_spline_double(double u, prc_surf_blend03 *blend)
 }
 
 static prc_vec3
+prc_evaluate_surf_transform(prc_context *ctx, void *params, double u, double v)
+{
+    prc_surface_params *surf_params = (prc_surface_params *)params;
+    prc_surf_transform *transform = (prc_surf_transform *)surf_params->surface_params;
+    prc_vec3 output = { 0.0, 0.0, 0.0 };
+    prc_vec3 base_point;
+    prc_surface_params surf_params_base = { 0 };
+
+    /* Evaluate the base surface at (u, v) */
+    surface_func base_eval_func = NULL;
+    void *base_eval_params = NULL;
+    int code = prc_get_surface_eval_func(ctx, &transform->base_surface.surface, &base_eval_func, &base_eval_params);
+    if (code < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to get base surface eval function in prc_evaluate_surf_transform\n");
+        return output;
+    }
+
+    surf_params_base.surface_params = base_eval_params;
+    base_point = base_eval_func(ctx, &surf_params_base, u, v);
+    code = prc_apply_math_transform(ctx, &transform->math_transform, base_point, &output);
+    if (code < 0)
+    {
+        prc_error(ctx, PRC_ERROR_INTERNAL, "Failed to apply math transform in prc_evaluate_surf_transform\n");
+    }
+
+    return output;
+}
+
+static prc_vec3
 prc_evaluate_surf_blend03(prc_context *ctx, void *params, double u, double v)
 {
     prc_surface_params *surf_params = (prc_surface_params *)params;
@@ -3514,6 +3634,39 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             sampling_info->max_samples_v = NURBS_MAX_SAMPLES;
             break;
         }
+
+        case PRC_TYPE_SURF_Transform:
+        {
+            prc_surf_transform *transform = surface->surf_transform;
+            prc_surface_sampling_info base_sampling_info = { 0 };
+            params = transform->parameterization;
+
+            has_transform = transform->has_transform;
+            prc_trans = &transform->transform;
+            exact_geom_trans = &transform->exact_geom_transform;
+
+            /* The implicit parameterization matches the base surface's UV domain */
+            if (transform->base_surface.is_referenced)
+            {
+                prc_error(ctx, PRC_ERROR_INTERNAL, "Invalid base surface case in prc_get_surface_data (Transform)\n");
+                return PRC_ERROR_INTERNAL;
+            }
+
+            code = prc_get_surface_data(ctx, &transform->base_surface.surface, &base_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Error in prc_get_surface_data for Transform base surface\n");
+                return code;
+            }
+
+            *sampling_info = base_sampling_info;
+            sampling_info->start_u = params.surface_domain.min_uv.x;
+            sampling_info->start_v = params.surface_domain.min_uv.y;
+            sampling_info->end_u = params.surface_domain.max_uv.x;
+            sampling_info->end_v = params.surface_domain.max_uv.y;
+            break;
+        }
+
         case PRC_TYPE_SURF_Cylindrical:
         {
             prc_surf_cylindrical *cylindrical = surface->surf_cylindrical;
@@ -3767,15 +3920,6 @@ prc_get_surface_data(prc_context *ctx, prc_type_surf *surface,
             sampling_info->precision_v = TORUS_SURFACE_PRECISION;
             sampling_info->max_samples_u = TORUS_MAX_SAMPLES;
             sampling_info->max_samples_v = TORUS_MAX_SAMPLES;
-            break;
-        }
-        case PRC_TYPE_SURF_Transform:
-        {
-            prc_surf_transform *transform = surface->surf_transform;
-            params = transform->parameterization;
-            has_transform = transform->has_transform;
-            prc_trans = &transform->transform;
-            exact_geom_trans = &transform->exact_geom_transform;
             break;
         }
         case PRC_TYPE_SURF_Blend04:
@@ -6221,6 +6365,59 @@ prc_map_loops_to_surface(prc_context *ctx, prc_topo_face *topo_face, uint8_t ori
                     prc_vec3 test_xyz;
                     test_xyz = prc_evaluate_surf_offset(ctx, &offset_eval_params, u, v);
                     fprintf(stderr, " PRC_TYPE_SURF_Offset projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
+                        j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
+                        test_xyz.x, test_xyz.y, test_xyz.z,
+                        curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
+#endif
+                }
+            }
+            break;
+        }
+
+        case PRC_TYPE_SURF_Transform:
+        {
+            /* Use numerical projection */
+            prc_surf_transform *transform = surface->surf_transform;
+            prc_surface_params transform_eval_params = { 0 };
+            prc_surface_sampling_info transform_sampling_info;
+
+            code = prc_get_surface_data(ctx, &transform->base_surface.surface, &transform_sampling_info);
+            if (code < 0)
+            {
+                prc_error(ctx, code, "Failed in prc_get_surface_data\n");
+                return code;
+            }
+            double min_u = transform_sampling_info.start_u;
+            double max_u = transform_sampling_info.end_u;
+            double min_v = transform_sampling_info.start_v;
+            double max_v = transform_sampling_info.end_v;
+            double u = 0, v = 0;
+            double u_coeff_a = (transform->parameterization.u_param_coeff_a != 0.0) ? transform->parameterization.u_param_coeff_a : 1.0;
+            double v_coeff_a = (transform->parameterization.v_param_coeff_a != 0.0) ? transform->parameterization.v_param_coeff_a : 1.0;
+
+            transform_eval_params.surface_params = (void *)transform;
+
+            for (k = 0; k < num_loops; k++)
+            {
+                curr_loop = &loop_samples[k];
+                num_samples = curr_loop->num_samples;
+                for (j = 0; j < num_samples; j++)
+                {
+                    if (j == 0)
+                        prc_project_point_onto_surface(ctx, prc_evaluate_surf_transform, &transform_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j], &u, &v);
+                    else
+                        prc_refine_point_on_surface(ctx, prc_evaluate_surf_transform, &transform_eval_params,
+                            min_u, max_u, min_v, max_v, curr_loop->samples[j],
+                            curr_loop->uv_samples[j - 1].x, curr_loop->uv_samples[j - 1].y, &u, &v);
+                    curr_loop->uv_samples[j].x = u;
+                    curr_loop->uv_samples[j].y = v;
+                    curr_loop->uv_samples[j].x = (curr_loop->uv_samples[j].x - transform->parameterization.u_param_coeff_b) / u_coeff_a;
+                    curr_loop->uv_samples[j].y = (curr_loop->uv_samples[j].y - transform->parameterization.v_param_coeff_b) / v_coeff_a;
+#if CHECK_SURFACE_PROJECTION
+                    prc_vec3 test_xyz;
+                    test_xyz = prc_evaluate_surf_transform(ctx, &transform_eval_params, u, v);
+                    fprintf(stderr, " PRC_TYPE_SURF_Transform projection: curve_sample=%u KnownSurface_xyz = (%.3f,%.3f,%.3f) Surface_uv_from_projection = (%.3f,%.3f) Surface_XYZ_from_uv = (%.3f,%.3f,%.3f) (delta=(%.3f,%.3f,%.3f)\n",
                         j, curr_loop->samples[j].x, curr_loop->samples[j].y, curr_loop->samples[j].z, curr_loop->uv_samples[j].x, curr_loop->uv_samples[j].y,
                         test_xyz.x, test_xyz.y, test_xyz.z,
                         curr_loop->samples[j].x - test_xyz.x, curr_loop->samples[j].y - test_xyz.y, curr_loop->samples[j].z - test_xyz.z);
@@ -9274,6 +9471,15 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
         break;
     }
 
+    case PRC_TYPE_SURF_Transform:
+    {
+        prc_surf_transform *transform = surface.surf_transform;
+
+        surf_params.surface_params = (void *)transform;
+        surface_eval_func = prc_evaluate_surf_transform;
+        break;
+    }
+
     default:
         for (j = 0; j < num_loops; j++)
         {
@@ -9385,7 +9591,7 @@ prc_tessellate_surface(prc_context *ctx, prc_data *data, uint32_t shell_index,
             surface.surface_type == PRC_TYPE_SURF_Blend02 || surface.surface_type == PRC_TYPE_SURF_Blend01 ||
             surface.surface_type == PRC_TYPE_SURF_Extrusion || surface.surface_type == PRC_TYPE_SURF_FromCurves ||
             surface.surface_type == PRC_TYPE_SURF_Revolution || surface.surface_type == PRC_TYPE_SURF_Offset ||
-            surface.surface_type == PRC_TYPE_SURF_Cylindrical))
+            surface.surface_type == PRC_TYPE_SURF_Cylindrical || surface.surface_type == PRC_TYPE_SURF_Transform))
     {
         uint32_t num_wrapping = 0;
         uint8_t wrap_axis = 0;
