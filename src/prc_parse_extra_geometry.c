@@ -1192,12 +1192,19 @@ prc_parse_ana_face_trim_loop(prc_context *ctx, prc_bit_state *bit_state,
 /* A vertex loop is "a degenerate line which has identical start and end
    vertices" (the ContentCompressedFace prose). A loop made of a single Line
    can only close if that Line is degenerate, so one Line curve and nothing
-   else identifies one without comparing coordinates. A curve given by
-   reference is resolved through the shared curve table; one that cannot be
-   resolved does not count, so the optional point is never read on a guess. */
+   else identifies one without comparing coordinates.
+
+   The Line must be stored inline. A curve given by reference does not make a
+   vertex loop: its points belong to another face's data, so a reader cannot
+   tell whether it is degenerate. That is the rule proposed as CR-10f on
+   pdf-issues #696, where the reviewing implementer asked for the matching
+   writer constraint ("A vertex loop shall be written inline"). Counting a
+   referenced Line would also depend on the shared curve table, which inline
+   ana-face trim-loop curves are not entered into, so the index could resolve
+   to the wrong curve. */
 static uint8_t
-prc_ana_face_all_loops_are_vertex_loops(prc_nano_brep_compressed_data *compressed_data,
-    const prc_ana_face_trim_loop *loops, uint32_t loop_count)
+prc_ana_face_all_loops_are_vertex_loops(const prc_ana_face_trim_loop *loops,
+    uint32_t loop_count)
 {
     uint32_t k;
 
@@ -1207,27 +1214,16 @@ prc_ana_face_all_loops_are_vertex_loops(prc_nano_brep_compressed_data *compresse
     for (k = 0; k < loop_count; k++)
     {
         const prc_ref_or_compressed_curve *curve;
-        const prc_compressed_curve *resolved;
 
         if (loops[k].curve_count != 1 || loops[k].trim_curves == NULL)
             return 0;
 
         curve = &loops[k].trim_curves[0];
-        if (curve->curve_is_not_already_stored)
-        {
-            resolved = curve->compressed_curve;
-        }
-        else if (curve->index_compressed_curve < compressed_data->curves_capacity &&
-                 compressed_data->curves != NULL)
-        {
-            resolved = compressed_data->curves[curve->index_compressed_curve];
-        }
-        else
-        {
-            resolved = NULL;
-        }
+        if (!curve->curve_is_not_already_stored)
+            return 0;
 
-        if (resolved == NULL || resolved->curve_type != PRC_HCG_Line)
+        if (curve->compressed_curve == NULL ||
+            curve->compressed_curve->curve_type != PRC_HCG_Line)
             return 0;
     }
     return 1;
@@ -1289,8 +1285,7 @@ prc_parse_content_compressed_ana_face(prc_context *ctx, prc_bit_state *bit_state
         }
 
         compressed_data->all_loops_are_vertex_loops =
-            prc_ana_face_all_loops_are_vertex_loops(compressed_data, data->trim_loop,
-                trim_loop_count);
+            prc_ana_face_all_loops_are_vertex_loops(data->trim_loop, trim_loop_count);
         if (compressed_data->all_loops_are_vertex_loops &&
             compressed_data->surface_type_is_prc_hcg_ana_torus)
         {
