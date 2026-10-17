@@ -143,6 +143,8 @@ struct treated_triangle_s
     prc_vec3 points[3];
     int treated_index[3];
     int normal_indices[3];  /* Not used for face case */
+    uint32_t uv_indices[3]; /* Texture pair per corner, in treated_index order,
+                               or PRC_COMPRESSED_TESS_NO_UV */
     int uses_reference;
     uint8_t normal_was_reversed;
     uint8_t face_was_reversed;  /* In vertex mode uses 3x averaging to determine */

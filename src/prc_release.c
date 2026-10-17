@@ -1330,6 +1330,9 @@ prc_release_tess_3d_compressed(prc_context *ctx, prc_tess_3d_compressed *data)
     if (data->uv_coordinates_3d != NULL)
         prc_free(ctx, data->uv_coordinates_3d);
 
+    if (data->uv_indices_prc_compressed_3d != NULL)
+        prc_free(ctx, data->uv_indices_prc_compressed_3d);
+
     if (data->triangle_indices_prc_compressed_3d != NULL)
         prc_free(ctx, data->triangle_indices_prc_compressed_3d);
 

@@ -4721,6 +4721,10 @@ uncompressed_done:
         prc_internal_api_style_state_t initial_style_state;
         uint32_t *prc_vertex_indices = tess->triangle_indices_prc_compressed_3d;
         uint32_t *prc_normal_indices = tess->normal_indices_prc_compressed_3d;
+        /* Per-corner texture pair, or NULL: see uv_indices_prc_compressed_3d */
+        uint32_t *prc_uv_indices =
+            (tess->uv_coordinates_3d != NULL) ? tess->uv_indices_prc_compressed_3d : NULL;
+        uint32_t *first_uv_of_position = NULL;
         int num_prc_vertices = tess->num_vertices_prc_compressed_3d;
         int num_prc_normals = tess->num_normals_prc_compressed_3d;
         prc_internal_api_position_normal_pair *position_normal_pair = NULL, *current;
@@ -4735,6 +4739,7 @@ uncompressed_done:
         uint32_t face_ref_index;
         uint32_t prc_position_index;
         uint32_t prc_normal_index;
+        uint32_t prc_uv_index;
         uint8_t all_tess_has_single_style = false;
         int32_t face_style_file_index;
         /* Set at the vertex_indices cache-lookup site below; gates the
@@ -5027,18 +5032,66 @@ uncompressed_done:
                already computed the normals with the appropriate crease angle. This is
                in contrast to the uncompressed case where we have to still decode the
                indices and build the triangles to be able to compute the normals */
+            /* Texture coordinates belong to triangle corners, not to positions:
+               a position on a texture seam has one pair per side. Each position
+               starts with the pair of its first corner, in the same corner order
+               as the loop further down, so that loop's first encounter of a
+               position always matches it; a later corner with a different pair
+               becomes a new vertex there, as a different normal does. */
+            if (prc_uv_indices != NULL)
+            {
+                first_uv_of_position = (uint32_t *)prc_malloc(ctx,
+                    (size_t)num_prc_vertices * sizeof(uint32_t));
+                if (first_uv_of_position == NULL)
+                {
+                    prc_error(ctx, PRC_API_ERROR_MEMORY,
+                        "Memory allocation failed for first_uv_of_position in compressed branch\n");
+                    prc_free(ctx, position_normal_pair);
+                    if (cache_allocated_here) prc_free(ctx, cache);
+                    code = PRC_API_ERROR_MEMORY;
+                    goto compressed_failure;
+                }
+                /* "Not reached yet" must differ from NO_UV: a position whose
+                   first corner is on an untextured face starts with NO_UV, and
+                   must not be overwritten by a later, textured corner. It was,
+                   and the loop below then took that untextured first corner
+                   as a match for the head entry without comparing pairs, so no
+                   entry ever recorded it and the index lookup ran off the end
+                   of the list (examples/cube.pdf). */
+                const uint32_t not_reached = PRC_COMPRESSED_TESS_NO_UV - 1u;
+
+                for (k = 0; k < num_prc_vertices; k++)
+                    first_uv_of_position[k] = not_reached;
+                for (k = 0; k < num_prc_indices; k++)
+                {
+                    uint32_t position = prc_vertex_indices[k];
+                    if (position < (uint32_t)num_prc_vertices &&
+                        first_uv_of_position[position] == not_reached)
+                        first_uv_of_position[position] = prc_uv_indices[k];
+                }
+                for (k = 0; k < num_prc_vertices; k++)
+                {
+                    if (first_uv_of_position[k] == not_reached)
+                        first_uv_of_position[k] = PRC_COMPRESSED_TESS_NO_UV;
+                }
+            }
+
             for (k = 0; k < num_prc_vertices; k++)
             {
+                uint32_t first_uv = (first_uv_of_position != NULL) ?
+                    first_uv_of_position[k] : PRC_COMPRESSED_TESS_NO_UV;
+
                 prc_api_helper_set_vertex_position(ctx, vertex_out, k, tess, count);
                 count += 3;
+                position_normal_pair[k].prc_texture_index[0] = first_uv;
 
                 // Set UV coordinates if texture data is available
                 // (regardless of face_out->is_texture which may not be set yet)
-                if (tess->uv_coordinates_3d != NULL)
+                if (first_uv != PRC_COMPRESSED_TESS_NO_UV)
                 {
                     // Get raw UV coordinates from compressed tessellation data
-                    double raw_u = tess->uv_coordinates_3d[k * 2];
-                    double raw_v = tess->uv_coordinates_3d[k * 2 + 1];
+                    double raw_u = tess->uv_coordinates_3d[first_uv * 2];
+                    double raw_v = tess->uv_coordinates_3d[first_uv * 2 + 1];
 
                     // Apply transform and V-flip using helper function (correct order: raw -> transform -> flip)
                     // Note: face_out->texture may not be fully initialized yet, but transform should be available
@@ -5064,6 +5117,11 @@ uncompressed_done:
                 prc_api_helper_intialize_position_normal_pair(ctx,
                     position_normal_pair, k, initial_color_state, initial_style_state,
                     face_style_index, face_style_file_index);
+            }
+            if (first_uv_of_position != NULL)
+            {
+                prc_free(ctx, first_uv_of_position);
+                first_uv_of_position = NULL;
             }
 
             /* Publish for reuse by later face_index calls for THIS SAME
@@ -5093,6 +5151,9 @@ uncompressed_done:
 
             /* Get the normal index in the PRC data */
             prc_normal_index = prc_normal_indices[k];
+
+            /* And the corner's texture pair, which splits a vertex like a normal does */
+            prc_uv_index = (prc_uv_indices != NULL) ? prc_uv_indices[k] : PRC_COMPRESSED_TESS_NO_UV;
 
             /* Calculate which triangle we're in */
             uint32_t current_triangle = k / 3;  // Integer division
@@ -5207,7 +5268,8 @@ uncompressed_done:
                 while (current != NULL)
                 {
                     if (current->prc_normal_index == prc_normal_index &&
-                        current->prc_position_index == prc_position_index)
+                        current->prc_position_index == prc_position_index &&
+                        current->prc_texture_index[0] == prc_uv_index)
                     {
                         uint32_t api_vertex_index = current->api_vertex_index;
 
@@ -5359,6 +5421,7 @@ uncompressed_done:
                     prev->next->normal_set = PRC_INTERNAL_API_NORM_SET;
                     prev->next->prc_normal_index = prc_normal_index;
                     prev->next->prc_position_index = prc_position_index;
+                    prev->next->prc_texture_index[0] = prc_uv_index;
                     face_ref_index = tess->triangle_face_array[triangle_count];
 
                     if (face_ref_index >= face_out_reserved->number_of_styles)
@@ -5410,11 +5473,11 @@ uncompressed_done:
                     vertex_out->vertices[vertex_index].normal_set = 1;
 
                     /* Either set the color for the vertex or use a texture or set a style */
-                    if (face_out->is_texture)
+                    if (face_out->is_texture && prc_uv_index != PRC_COMPRESSED_TESS_NO_UV)
                     {
-                        // Get fresh raw UV coordinates for this duplicate
-                        double raw_u = tess->uv_coordinates_3d[prc_position_index * 2];
-                        double raw_v = tess->uv_coordinates_3d[prc_position_index * 2 + 1];
+                        // This corner's own pair: a seam gives the duplicate a different UV
+                        double raw_u = tess->uv_coordinates_3d[prc_uv_index * 2];
+                        double raw_v = tess->uv_coordinates_3d[prc_uv_index * 2 + 1];
 
                         prc_internal_api_set_vertex_texture_coords(ctx, &vertex_out->vertices[vertex_index],
                             raw_u, raw_v, face_out->texture.transform, face_out->texture.has_transform);
@@ -5515,11 +5578,27 @@ uncompressed_done:
                 /* Get the normal index in the PRC data */
                 uint32_t prc_normal_index = prc_normal_indices[k];
 
+                /* And the corner's texture pair */
+                uint32_t corner_uv_index =
+                    (prc_uv_indices != NULL) ? prc_uv_indices[k] : PRC_COMPRESSED_TESS_NO_UV;
+
                 /* Find the position in the position_normal_pair list */
                 current = &position_normal_pair[prc_position_index];
-                while (current->prc_normal_index != prc_normal_index)
+                while (current != NULL &&
+                       (current->prc_normal_index != prc_normal_index ||
+                        current->prc_texture_index[0] != corner_uv_index))
                 {
                     current = current->next;
+                }
+                if (current == NULL)
+                {
+                    /* Every corner was given a list entry by the loop above,
+                       so this is an internal inconsistency, not bad input */
+                    prc_error(ctx, PRC_API_ERROR_PARSER,
+                        "No vertex for position %u normal %u texture pair %u in compressed branch\n",
+                        prc_position_index, prc_normal_index, corner_uv_index);
+                    code = PRC_API_ERROR_PARSER;
+                    goto compressed_failure;
                 }
 
                 /* Now we have the correct position and normal index.  We can get the

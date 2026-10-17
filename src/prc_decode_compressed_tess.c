@@ -473,7 +473,8 @@ prc_compute_first_triangle(prc_context *ctx, const prc_tess_3d_compressed *data,
 
 static void
 prc_store_triangle_indices(prc_context *ctx, treated_triangle *treated_tri,
-    uint32_t *triangle_indices, uint32_t *vertex_normal_indices, int *triangle_indice_count)
+    uint32_t *triangle_indices, uint32_t *vertex_normal_indices, uint32_t *uv_indices,
+    int *triangle_indice_count)
 {
     if (treated_tri->normal_was_reversed)
     {
@@ -484,6 +485,13 @@ prc_store_triangle_indices(prc_context *ctx, treated_triangle *treated_tri,
         vertex_normal_indices[*triangle_indice_count] = treated_tri->normal_indices[0];
         vertex_normal_indices[*triangle_indice_count + 1] = treated_tri->normal_indices[1];
         vertex_normal_indices[*triangle_indice_count + 2] = treated_tri->normal_indices[2];
+
+        if (uv_indices != NULL)
+        {
+            uv_indices[*triangle_indice_count] = treated_tri->uv_indices[0];
+            uv_indices[*triangle_indice_count + 1] = treated_tri->uv_indices[1];
+            uv_indices[*triangle_indice_count + 2] = treated_tri->uv_indices[2];
+        }
     }
     else
     {
@@ -494,6 +502,13 @@ prc_store_triangle_indices(prc_context *ctx, treated_triangle *treated_tri,
         vertex_normal_indices[*triangle_indice_count] = treated_tri->normal_indices[0];
         vertex_normal_indices[*triangle_indice_count + 1] = treated_tri->normal_indices[2];
         vertex_normal_indices[*triangle_indice_count + 2] = treated_tri->normal_indices[1];
+
+        if (uv_indices != NULL)
+        {
+            uv_indices[*triangle_indice_count] = treated_tri->uv_indices[0];
+            uv_indices[*triangle_indice_count + 1] = treated_tri->uv_indices[2];
+            uv_indices[*triangle_indice_count + 2] = treated_tri->uv_indices[1];
+        }
     }
 
     DEBUG_LOG("\ntreatment [%d, %d, %d]\n", triangle_indices[*triangle_indice_count],
@@ -2282,6 +2297,222 @@ prc_diag_track_hop_depth(int32_t *hop_depth, const int treated_index[3])
     }
 }
 
+/* Texture coordinates of a compressed tessellation (CompressedTextureParameter
+   and BinaryTextureData), decoded per triangle corner during the traversal.
+
+   Each corner of a TEXTURED face, taken in traversal order (treated_index[0..2]
+   of each triangle, before the winding swap), consumes one bit of
+   texture_binary_data. A clear bit means the corner takes the next fresh (u,v)
+   pair from texture_parameters. A set bit means it reuses a pair already stored
+   on the same vertex, and the next value of reference_array says which: its
+   index among the pairs stored on that vertex, counting from the first stored.
+   Corners of untextured faces consume nothing.
+
+   None of this is stated fully by ISO 14739-1. It was measured on the prc-db
+   collection (6,824 textured entities in 64 files, October 2026):
+   - the bits run least significant first through the stored bytes; every
+     entity balances exactly under that order, and the other three orders
+     produce references to vertices that have no pair yet;
+   - reference_array_size + texture_parameters_size / 2 equals the number of
+     textured corners on every entity;
+   - "counting from the first" is the reading under which seams stay
+     continuous; counting back from the latest, as compressed normals do,
+     tears them. It is the best supported reading, not a proven one.
+
+   The previous reading took pair k as the UV of vertex k. That agrees with
+   this one until a vertex carries a second pair at a texture seam, after
+   which every later vertex was given its neighbour's UV.
+
+   A block that does not decode consistently is dropped, leaving the geometry
+   untextured, rather than producing coordinates known to be wrong. */
+typedef struct
+{
+    uint8_t active;
+    const uint8_t *bits;
+    uint32_t num_bits;
+    uint32_t bit_cursor;
+    const uint32_t *refs;
+    uint32_t num_refs;
+    uint32_t ref_cursor;
+    uint32_t num_pairs;
+    uint32_t fresh_cursor;
+    uint32_t num_vertices;
+    uint32_t *first_pair;     /* per vertex: first pair stored, or NO_UV */
+    uint32_t *pair_count;     /* per vertex: number of pairs stored */
+    uint32_t **more_pairs;    /* per vertex: pairs 2.. (rare: seam vertices only) */
+    uint32_t *more_capacity;
+} prc_compressed_texture_state;
+
+static void
+prc_compressed_texture_state_free(prc_context *ctx, prc_compressed_texture_state *st)
+{
+    uint32_t v;
+
+    if (st->more_pairs != NULL)
+    {
+        for (v = 0; v < st->num_vertices; v++)
+        {
+            if (st->more_pairs[v] != NULL)
+                prc_free(ctx, st->more_pairs[v]);
+        }
+        prc_free(ctx, st->more_pairs);
+    }
+    if (st->more_capacity != NULL)
+        prc_free(ctx, st->more_capacity);
+    if (st->pair_count != NULL)
+        prc_free(ctx, st->pair_count);
+    if (st->first_pair != NULL)
+        prc_free(ctx, st->first_pair);
+    memset(st, 0, sizeof(*st));
+}
+
+/* Leaves st->active 0 when the entity has no usable texture block. */
+static int
+prc_compressed_texture_state_init(prc_context *ctx, prc_tess_3d_compressed *data,
+    prc_compressed_texture_state *st, uint32_t num_vertices)
+{
+    prc_compressed_texture_parameter *td = data->texture_data;
+    uint32_t v;
+
+    memset(st, 0, sizeof(*st));
+    if (data->no_texture || td == NULL || td->binary_texture_data == NULL ||
+        td->binary_texture_data->texture_binary_data == NULL ||
+        td->texture_parameters == NULL || td->texture_parameters_size < 2 ||
+        num_vertices == 0)
+        return 0;
+
+    st->bits = td->binary_texture_data->texture_binary_data;
+    st->num_bits = td->binary_texture_data->texture_binary_data_size * 32u;
+    st->refs = td->reference_array;
+    st->num_refs = (td->reference_array != NULL) ? td->reference_array_size : 0;
+    st->num_pairs = td->texture_parameters_size / 2u;
+    st->num_vertices = num_vertices;
+
+    st->first_pair = (uint32_t *)prc_malloc(ctx, (size_t)num_vertices * sizeof(uint32_t));
+    st->pair_count = (uint32_t *)prc_calloc(ctx, num_vertices, sizeof(uint32_t));
+    st->more_pairs = (uint32_t **)prc_calloc(ctx, num_vertices, sizeof(uint32_t *));
+    st->more_capacity = (uint32_t *)prc_calloc(ctx, num_vertices, sizeof(uint32_t));
+    if (st->first_pair == NULL || st->pair_count == NULL || st->more_pairs == NULL ||
+        st->more_capacity == NULL)
+    {
+        prc_compressed_texture_state_free(ctx, st);
+        prc_error(ctx, PRC_ERROR_MEMORY, "Failed to allocate texture state in prc_decode_compressed_tess\n");
+        return PRC_ERROR_MEMORY;
+    }
+    for (v = 0; v < num_vertices; v++)
+        st->first_pair[v] = PRC_COMPRESSED_TESS_NO_UV;
+    st->active = 1;
+    return 0;
+}
+
+static int
+prc_compressed_texture_store_pair(prc_context *ctx, prc_compressed_texture_state *st,
+    uint32_t vertex, uint32_t pair)
+{
+    uint32_t n = st->pair_count[vertex];
+
+    if (n == 0)
+    {
+        st->first_pair[vertex] = pair;
+    }
+    else
+    {
+        if (n - 1 == st->more_capacity[vertex])
+        {
+            uint32_t new_capacity = (st->more_capacity[vertex] == 0) ? 2 : st->more_capacity[vertex] * 2;
+            uint32_t *grown = (uint32_t *)prc_realloc(ctx, st->more_pairs[vertex],
+                (size_t)new_capacity * sizeof(uint32_t));
+            if (grown == NULL)
+            {
+                prc_error(ctx, PRC_ERROR_MEMORY, "Failed to grow texture state in prc_decode_compressed_tess\n");
+                return PRC_ERROR_MEMORY;
+            }
+            st->more_pairs[vertex] = grown;
+            st->more_capacity[vertex] = new_capacity;
+        }
+        st->more_pairs[vertex][n - 1] = pair;
+    }
+    st->pair_count[vertex] = n + 1;
+    return 0;
+}
+
+static uint8_t
+prc_compressed_texture_face_is_textured(prc_tess_3d_compressed *data, uint32_t triangle_index)
+{
+    uint32_t face;
+
+    if (data->all_faces_have_texture || data->face_has_texture == NULL)
+        return 1;
+    if (data->triangle_face_array == NULL || triangle_index >= data->triangle_face_array_size)
+        return 0;
+    face = data->triangle_face_array[triangle_index];
+    if (face >= data->face_number)
+        return 0;
+    return data->face_has_texture[face] != 0;
+}
+
+/* Sets treated_tri->uv_indices for one triangle. Returns < 0 only on an
+   allocation failure; an inconsistent block just deactivates st. */
+static int
+prc_compressed_texture_decode_triangle(prc_context *ctx, prc_tess_3d_compressed *data,
+    prc_compressed_texture_state *st, treated_triangle *treated_tri, uint32_t triangle_index)
+{
+    int c, code;
+
+    treated_tri->uv_indices[0] = PRC_COMPRESSED_TESS_NO_UV;
+    treated_tri->uv_indices[1] = PRC_COMPRESSED_TESS_NO_UV;
+    treated_tri->uv_indices[2] = PRC_COMPRESSED_TESS_NO_UV;
+    if (!st->active || !prc_compressed_texture_face_is_textured(data, triangle_index))
+        return 0;
+
+    for (c = 0; c < 3; c++)
+    {
+        int vertex = treated_tri->treated_index[c];
+        uint8_t is_reference;
+
+        if (vertex < 0 || (uint32_t)vertex >= st->num_vertices || st->bit_cursor >= st->num_bits)
+        {
+            st->active = 0;
+            return 0;
+        }
+        is_reference = (st->bits[st->bit_cursor >> 3] >> (st->bit_cursor & 7)) & 1;
+        st->bit_cursor++;
+
+        if (!is_reference)
+        {
+            if (st->fresh_cursor >= st->num_pairs)
+            {
+                st->active = 0;
+                return 0;
+            }
+            code = prc_compressed_texture_store_pair(ctx, st, (uint32_t)vertex, st->fresh_cursor);
+            if (code < 0)
+                return code;
+            treated_tri->uv_indices[c] = st->fresh_cursor;
+            st->fresh_cursor++;
+        }
+        else
+        {
+            uint32_t which;
+
+            if (st->ref_cursor >= st->num_refs)
+            {
+                st->active = 0;
+                return 0;
+            }
+            which = st->refs[st->ref_cursor++];
+            if (which >= st->pair_count[vertex])
+            {
+                st->active = 0;
+                return 0;
+            }
+            treated_tri->uv_indices[c] = (which == 0) ? st->first_pair[vertex] :
+                st->more_pairs[vertex][which - 1];
+        }
+    }
+    return 0;
+}
+
 /* This handles all the cases. With and without faces, calculating normals or
    just decoding normals */
 int
@@ -2343,6 +2574,10 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
 	uint8_t *face_encountered = NULL;
 	uint32_t *triangle_style_array = NULL;
     uint32_t style_index = 0;
+    prc_compressed_texture_state texture_state;
+    uint32_t *uv_indices = NULL;
+
+    memset(&texture_state, 0, sizeof(texture_state));
 
     /* Initially set the edge_list to be of size that is half the number of
        points since we will be referencing by the smallest index */
@@ -2489,6 +2724,21 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         code = PRC_ERROR_MEMORY;
         prc_error(ctx, code, "Failed to allocate vertices_out in prc_decode_compressed_tess\n");
         goto cleanup;
+    }
+
+    /* Texture coordinates, one per corner (see prc_compressed_texture_state) */
+    code = prc_compressed_texture_state_init(ctx, data, &texture_state, (uint32_t)num_points);
+    if (code < 0)
+        goto cleanup;
+    if (texture_state.active)
+    {
+        uv_indices = (uint32_t *)prc_malloc(ctx, (size_t)num_triangles * 3 * sizeof(uint32_t));
+        if (uv_indices == NULL)
+        {
+            code = PRC_ERROR_MEMORY;
+            prc_error(ctx, code, "Failed to allocate uv_indices in prc_decode_compressed_tess\n");
+            goto cleanup;
+        }
     }
 
     /* PROBE (2026-08-06, PRC_DIAG_DUMP_HOP_DEPTH=<path>): read-side counterpart to the
@@ -2681,9 +2931,13 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
         goto cleanup;
     }
 
+    code = prc_compressed_texture_decode_triangle(ctx, data, &texture_state, &treated_tri, 0);
+    if (code < 0)
+        goto cleanup;
+
     /* Store the triangle vertex indices and the normal indices (should be 0, 1, 2) */
     prc_store_triangle_indices(ctx, &treated_tri, triangle_indices,
-                                    vertex_normal_indices, &triangle_indice_count);
+                                    vertex_normal_indices, uv_indices, &triangle_indice_count);
 
 	if (has_faces)
 	{
@@ -2998,9 +3252,14 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
             goto cleanup;
         }
 
+        code = prc_compressed_texture_decode_triangle(ctx, data, &texture_state, &treated_tri,
+                                                      (uint32_t)k);
+        if (code < 0)
+            goto cleanup;
+
         /* Store the triangle vertex indices and the normal indices */
         prc_store_triangle_indices(ctx, &treated_tri, triangle_indices,
-                                        vertex_normal_indices, &triangle_indice_count);
+                                        vertex_normal_indices, uv_indices, &triangle_indice_count);
 
         if (has_faces)
         {
@@ -3031,6 +3290,16 @@ prc_decode_compressed_tess(prc_context *ctx, prc_tess_3d_compressed *data, uint8
 
     data->triangle_indices_prc_compressed_3d = triangle_indices;
     data->normal_indices_prc_compressed_3d = vertex_normal_indices;
+
+    /* Publish the per-corner texture indices only if the whole block decoded
+       consistently: every reference and fresh pair used, none left over. */
+    if (uv_indices != NULL && texture_state.active &&
+        texture_state.fresh_cursor == texture_state.num_pairs &&
+        texture_state.ref_cursor == texture_state.num_refs)
+    {
+        data->uv_indices_prc_compressed_3d = uv_indices;
+        uv_indices = NULL;
+    }
     data->num_triangle_indices_prc_compressed_3d = num_triangles * 3;
     data->num_normal_indices_prc_compressed_3d = num_triangles * 3;
     data->num_normals_prc_compressed_3d = number_of_normals;
@@ -3276,6 +3545,9 @@ cleanup:
     prc_free(ctx, normals_vertex);
     prc_free(ctx, point_array_scaled);
     prc_free(ctx, vertices_out);
+    if (uv_indices != NULL)
+        prc_free(ctx, uv_indices);
+    prc_compressed_texture_state_free(ctx, &texture_state);
     if (hop_depth != NULL)
         prc_free(ctx, hop_depth);
     if (tri_is_ref != NULL)

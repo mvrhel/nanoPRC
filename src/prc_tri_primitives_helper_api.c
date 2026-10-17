@@ -206,7 +206,7 @@ prc_api_helper_set_vertex_style_from_face_ref(prc_context *ctx,
     prc_internal_graph_style *style = &face_out_reserved->style[face_index];
     uint8_t is_material = style->is_material;
 
-    /* This face is styled by a material rather than a texture, so the vertex
+    /* If this face is styled by a material rather than a texture, the vertex
        has no texture coordinates. Clearing the flag alone used to leave the
        coordinates behind, and they are not harmless leftovers: the compressed
        path sets UVs on every vertex when the tessellation carries UV data,
@@ -219,10 +219,19 @@ prc_api_helper_set_vertex_style_from_face_ref(prc_context *ctx,
        vertices carried a non-zero uv[] with uv_set clear, and every sampled
        one was exactly (0,1). A consumer that honours uv_set is unaffected --
        the flag was always right -- but one that reads uv[] without checking
-       gets a coordinate that looks real. Clear both, so the two agree. */
-    vertex_out->vertices[vertex_out_pos].uv_set = 0;
-    vertex_out->vertices[vertex_out_pos].uv[0] = 0.0f;
-    vertex_out->vertices[vertex_out_pos].uv[1] = 0.0f;
+       gets a coordinate that looks real. Clear both, so the two agree.
+
+       A face whose style IS a texture keeps its coordinates. This used to
+       clear them for every face styled from the reference data, textured or
+       not, which stripped the UVs from 166,923 of the 187,920 textured-face
+       corners of 3D-PDF-Sample-Carburetor (prc-db): the face reported
+       is_texture while its vertices reported no coordinates. */
+    if (style->material_type != PRC_TYPE_GRAPH_TextureApplication)
+    {
+        vertex_out->vertices[vertex_out_pos].uv_set = 0;
+        vertex_out->vertices[vertex_out_pos].uv[0] = 0.0f;
+        vertex_out->vertices[vertex_out_pos].uv[1] = 0.0f;
+    }
 
     position_normal_pair->style_set = PRC_INTERNAL_API_STYLE_SET_FROM_REF_DATA;
     position_normal_pair->style_index = face_out_reserved->style[face_index].face_style_index;

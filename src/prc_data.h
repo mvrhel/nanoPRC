@@ -433,16 +433,33 @@ typedef enum {
     PRC_texture_mapping_operator_cubic
 } PRC_texture_mapping_operator_t;
 
-/* Texture mapping attributes: 07-base-entities.adoc:1253. A bit mask, and its
-   values already match the table. */
+/* Texture mapping attributes: 07-base-entities.adoc:1176, the
+   PRC_TEXTURE_MAPPING bit field. A bit mask of the procedures that apply the
+   texture: a diffuse map, or a reflection map, among others. */
 typedef enum {
-    PRC_texture_mapping_attributes_red = 0x1,
-    PRC_texture_mapping_attributes_green = 0x2,
-    PRC_texture_mapping_attributes_blue = 0x4,
-    PRC_texture_mapping_attributes_rgb = 0x7,
-    PRC_texture_mapping_attributes_alpha = 0x8,
-    PRC_texture_mapping_attributes_rgba = 0xf
+    PRC_texture_mapping_attributes_diffuse = 0x1,
+    PRC_texture_mapping_attributes_bump = 0x2,
+    PRC_texture_mapping_attributes_opacity = 0x4,
+    PRC_texture_mapping_attributes_spherical_reflection = 0x8,
+    PRC_texture_mapping_attributes_cubical_reflection = 0x10,
+    PRC_texture_mapping_attributes_refraction = 0x20,
+    PRC_texture_mapping_attributes_specular = 0x40,
+    PRC_texture_mapping_attributes_ambient = 0x80,
+    PRC_texture_mapping_attributes_emission = 0x100
 } PRC_texture_mapping_attributes_t;
+
+/* Texture mapping attributes components: 07-base-entities.adoc:1253. The
+   colour components each procedure uses, one entry per set bit of the
+   attributes above. This table was once taken for the attributes field
+   itself; its first column is headed "Texture mapping attributes". */
+typedef enum {
+    PRC_texture_mapping_components_red = 0x1,
+    PRC_texture_mapping_components_green = 0x2,
+    PRC_texture_mapping_components_blue = 0x4,
+    PRC_texture_mapping_components_rgb = 0x7,
+    PRC_texture_mapping_components_alpha = 0x8,
+    PRC_texture_mapping_components_rgba = 0xf
+} PRC_texture_mapping_components_t;
 
 /* Texture function: 07-base-entities.adoc:1266 */
 typedef enum {
@@ -2139,6 +2156,9 @@ struct prc_compressed_texture_parameter_s
     float *texture_parameters;
 };
 
+/* uv_indices_prc_compressed_3d value for a corner that has no texture coordinate */
+#define PRC_COMPRESSED_TESS_NO_UV 0xFFFFFFFFu
+
 /* Table 174 PRC_TYPE_TESS_3D_COMPRESSED Description of the Data Written to the File */
 struct prc_tess_3d_compressed_s
 {
@@ -2189,7 +2209,15 @@ struct prc_tess_3d_compressed_s
     uint8_t *behaviors_array;
 
     /* Uncompressed data */
-    float *uv_coordinates_3d;  /* 2D texture coordinates */
+    float *uv_coordinates_3d;  /* 2D texture coordinates: the pool of (u,v) pairs
+                                  from texture_parameters, indexed by
+                                  uv_indices_prc_compressed_3d, NOT by vertex */
+    /* One entry per triangle corner, parallel to triangle_indices_prc_compressed_3d:
+       the (u,v) pair in uv_coordinates_3d for that corner, or
+       PRC_COMPRESSED_TESS_NO_UV for a corner of an untextured face. NULL when the
+       entity carries no texture, or when its texture block could not be decoded
+       consistently (the geometry is kept, untextured). */
+    uint32_t *uv_indices_prc_compressed_3d;
     int num_triangle_indices_prc_compressed_3d;
     uint32_t *triangle_indices_prc_compressed_3d;
     int num_normal_indices_prc_compressed_3d;
